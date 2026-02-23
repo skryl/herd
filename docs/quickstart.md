@@ -32,6 +32,10 @@ Inspect herd state:
 cargo run -- herd list
 ```
 
+## TUI At A Glance
+
+![Herd TUI Overview](screenshots/tui_overview.png)
+
 ## First Boot Files
 
 By default, herd writes all config/state under `~/.config/herd`:

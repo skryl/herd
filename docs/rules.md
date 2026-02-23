@@ -76,3 +76,7 @@ LLM rule:
 - `finished` panes are never nudged.
 - Low-confidence states are suppressed by config threshold.
 - Verbose herder logs are emitted for rule start, match, skip, and dispatch decisions.
+
+## Herder Log Example
+
+![Herder Log Filtered By Herd](screenshots/tui_herder_log_filter.png)

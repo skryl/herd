@@ -56,6 +56,10 @@ Environment variables:
 }
 ```
 
+## Settings Overlay Preview
+
+![Settings Overlay](screenshots/tui_settings_overlay.png)
+
 ## Notes
 
 - Herd count default is `5`.

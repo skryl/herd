@@ -21,6 +21,7 @@ export TEMP="$runtime_dir"
 cd "$runtime_dir"
 
 tier="${HERD_TEST_TIER:-full}"
+capture_doc_screenshots="${HERD_CAPTURE_DOC_SCREENSHOTS:-0}"
 declare -a cargo_args=()
 
 while [ "$#" -gt 0 ]; do
@@ -44,12 +45,26 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+run_doc_screenshot_capture() {
+  case "$capture_doc_screenshots" in
+    1|true|TRUE|True|yes|YES|Yes)
+      "$repo_root/scripts/capture-doc-screenshots.sh"
+      ;;
+    *)
+      ;;
+  esac
+}
+
 if [ "${#cargo_args[@]}" -gt 0 ]; then
-  exec cargo test --manifest-path "$manifest_path" "${cargo_args[@]}"
+  cargo test --manifest-path "$manifest_path" "${cargo_args[@]}"
+  run_doc_screenshot_capture
+  exit 0
 fi
 
 if [ "$tier" = "full" ]; then
-  exec cargo test --manifest-path "$manifest_path" --tests
+  cargo test --manifest-path "$manifest_path" --tests
+  run_doc_screenshot_capture
+  exit 0
 fi
 
 if [ "$tier" = "fast" ]; then
@@ -69,6 +84,7 @@ if [ "$tier" = "fast" ]; then
     echo "running integration target: $target"
     cargo test --manifest-path "$manifest_path" --test "$target"
   done
+  run_doc_screenshot_capture
   exit 0
 fi
 

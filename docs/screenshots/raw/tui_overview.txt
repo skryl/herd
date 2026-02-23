@@ -1,0 +1,52 @@
+╭ Sessions ───────────────────────────────────────────────────╮╭ Content (alpha/0:plan) ───────────────────────────────────────────────────────────────────────────────────────────╮
+│  server (online)                                            ││$ codex                                                                                                           ▲│
+│    session: alpha                                           ││Planning phased refactor...                                                                                       █│
+│      window 0:plan                                          ││Gathering context...█                                                                                             █│
+│▸       0:1  codex   (running)  h:0  [unknown]               ││                                                                                                                  █│
+│    session: beta                                            ││                                                                                                                  █│
+│      window 0:review                                        ││                                                                                                                  █│
+│        0:2  shell   (waiting)  h:1  [unknown]               ││                                                                                                                  █│
+│    session: gamma                                           ││                                                                                                                  █│
+│      window 1:logs                                          ││                                                                                                                  █│
+│        1:3  claude  (stalled)  h:2  [unknown]               ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│                                                             ││                                                                                                                  █│
+│[j/k] move  [g/G] first/last  [0-4] assign herd  [-] clear   ││                                                                                                                  █│
+╰─────────────────────────────────────────────────────────────╯│                                                                                                                  █│
+╭ Herds ──────────────────────────────────────────────────────╮│                                                                                                                  █│
+│▸ 0  Balanced       1 sessions                               ││                                                                                                                  █│
+│  1  Balanced       1 sessions                               ││                                                                                                                  █│
+│  2  Balanced       1 sessions                               ││                                                                                                                  █│
+│  3  Balanced       0 sessions                               ││                                                                                                                  █│
+│  4  Balanced       0 sessions                               ││                                                                                                                  ▼│
+│                                                             ││[i] input mode  [j/k] scroll  [u/d] page up/down  [g/G] top/bottom                                                 │
+│                                                             │╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                             │╭ Herder Log (all) ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                             ││[0][09:19:00] rule_start id=default_nudge type=regex                                                              ▲│
+│                                                             ││[0][09:19:00] rule_match id=default_nudge command=continue                                                        █│
+│[j/k] move  [g/G] first/last  [e] cycle mode                 ││[1][09:19:00] cycle_end matched=false                                                                             █│
+╰─────────────────────────────────────────────────────────────╯│[2][09:19:00] dispatch_ok pane=%3                                                                                 █│
+╭ Details ────────────────────────────────────────────────────╮│                                                                                                                  █│
+│process     codex                                            ││                                                                                                                  █│
+│status      running                                          ││                                                                                                                  █│
+│source      codex app-server                                 ││                                                                                                                  █│
+│agent       codex                                            ││                                                                                                                  █│
+│herd        0 (Balanced)                                     ││                                                                                                                  █│
+│session     alpha                                            ││                                                                                                                  █│
+│window      0:plan                                           ││                                                                                                                  ▼│
+│[enter/t] toggle herd  [y/n] herd on/off  [0-4] assign  [-] c││[j/k] scroll  [u/d] page up/down  [g/G] top/bottom  [0-9] filter  [a/-] all  (all)                                 │
+╰─────────────────────────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ herd  |  pane: sessions  |  mode: command  |  selected: alpha / 0:plan / pane 0  | sourc[H/J/K/L] panes  [h/l] left/right  [i] input  [,] settings  [0-9] herd  [-] clear  [q] quit

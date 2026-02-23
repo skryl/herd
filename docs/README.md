@@ -9,6 +9,7 @@ This directory contains detailed documentation for operating and developing `her
 - [TUI Guide and Keybindings](tui.md)
 - [Configuration](configuration.md)
 - [Herd Modes and Rule Engine](rules.md)
+- [Screenshots](screenshots/README.md)
 - [Docker Workflows](docker.md)
 - [Testing](testing.md)
 
@@ -17,6 +18,7 @@ This directory contains detailed documentation for operating and developing `her
 1. [Quickstart](quickstart.md)
 2. [Configuration](configuration.md)
 3. [TUI Guide and Keybindings](tui.md)
-4. [Herd Modes and Rule Engine](rules.md)
-5. [Docker Workflows](docker.md)
-6. [Testing](testing.md)
+4. [Screenshots](screenshots/README.md)
+5. [Herd Modes and Rule Engine](rules.md)
+6. [Docker Workflows](docker.md)
+7. [Testing](testing.md)

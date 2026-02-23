@@ -10,6 +10,8 @@
   - Content pane (selected pane output)
   - Herder Log pane (always visible)
 
+![TUI Overview](screenshots/tui_overview.png)
+
 ## Core Behavior
 
 - Agent status is tracked for `claude*`, `codex*`, and `tmux` command panes.
@@ -27,6 +29,8 @@ In the content pane:
 - `Shift+Enter` sends the full buffer to tmux.
 - `Ctrl+S` is a send fallback.
 - `Esc` exits input mode.
+
+![Input Mode Draft Buffer](screenshots/tui_input_mode.png)
 
 ## Keybindings
 
@@ -72,6 +76,8 @@ Herder Log pane:
 - `0-9`: filter to one herd
 - `a` or `-`: clear filter
 
+![Herder Log Filter](screenshots/tui_herder_log_filter.png)
+
 ## Settings Overlay
 
 Settings currently support:
@@ -81,3 +87,5 @@ Settings currently support:
 - Provider + model selection
 - Herd modes list (add/remove/rename/select)
 - Rule file editing for selected herd mode
+
+![Settings Overlay](screenshots/tui_settings_overlay.png)

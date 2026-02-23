@@ -10,6 +10,7 @@
 - [TUI Guide and Keybindings](docs/tui.md)
 - [Configuration](docs/configuration.md)
 - [Herd Modes and Rule Engine](docs/rules.md)
+- [Screenshots](docs/screenshots/README.md)
 - [Docker Workflows](docs/docker.md)
 - [Testing](docs/testing.md)
 
