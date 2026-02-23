@@ -1,0 +1,49 @@
+# Testing
+
+## Local Test Commands
+
+Run all tests:
+
+```bash
+cargo test --tests
+```
+
+Run a single integration target:
+
+```bash
+cargo test --test tui_app
+```
+
+## Scripted Test Runner
+
+Run full test tier:
+
+```bash
+./scripts/run-integration-tests.sh --tier full
+```
+
+Run fast test tier:
+
+```bash
+./scripts/run-integration-tests.sh --tier fast
+```
+
+Run custom cargo args through the script:
+
+```bash
+./scripts/run-integration-tests.sh --test integration_tmux_runtime -- --nocapture
+```
+
+## Docker Test Runner
+
+Run the same tests in the containerized environment:
+
+```bash
+./scripts/run-docker-integration-tests.sh
+```
+
+Fast tier in container:
+
+```bash
+./scripts/run-docker-integration-tests.sh --tier fast
+```

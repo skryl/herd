@@ -2,7 +2,7 @@
 
 ## Status
 
-In Progress
+Completed (2026-02-23, superseded by subsequent herd PRDs)
 
 ## Date
 
@@ -272,12 +272,12 @@ If any gate cannot run locally, document exact command and blocker in PR notes.
 ## Implementation Checklist
 
 - [x] Phase 0 complete (bootstrap + contracts)
-- [ ] Phase 1 complete (tmux discovery/model)
-- [ ] Phase 2 complete (status classifier)
-- [ ] Phase 3 complete (split-pane TUI + vim keys)
-- [ ] Phase 4 complete (herding rule v1 + injection guards)
-- [ ] Phase 5 complete (config/resilience/docs)
-- [ ] Unit tests green for touched modules
-- [ ] Integration tests green for tmux boundaries
-- [ ] E2E/runtime smoke checks complete
-- [ ] PRD status updated to reflect actual completion state
+- [x] Phase 1 complete (tmux discovery/model)
+- [x] Phase 2 complete (status classifier)
+- [x] Phase 3 complete (split-pane TUI + vim keys)
+- [x] Phase 4 complete (herding rule v1 + injection guards)
+- [x] Phase 5 complete (config/resilience/docs)
+- [x] Unit tests green for touched modules
+- [x] Integration tests green for tmux boundaries
+- [x] E2E/runtime smoke checks complete
+- [x] PRD status updated to reflect actual completion state

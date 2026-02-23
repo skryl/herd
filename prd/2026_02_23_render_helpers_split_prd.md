@@ -2,7 +2,7 @@
 
 ## Status
 
-In Progress
+Completed (2026-02-23)
 
 ## Context
 
@@ -99,9 +99,9 @@ Exit criteria:
 ## Implementation Checklist
 
 - [x] Phase 1 baseline captured
-- [ ] Phase 2 `render_text_utils` extracted and rewired
-- [ ] Phase 3 `cargo test --test tui_app` green
-- [ ] Phase 3 `cargo test --tests` green
-- [ ] Phase 3 `./scripts/run-integration-tests.sh --tier fast` green
-- [ ] Phase 3 `./scripts/run-integration-tests.sh --tier full` green
-- [ ] PRD status updated to Completed with date
+- [x] Phase 2 `render_text_utils` extracted and rewired
+- [x] Phase 3 `cargo test --test tui_app` green
+- [x] Phase 3 `cargo test --tests` green
+- [x] Phase 3 `./scripts/run-integration-tests.sh --tier fast` green
+- [x] Phase 3 `./scripts/run-integration-tests.sh --tier full` green
+- [x] PRD status updated to Completed with date
