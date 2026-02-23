@@ -2,6 +2,7 @@
 import argparse
 import pathlib
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 DEFAULT_BG = (11, 18, 32)
 DEFAULT_FG = (220, 230, 245)
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 @dataclass
@@ -265,6 +267,25 @@ def parse_ansi_lines(text: str, width: int, height: int) -> List[List[Tuple[str,
     return lines
 
 
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
+def quantize_frames_for_gif(images: List[Image.Image]) -> List[Image.Image]:
+    if not images:
+        return []
+    # Use per-frame adaptive palettes to preserve sparse accent colors.
+    return [
+        image.convert("RGB").convert(
+            "P",
+            palette=Image.ADAPTIVE,
+            colors=255,
+            dither=Image.FLOYDSTEINBERG,
+        )
+        for image in images
+    ]
+
+
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
         "/System/Library/Fonts/SFNSMono.ttf",
@@ -418,7 +439,7 @@ def main() -> int:
 
     herd_bin = ensure_herd_binary(repo_root)
     sock = f"herd_ux_{random.randint(10000, 99999)}"
-    shell_cmd = "env -u TMOUT bash --noprofile --norc -i"
+    shell_cmd = "env -u TMOUT -u NO_COLOR bash --noprofile --norc -i"
     target = "herd_ui:ui"
     frames: List[FrameState] = []
     font = load_font(args.font_size)
@@ -426,6 +447,8 @@ def main() -> int:
     try:
         # Seed worker sessions similar to integration tests.
         tmux(sock, "new-session", "-d", "-x", "220", "-y", "60", "-s", "alpha", "-n", "plan", shell_cmd)
+        # Ensure UI runs with a color-capable terminal profile inside this isolated tmux server.
+        tmux(sock, "set-option", "-g", "default-terminal", "tmux-256color")
         tmux(sock, "new-window", "-t", "alpha", "-n", "build", shell_cmd)
         tmux(sock, "new-session", "-d", "-x", "220", "-y", "60", "-s", "beta", "-n", "review", shell_cmd)
         tmux(sock, "new-session", "-d", "-x", "220", "-y", "60", "-s", "gamma", "-n", "logs", shell_cmd)
@@ -450,6 +473,10 @@ def main() -> int:
             "-n",
             "ui",
             "env",
+            "-u",
+            "NO_COLOR",
+            "COLORTERM=truecolor",
+            "CLICOLOR_FORCE=1",
             f"HERD_CONFIG={config_path}",
             f"HERD_STATE={state_path}",
             str(herd_bin),
@@ -463,7 +490,8 @@ def main() -> int:
         ready = False
         while time.time() < deadline:
             snap = capture_ansi(sock, target, 120)
-            if "Sessions" in snap and "server (online)" in snap:
+            snap_plain = strip_ansi(snap)
+            if "Sessions" in snap_plain and "server (online)" in snap_plain:
                 ready = True
                 break
             time.sleep(0.2)
@@ -521,8 +549,9 @@ def main() -> int:
         if not frames:
             raise RuntimeError("no frames captured for herd ux gif")
 
-        base = frames[0].image
-        rest = [frame.image for frame in frames[1:]]
+        quantized_images = quantize_frames_for_gif([frame.image for frame in frames])
+        base = quantized_images[0]
+        rest = quantized_images[1:]
         durations = [frame.duration_ms for frame in frames]
         base.save(
             output_path,
@@ -532,6 +561,7 @@ def main() -> int:
             loop=0,
             optimize=False,
             disposal=2,
+            include_color_table=True,
         )
         print(f"recorded {output_path}")
         return 0
