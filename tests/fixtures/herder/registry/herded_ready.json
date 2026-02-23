@@ -1,0 +1,17 @@
+{
+  "herds": {
+    "0": "Balanced"
+  },
+  "sessions": {
+    "%77": {
+      "herded": true,
+      "herd_id": 0,
+      "nudge_count": 0,
+      "last_nudge_unix": null,
+      "last_assessment_state": "waiting_long",
+      "state_entered_unix": 1700000000,
+      "last_assessment_unix": 1700000200,
+      "last_reasons": ["waiting_marker"]
+    }
+  }
+}

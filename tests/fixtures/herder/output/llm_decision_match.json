@@ -1,0 +1,7 @@
+{
+  "match": true,
+  "command": "echo llm-route",
+  "variables": {
+    "ticket": "ABC-42"
+  }
+}

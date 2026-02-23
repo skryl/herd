@@ -1,0 +1,27 @@
+# Rust build outputs
+target/
+
+# Runtime artifacts (docker demo/tests, crash dumps)
+tmp/
+core
+core.*
+*.core
+*.stackdump
+
+# Local fallback config (generated when HOME is unset)
+/.config/herd/
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store

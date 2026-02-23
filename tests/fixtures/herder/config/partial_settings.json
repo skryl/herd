@@ -1,0 +1,18 @@
+{
+  "refresh_interval_ms": 750,
+  "capture_lines": 220,
+  "openai_api_key": "sk-test-openai",
+  "anthropic_api_key": "sk-test-anthropic",
+  "llm_provider": "anthropic",
+  "llm_model": "claude-3-5-sonnet-latest",
+  "herd_modes": [
+    {
+      "name": "Balanced",
+      "rule_file": "herd_modes/balanced.json"
+    },
+    {
+      "name": "Escalate",
+      "rule_file": "herd_modes/escalate"
+    }
+  ]
+}

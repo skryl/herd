@@ -1,0 +1,19 @@
+{
+  "pane_id": "%42",
+  "session_name": "worker-rule-payload",
+  "window_name": "editor",
+  "pane_current_command": "claude",
+  "captured_at_unix": 1700000900,
+  "last_activity_unix": 1700000001,
+  "content": "Waiting for input from user on ticket ABC-42.\nInvestigating root cause.\nVISIBLE: escalate now",
+  "prior": {
+    "state": "waiting",
+    "state_entered_unix": 1700000000
+  },
+  "expected": {
+    "state": "waiting_long",
+    "display_status": "waiting",
+    "eligible_for_herd": true,
+    "reasons": ["waiting_marker", "waiting_grace_exceeded"]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "pane_id": "%13",
+  "session_name": "worker-finished",
+  "window_name": "editor",
+  "pane_current_command": "claude",
+  "captured_at_unix": 1700000100,
+  "last_activity_unix": 1700000099,
+  "content": "All tasks complete.\nFinished successfully.",
+  "expected": {
+    "state": "finished",
+    "display_status": "finished",
+    "eligible_for_herd": false,
+    "reasons": ["finished_marker"]
+  }
+}

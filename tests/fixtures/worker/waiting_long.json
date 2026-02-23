@@ -1,0 +1,19 @@
+{
+  "pane_id": "%14",
+  "session_name": "worker-waiting-long",
+  "window_name": "editor",
+  "pane_current_command": "claude",
+  "captured_at_unix": 1700000400,
+  "last_activity_unix": 1700000000,
+  "content": "Waiting for input from user on edge case.",
+  "prior": {
+    "state": "waiting",
+    "state_entered_unix": 1700000000
+  },
+  "expected": {
+    "state": "waiting_long",
+    "display_status": "waiting",
+    "eligible_for_herd": true,
+    "reasons": ["waiting_marker", "waiting_grace_exceeded"]
+  }
+}

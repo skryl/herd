@@ -1,0 +1,15 @@
+{
+  "pane_id": "%12",
+  "session_name": "worker-stalled",
+  "window_name": "editor",
+  "pane_current_command": "claude",
+  "captured_at_unix": 1700000300,
+  "last_activity_unix": 1700000000,
+  "content": "Still thinking through changes.",
+  "expected": {
+    "state": "stalled",
+    "display_status": "stalled",
+    "eligible_for_herd": true,
+    "reasons": ["inactivity_exceeded"]
+  }
+}

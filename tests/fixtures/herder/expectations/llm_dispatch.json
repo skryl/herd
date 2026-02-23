@@ -1,0 +1,11 @@
+{
+  "matched_rule_id": "llm_route",
+  "command_to_send": "echo llm-route --ticket ABC-42 --pane %42 --state waiting_long",
+  "logs_contains": [
+    "rule_start id=skip_regex type=regex",
+    "rule_result id=skip_regex type=regex match=false",
+    "rule_start id=llm_route type=llm",
+    "rule_match id=llm_route command=echo llm-route --ticket ABC-42 --pane %42 --state waiting_long",
+    "cycle_end matched=true"
+  ]
+}

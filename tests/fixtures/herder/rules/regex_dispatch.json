@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "type": "regex",
+      "id": "ticket_extract",
+      "enabled": true,
+      "input_scope": "full_buffer",
+      "pattern": "(?P<ticket>ABC-\\d+)",
+      "command_template": "echo route {ticket} {status_state} {pane_id}"
+    },
+    {
+      "type": "regex",
+      "id": "fallback",
+      "enabled": true,
+      "input_scope": "full_buffer",
+      "pattern": "(?s).*",
+      "command_template": "echo fallback"
+    }
+  ]
+}

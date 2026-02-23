@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "type": "regex",
+      "id": "skip_regex",
+      "enabled": true,
+      "input_scope": "visible_window",
+      "pattern": "NEVER_MATCH_THIS",
+      "command_template": "echo never"
+    },
+    {
+      "type": "llm",
+      "id": "llm_route",
+      "enabled": true,
+      "input_scope": "visible_window",
+      "prompt": "Return JSON decision for escalations.",
+      "command_template": "{command} --ticket {ticket} --pane {pane_id} --state {status_state}"
+    }
+  ]
+}

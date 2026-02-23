@@ -1,0 +1,15 @@
+{
+  "pane_id": "%11",
+  "session_name": "worker-running",
+  "window_name": "editor",
+  "pane_current_command": "claude",
+  "captured_at_unix": 1700000010,
+  "last_activity_unix": 1700000005,
+  "content": "Working through implementation details now.",
+  "expected": {
+    "state": "running",
+    "display_status": "running",
+    "eligible_for_herd": false,
+    "reasons": ["activity_recent"]
+  }
+}

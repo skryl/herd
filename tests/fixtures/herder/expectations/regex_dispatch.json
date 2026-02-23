@@ -1,0 +1,10 @@
+{
+  "matched_rule_id": "ticket_extract",
+  "command_to_send": "echo route ABC-42 waiting_long %42",
+  "logs_contains": [
+    "mode_loaded version=1 rule_count=2",
+    "rule_start id=ticket_extract type=regex",
+    "rule_match id=ticket_extract command=echo route ABC-42 waiting_long %42",
+    "cycle_end matched=true"
+  ]
+}

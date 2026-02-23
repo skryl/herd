@@ -1,0 +1,18 @@
+services:
+  integration-tests:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - herd-target:/workspace/target
+    entrypoint:
+      - /workspace/scripts/run-integration-tests.sh
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  herd-target:
