@@ -15,6 +15,10 @@ Or during integration tests:
 HERD_CAPTURE_DOC_SCREENSHOTS=1 ./scripts/run-integration-tests.sh --tier fast
 ```
 
+## Integration Suite Recording
+
+![Integration Suite Recording](integration_suite.gif)
+
 ## Happy Path GIF
 
 ![Happy Path Demo](happy_path.gif)

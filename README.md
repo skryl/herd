@@ -2,9 +2,7 @@
 
 `herd` is a Rust CLI/TUI for monitoring and steering Codex/Claude agent sessions running in tmux.
 
-## Happy Path
-
-![Happy Path Demo](docs/screenshots/happy_path.gif)
+![Integration Suite Recording](docs/screenshots/integration_suite.gif)
 
 ## Documentation Index
 

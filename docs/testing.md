@@ -43,6 +43,14 @@ Generate documentation screenshots from test render states:
 Screenshots are rendered in full color from styled TUI cell snapshots.
 This command also regenerates `docs/screenshots/happy_path.gif`.
 
+Record a full terminal run of the integration suite as a GIF:
+
+```bash
+./scripts/record-integration-tests-gif.py \
+  --command "./scripts/run-integration-tests.sh --tier full" \
+  --output docs/screenshots/integration_suite.gif
+```
+
 Generate screenshots as part of integration test execution:
 
 ```bash
