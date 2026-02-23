@@ -40,6 +40,8 @@ Generate documentation screenshots from test render states:
 ./scripts/capture-doc-screenshots.sh
 ```
 
+Screenshots are rendered in full color from styled TUI cell snapshots.
+
 Generate screenshots as part of integration test execution:
 
 ```bash

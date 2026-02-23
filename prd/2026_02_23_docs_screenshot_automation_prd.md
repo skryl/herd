@@ -12,8 +12,9 @@ The project needed richer end-user documentation with visual TUI examples and an
 
 1. Add a dedicated docs screenshots section.
 2. Generate screenshots from deterministic TUI test states.
-3. Allow screenshot generation as part of integration test runs.
-4. Keep default test behavior unchanged unless explicitly enabled.
+3. Render screenshots in full color from styled cell data.
+4. Allow screenshot generation as part of integration test runs.
+5. Keep default test behavior unchanged unless explicitly enabled.
 
 ## Non-goals
 
@@ -43,8 +44,8 @@ Red:
 1. Add failing/absent capture path for deterministic TUI visuals.
 
 Green:
-1. Add ignored integration test `tests/docs_screenshots.rs` that writes raw text snapshots.
-2. Add `scripts/render-doc-screenshots.py` to convert raw snapshots to PNG.
+1. Add ignored integration test `tests/docs_screenshots.rs` that writes styled JSON snapshots.
+2. Add `scripts/render-doc-screenshots.py` to convert styled snapshots to color PNG.
 3. Add `scripts/capture-doc-screenshots.sh` wrapper.
 
 Refactor:
@@ -78,7 +79,8 @@ Exit criteria:
 
 1. Docs include screenshot gallery page with rendered PNGs.
 2. Screenshot generation can run standalone and from integration tests.
-3. Regression tests pass after documentation tooling changes.
+3. Screenshots preserve fg/bg styling from TUI render output.
+4. Regression tests pass after documentation tooling changes.
 
 ## Risks and Mitigations
 

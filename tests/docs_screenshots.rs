@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use herd::agent::AgentStatus;
-use herd::tui::{AppModel, StatusSource, UiSession, render_to_string};
+use herd::tui::{AppModel, StatusSource, UiSession, render_to_styled_snapshot};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,32 +24,6 @@ fn screenshot_raw_dir() -> PathBuf {
         .join("raw")
 }
 
-fn render_lines(model: &AppModel) -> Vec<String> {
-    let flat = render_to_string(model, SHOT_WIDTH, SHOT_HEIGHT);
-    let cells = flat.chars().collect::<Vec<_>>();
-    let row_width = usize::from(SHOT_WIDTH);
-    let row_count = usize::from(SHOT_HEIGHT);
-    let mut lines = Vec::with_capacity(row_count);
-    for row in 0..row_count {
-        let start = row * row_width;
-        let end = start + row_width;
-        let mut line = if end <= cells.len() {
-            cells[start..end].iter().collect::<String>()
-        } else if start < cells.len() {
-            let mut partial = cells[start..].iter().collect::<String>();
-            partial.push_str(&" ".repeat(end - cells.len()));
-            partial
-        } else {
-            " ".repeat(row_width)
-        };
-        while line.ends_with(' ') {
-            line.pop();
-        }
-        lines.push(line);
-    }
-    lines
-}
-
 fn write_snapshot(name: &str, model: &AppModel) -> Result<(), String> {
     let output_dir = screenshot_raw_dir();
     fs::create_dir_all(&output_dir).map_err(|err| {
@@ -58,10 +32,15 @@ fn write_snapshot(name: &str, model: &AppModel) -> Result<(), String> {
             output_dir
         )
     })?;
-    let output_path = output_dir.join(format!("{name}.txt"));
-    let mut content = render_lines(model).join("\n");
-    content.push('\n');
-    fs::write(&output_path, content).map_err(|err| {
+    let output_path = output_dir.join(format!("{name}.json"));
+    let snapshot = render_to_styled_snapshot(model, SHOT_WIDTH, SHOT_HEIGHT);
+    let content = serde_json::to_string_pretty(&snapshot).map_err(|err| {
+        format!(
+            "failed serializing styled snapshot {:?}: {err}",
+            output_path
+        )
+    })?;
+    fs::write(&output_path, format!("{content}\n")).map_err(|err| {
         format!(
             "failed writing screenshot snapshot {:?}: {err}",
             output_path

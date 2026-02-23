@@ -6,7 +6,7 @@ use super::render_left_panes::{render_details_pane, render_herds_pane, render_se
 use super::render_right_panes::{render_content_pane, render_herder_log_pane};
 use super::render_sections::{PaneStyles, build_app_bar_text, render_status_bar};
 use super::settings_render::render_settings_overlay;
-use super::{AppModel, now_unix};
+use super::{AppModel, StyledCell, StyledSnapshot, now_unix};
 
 pub(super) fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
@@ -22,6 +22,35 @@ pub(super) fn render_to_string(model: &AppModel, width: u16, height: u16) -> Str
         .map(|cell| cell.symbol())
         .collect::<Vec<_>>()
         .join("")
+}
+
+pub(super) fn render_to_styled_snapshot(
+    model: &AppModel,
+    width: u16,
+    height: u16,
+) -> StyledSnapshot {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal should construct");
+    let mut preview = model.clone();
+    terminal
+        .draw(|frame| render(frame, &mut preview))
+        .expect("test draw should succeed");
+    let buffer = terminal.backend().buffer();
+    let cells = buffer
+        .content
+        .iter()
+        .map(|cell| StyledCell {
+            symbol: cell.symbol().to_string(),
+            fg: cell.fg.into(),
+            bg: cell.bg.into(),
+            modifier_bits: cell.modifier.bits(),
+        })
+        .collect::<Vec<_>>();
+    StyledSnapshot {
+        width,
+        height,
+        cells,
+    }
 }
 
 pub(super) fn render(frame: &mut Frame<'_>, model: &mut AppModel) {

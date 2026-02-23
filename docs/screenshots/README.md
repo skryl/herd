@@ -1,6 +1,7 @@
 # Screenshots
 
-These screenshots are generated from deterministic TUI render states during test runs.
+These screenshots are generated from deterministic, styled TUI render states during test runs.
+Raw snapshots are written as JSON in `docs/screenshots/raw/`.
 
 To regenerate:
 
