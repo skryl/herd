@@ -15,9 +15,16 @@ Or during integration tests:
 HERD_CAPTURE_DOC_SCREENSHOTS=1 ./scripts/run-integration-tests.sh --tier fast
 ```
 
-## Integration Suite Recording
+## Herd UX Integration Recording
 
-![Integration Suite Recording](integration_suite.gif)
+Regenerate from live tmux-backed TUI interaction:
+
+```bash
+./scripts/record-herd-ux-gif.py \
+  --output docs/screenshots/herd_ux_integration.gif
+```
+
+![Herd UX Integration Recording](herd_ux_integration.gif)
 
 ## Happy Path GIF
 
