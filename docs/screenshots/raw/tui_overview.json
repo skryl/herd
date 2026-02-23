@@ -41103,37 +41103,25 @@
       "modifier_bits": 0
     },
     {
+      "symbol": "1",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
       "symbol": "0",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "9",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
       "symbol": ":",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "3",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": "6",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": ":",
+      "symbol": "0",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
@@ -41145,7 +41133,19 @@
       "modifier_bits": 0
     },
     {
-      "symbol": "6",
+      "symbol": ":",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "4",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "5",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
@@ -42183,37 +42183,25 @@
       "modifier_bits": 0
     },
     {
+      "symbol": "1",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
       "symbol": "0",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "9",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
       "symbol": ":",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "3",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": "6",
-      "fg": "light_cyan",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": ":",
+      "symbol": "0",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
@@ -42225,7 +42213,19 @@
       "modifier_bits": 0
     },
     {
-      "symbol": "6",
+      "symbol": ":",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "4",
+      "fg": "light_cyan",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "5",
       "fg": "light_cyan",
       "bg": "reset",
       "modifier_bits": 0
@@ -43263,37 +43263,25 @@
       "modifier_bits": 0
     },
     {
+      "symbol": "1",
+      "fg": "light_green",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
       "symbol": "0",
       "fg": "light_green",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "9",
-      "fg": "light_green",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
       "symbol": ":",
       "fg": "light_green",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "3",
-      "fg": "light_green",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": "6",
-      "fg": "light_green",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": ":",
+      "symbol": "0",
       "fg": "light_green",
       "bg": "reset",
       "modifier_bits": 0
@@ -43305,7 +43293,19 @@
       "modifier_bits": 0
     },
     {
-      "symbol": "6",
+      "symbol": ":",
+      "fg": "light_green",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "4",
+      "fg": "light_green",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "5",
       "fg": "light_green",
       "bg": "reset",
       "modifier_bits": 0
@@ -44343,37 +44343,25 @@
       "modifier_bits": 0
     },
     {
+      "symbol": "1",
+      "fg": "light_yellow",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
       "symbol": "0",
       "fg": "light_yellow",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "9",
-      "fg": "light_yellow",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
       "symbol": ":",
       "fg": "light_yellow",
       "bg": "reset",
       "modifier_bits": 0
     },
     {
-      "symbol": "3",
-      "fg": "light_yellow",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": "6",
-      "fg": "light_yellow",
-      "bg": "reset",
-      "modifier_bits": 0
-    },
-    {
-      "symbol": ":",
+      "symbol": "0",
       "fg": "light_yellow",
       "bg": "reset",
       "modifier_bits": 0
@@ -44385,7 +44373,19 @@
       "modifier_bits": 0
     },
     {
-      "symbol": "6",
+      "symbol": ":",
+      "fg": "light_yellow",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "4",
+      "fg": "light_yellow",
+      "bg": "reset",
+      "modifier_bits": 0
+    },
+    {
+      "symbol": "5",
       "fg": "light_yellow",
       "bg": "reset",
       "modifier_bits": 0

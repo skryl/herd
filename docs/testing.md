@@ -41,6 +41,7 @@ Generate documentation screenshots from test render states:
 ```
 
 Screenshots are rendered in full color from styled TUI cell snapshots.
+This command also regenerates `docs/screenshots/happy_path.gif`.
 
 Generate screenshots as part of integration test execution:
 

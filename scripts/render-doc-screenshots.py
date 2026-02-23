@@ -9,6 +9,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 DEFAULT_BG = (11, 18, 32)
 DEFAULT_FG = (220, 230, 245)
+DEFAULT_GIF_SEQUENCE = [
+    ("tui_overview", 1200),
+    ("tui_settings_overlay", 1200),
+    ("tui_input_mode", 1200),
+    ("tui_herder_log_filter", 1200),
+    ("tui_overview", 1400),
+]
 
 # ratatui modifier bit flags.
 MOD_BOLD = 0x0001
@@ -177,6 +184,35 @@ def render_snapshot_json_to_png(
     image.save(output_path)
 
 
+def build_happy_path_gif(output_dir: pathlib.Path, gif_name: str) -> None:
+    frame_paths = []
+    durations = []
+    for stem, duration in DEFAULT_GIF_SEQUENCE:
+        frame_path = output_dir / f"{stem}.png"
+        if not frame_path.exists():
+            raise FileNotFoundError(
+                f"missing frame for happy path gif: {frame_path}"
+            )
+        frame_paths.append(frame_path)
+        durations.append(duration)
+
+    frames = [Image.open(frame_path).convert("RGB") for frame_path in frame_paths]
+    try:
+        gif_path = output_dir / gif_name
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=0,
+            optimize=False,
+            disposal=2,
+        )
+    finally:
+        for frame in frames:
+            frame.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Render styled TUI snapshot JSON files into PNG screenshots."
@@ -184,6 +220,16 @@ def main() -> int:
     parser.add_argument("--input", required=True, help="Directory with *.json raw snapshots.")
     parser.add_argument("--output", required=True, help="Directory for generated PNG files.")
     parser.add_argument("--font-size", type=int, default=15, help="Monospace font size.")
+    parser.add_argument(
+        "--gif-name",
+        default="happy_path.gif",
+        help="Filename for generated happy path GIF.",
+    )
+    parser.add_argument(
+        "--no-gif",
+        action="store_true",
+        help="Disable happy path GIF generation.",
+    )
     args = parser.parse_args()
 
     input_dir = pathlib.Path(args.input)
@@ -202,6 +248,9 @@ def main() -> int:
         output_file = output_dir / f"{json_file.stem}.png"
         render_snapshot_json_to_png(json_file, output_file, font)
         print(f"generated {output_file}")
+    if not args.no_gif:
+        build_happy_path_gif(output_dir, args.gif_name)
+        print(f"generated {output_dir / args.gif_name}")
     return 0
 
 

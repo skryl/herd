@@ -15,6 +15,10 @@ Or during integration tests:
 HERD_CAPTURE_DOC_SCREENSHOTS=1 ./scripts/run-integration-tests.sh --tier fast
 ```
 
+## Happy Path GIF
+
+![Happy Path Demo](happy_path.gif)
+
 ## Gallery
 
 ### TUI Overview
