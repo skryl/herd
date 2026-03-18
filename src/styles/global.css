@@ -1,0 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+:root {
+  /* PCB substrate */
+  --pcb-dark: #071207;
+  --pcb-base: #0c1f0c;
+  --pcb-mid: #132a13;
+  --pcb-light: #1a3a1a;
+  --pcb-mask: #0f260f;
+
+  /* Copper & solder */
+  --copper: #c89b2a;
+  --copper-dim: #8a6b1a;
+  --copper-bright: #e8b830;
+  --solder: #b8b8a0;
+  --pin-gold: #b8960f;
+
+  /* Phosphor colors */
+  --phosphor-green: #33ff33;
+  --phosphor-green-dim: #1a8a1a;
+  --phosphor-green-glow: rgba(51, 255, 51, 0.15);
+  --phosphor-amber: #ffaa00;
+  --phosphor-amber-dim: #aa7700;
+  --phosphor-red: #ff3333;
+
+  /* Silkscreen */
+  --silk-white: #c0c8b8;
+  --silk-dim: #6a7a60;
+
+  /* Component body */
+  --component-bg: #0a0e08;
+  --component-border: #2a3a20;
+
+  /* Grid */
+  --grid-line: rgba(30, 60, 30, 0.5);
+  --grid-dot: rgba(51, 255, 51, 0.08);
+
+  --toolbar-height: 32px;
+  --statusbar-height: 22px;
+  --font-mono: 'Share Tech Mono', 'Courier New', monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--pcb-dark);
+  color: var(--silk-white);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* CRT scanline overlay — applied to the entire app */
+#app::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.08) 2px,
+    rgba(0, 0, 0, 0.08) 4px
+  );
+  mix-blend-mode: multiply;
+}
+
+::selection {
+  background: var(--phosphor-green-dim);
+  color: var(--phosphor-green);
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--pcb-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--pcb-light);
+}

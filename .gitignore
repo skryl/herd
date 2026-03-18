@@ -1,27 +1,34 @@
-# Rust build outputs
-target/
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# Runtime artifacts (docker demo/tests, crash dumps)
-tmp/
-core
-core.*
-*.core
-*.stackdump
+node_modules
+dist
+dist-ssr
+*.local
 
-# Local fallback config (generated when HOME is unset)
-/.config/herd/
+# Rust
+src-tauri/target/
 
-# Environment/secrets
-.env
-.env.*
-!.env.example
+# Runtime logs
+log/
 
-# Editor/IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+# MCP server build
+mcp-server/dist/
+mcp-server/node_modules/
 
-# OS metadata
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

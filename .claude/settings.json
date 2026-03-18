@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/skryl/Dev/herd/.claude/hooks/on-agent-start.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/skryl/Dev/herd/.claude/hooks/on-bg-bash.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
