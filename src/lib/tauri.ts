@@ -1,28 +1,76 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { LayoutStateMap, TmuxSnapshot } from './types';
 
-export async function createPty(cols: number, rows: number): Promise<string> {
-  return invoke<string>('create_pty', { cols, rows });
+export async function getTmuxState(): Promise<TmuxSnapshot> {
+  return invoke<TmuxSnapshot>('get_tmux_state');
 }
 
-export async function destroyPty(sessionId: string): Promise<void> {
-  return invoke('destroy_pty', { sessionId });
+export async function getLayoutState(): Promise<LayoutStateMap> {
+  return invoke<LayoutStateMap>('get_layout_state');
 }
 
-export async function writePty(sessionId: string, data: string): Promise<void> {
-  return invoke('write_pty', { sessionId, data });
+export async function newSession(name?: string): Promise<string> {
+  return invoke<string>('new_session', { name: name ?? null });
 }
 
-export async function readPtyOutput(sessionId: string): Promise<string> {
-  return invoke<string>('read_pty_output', { sessionId });
+export async function killSession(sessionId: string): Promise<void> {
+  return invoke('kill_session', { sessionId });
 }
 
-export async function resizePty(sessionId: string, cols: number, rows: number): Promise<void> {
-  return invoke('resize_pty', { sessionId, cols, rows });
+export async function selectSession(sessionId: string): Promise<void> {
+  return invoke('select_session', { sessionId });
 }
 
-export async function saveTileState(
-  sessionId: string, x: number, y: number,
-  width: number, height: number, title: string,
+export async function renameSession(sessionId: string, name: string): Promise<void> {
+  return invoke('rename_session', { sessionId, name });
+}
+
+export async function newWindow(targetSessionId?: string | null): Promise<string> {
+  return invoke<string>('new_window', { targetSessionId: targetSessionId ?? null });
+}
+
+export async function splitPane(targetPaneId?: string | null): Promise<string> {
+  return invoke<string>('split_pane', { targetPaneId: targetPaneId ?? null });
+}
+
+export async function killWindow(windowId: string): Promise<void> {
+  return invoke('kill_window', { windowId });
+}
+
+export async function killPane(paneId: string): Promise<void> {
+  return invoke('kill_pane', { paneId });
+}
+
+export async function selectWindow(windowId: string): Promise<void> {
+  return invoke('select_window', { windowId });
+}
+
+export async function resizeWindow(windowId: string, cols: number, rows: number): Promise<void> {
+  return invoke('resize_window', { windowId, cols, rows });
+}
+
+export async function renameWindow(windowId: string, name: string): Promise<void> {
+  return invoke('rename_window', { windowId, name });
+}
+
+export async function setPaneTitle(paneId: string, title: string): Promise<void> {
+  return invoke('set_pane_title', { paneId, title });
+}
+
+export async function writePane(paneId: string, data: string): Promise<void> {
+  return invoke('write_pty', { sessionId: paneId, data });
+}
+
+export async function readPaneOutput(paneId: string): Promise<string> {
+  return invoke<string>('read_pty_output', { sessionId: paneId });
+}
+
+export async function saveLayoutState(
+  paneId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
 ): Promise<void> {
-  return invoke('save_tile_state', { sessionId, x, y, width, height, title });
+  return invoke('save_layout_state', { paneId, x, y, width, height });
 }

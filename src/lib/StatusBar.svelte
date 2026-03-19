@@ -1,5 +1,6 @@
 <script lang="ts">
   import { mode } from './stores/mode';
+  import { sidebarOpen } from './stores/sidebar';
   import { selectedTerminalId } from './stores/terminals';
   import { activeTabTerminals } from './stores/tabs';
 
@@ -11,29 +12,52 @@
   });
 
   let totalInTab = $derived($activeTabTerminals.length);
+  let statusLabel = $derived($sidebarOpen && $mode === 'command' ? 'TREE' : $mode === 'command' ? 'CMD' : 'INS');
 </script>
 
 <div class="status-bar">
   <div class="status-left">
     <span class="mode-badge" class:command={$mode === 'command'} class:input={$mode === 'input'}>
-      {$mode === 'command' ? 'CMD' : 'INS'}
+      {statusLabel}
     </span>
     <span class="window-count">[{selectedIndex()}/{totalInTab}]</span>
   </div>
 
   <div class="status-center">
-    {#if $mode === 'command'}
+    {#if $sidebarOpen && $mode === 'command'}
+      <span class="shortcut"><span class="key">j</span><span class="key">k</span> navigate</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">r</span> rename</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">z</span><span class="key">Z</span> zoom</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">i</span> input</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">Esc</span><span class="key">b</span> close tree</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">d</span> debug</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">:</span> cmd</span>
+    {:else if $mode === 'command'}
       <span class="shortcut"><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span> focus</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">H</span><span class="key">J</span><span class="key">K</span><span class="key">L</span> move</span>
+      <span class="shortcut"><span class="key">Shift+H/J/K/L</span> pan</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">t</span><span class="key">w</span> tab</span>
+      <span class="shortcut"><span class="key">Shift+-/+</span> zoom</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">Ctrl+h/j/k/l</span> move</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">Ctrl+Shift+h/j/k/l</span> move x2</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">t</span> tab</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">N</span><span class="key">P</span> switch</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">s</span> shell</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">z</span> zoom</span>
+      <span class="shortcut"><span class="key">x</span><span class="key">X</span> close</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">z</span><span class="key">Z</span> snap</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">i</span> input</span>
       <span class="sep">│</span>

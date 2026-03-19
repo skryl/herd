@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 use super::protocol::{SocketCommand, SocketResponse};
@@ -116,40 +116,31 @@ fn handle_command(
 ) -> SocketResponse {
     match cmd {
         SocketCommand::SpawnShell { x: _, y: _, width: _, height: _, parent_session_id: _ } => {
-            // Get current shell count before creating
-            let before: Vec<String> = state.with_control(|ctrl| {
-                Ok(ctrl.list_panes().iter().map(|(_, sid)| sid.clone()).collect())
-            }).unwrap_or_default();
-
-            // Create new window
-            match state.with_control(|ctrl| ctrl.create_window()) {
-                Ok(()) => {
-                    // Wait for the new pane to be detected (up to 5s)
-                    for _ in 0..50 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        if let Ok(after) = state.with_control(|ctrl| {
-                            Ok(ctrl.list_panes().iter()
-                                .map(|(_, sid)| sid.clone())
-                                .collect::<Vec<_>>())
-                        }) {
-                            let new_sid = after.iter().find(|sid| !before.contains(sid));
-                            if let Some(sid) = new_sid {
-                                return SocketResponse::success(Some(serde_json::json!({
-                                    "session_id": sid,
-                                })));
-                            }
-                        }
-                    }
-                    SocketResponse::success(Some(serde_json::json!({"status": "pending"})))
+            match crate::commands::new_window(app.clone(), None) {
+                Ok(window_id) => {
+                    let snapshot = crate::tmux_state::snapshot(state);
+                    let pane_id = snapshot
+                        .ok()
+                        .and_then(|snapshot| {
+                            snapshot
+                                .windows
+                                .iter()
+                                .find(|window| window.id == window_id)
+                                .and_then(|window| window.pane_ids.first().cloned())
+                        })
+                        .unwrap_or(window_id);
+                    SocketResponse::success(Some(serde_json::json!({
+                        "session_id": pane_id,
+                    })))
                 }
                 Err(e) => SocketResponse::error(e),
             }
         }
 
         SocketCommand::DestroyShell { session_id } => {
-            match state.with_control(|ctrl| ctrl.kill_pane_by_id(&session_id)) {
+            match crate::tmux_state::kill_pane(&session_id) {
                 Ok(()) => {
-                    let _ = app.emit("shell-destroyed", &session_id);
+                    let _ = crate::tmux_state::emit_snapshot(app);
                     SocketResponse::success(None)
                 }
                 Err(e) => SocketResponse::error(e),
@@ -157,18 +148,24 @@ fn handle_command(
         }
 
         SocketCommand::ListShells => {
-            match state.with_control(|ctrl| {
-                let panes = ctrl.list_panes();
-                Ok(panes)
-            }) {
-                Ok(panes) => {
-                    let list: Vec<serde_json::Value> = panes.iter().map(|(pane_id, sid)| {
-                        serde_json::json!({
-                            "id": sid,
-                            "pane_id": pane_id,
+            match crate::tmux_state::snapshot(state) {
+                Ok(snapshot) => {
+                    let list: Vec<serde_json::Value> = snapshot
+                        .windows
+                        .iter()
+                        .filter_map(|window| {
+                            let pane = snapshot.panes.iter().find(|pane| pane.window_id == window.id)?;
+                            Some(serde_json::json!({
+                                "id": pane.id,
+                                "pane_id": pane.id,
+                                "window_id": window.id,
+                                "session_id": window.session_id,
+                                "title": window.name,
+                                "command": pane.command,
+                            }))
                         })
-                    }).collect();
-                    SocketResponse::success(Some(serde_json::to_value(list).unwrap()))
+                        .collect();
+                    SocketResponse::success(Some(serde_json::json!(list)))
                 }
                 Err(e) => SocketResponse::error(e),
             }
@@ -191,12 +188,13 @@ fn handle_command(
         }
 
         SocketCommand::SetTitle { session_id, title } => {
-            let payload = serde_json::json!({
-                "session_id": session_id,
-                "title": title,
-            });
-            let _ = app.emit("shell-title-changed", payload);
-            SocketResponse::success(None)
+            match crate::tmux_state::set_pane_title(&session_id, &title) {
+                Ok(()) => {
+                    let _ = crate::tmux_state::emit_snapshot(app);
+                    SocketResponse::success(None)
+                }
+                Err(e) => SocketResponse::error(e),
+            }
         }
 
         SocketCommand::SetReadOnly { session_id, read_only } => {

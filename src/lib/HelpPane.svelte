@@ -31,17 +31,19 @@
           <div class="help-row"><span class="hkey">l</span><span class="hdesc">focus right</span></div>
           <div class="help-row"><span class="hkey">n</span><span class="hdesc">next window (cycle)</span></div>
           <div class="help-row"><span class="hkey">p</span><span class="hdesc">prev window (cycle)</span></div>
-          <div class="help-row"><span class="hkey">H</span><span class="hdesc">move window left</span></div>
-          <div class="help-row"><span class="hkey">J</span><span class="hdesc">move window down</span></div>
-          <div class="help-row"><span class="hkey">K</span><span class="hdesc">move window up</span></div>
-          <div class="help-row"><span class="hkey">L</span><span class="hdesc">move window right</span></div>
+          <div class="help-row"><span class="hkey">Ctrl+h/j/k/l</span><span class="hdesc">move selected window</span></div>
+          <div class="help-row"><span class="hkey">Ctrl+Shift+h/j/k/l</span><span class="hdesc">move selected window 2x</span></div>
           <div class="help-row"><span class="hkey">N</span><span class="hdesc">next tab</span></div>
           <div class="help-row"><span class="hkey">P</span><span class="hdesc">prev tab</span></div>
         </div>
 
         <div class="help-section">
           <div class="section-title">VIEW</div>
-          <div class="help-row"><span class="hkey">z</span><span class="hdesc">zoom to window</span></div>
+          <div class="help-row"><span class="hkey">z</span><span class="hdesc">toggle zoom to window</span></div>
+          <div class="help-row"><span class="hkey">Shift+Z</span><span class="hdesc">toggle full-screen zoom</span></div>
+          <div class="help-row"><span class="hkey">Shift+-</span><span class="hdesc">zoom canvas out</span></div>
+          <div class="help-row"><span class="hkey">Shift++</span><span class="hdesc">zoom canvas in</span></div>
+          <div class="help-row"><span class="hkey">Shift+H/J/K/L</span><span class="hdesc">pan canvas</span></div>
           <div class="help-row"><span class="hkey">f</span><span class="hdesc">fit all in view</span></div>
           <div class="help-row"><span class="hkey">0</span><span class="hdesc">reset zoom/pan</span></div>
           <div class="help-row"><span class="hkey">a</span><span class="hdesc">auto-arrange shells</span></div>
@@ -50,14 +52,13 @@
         <div class="help-section">
           <div class="section-title">WINDOWS</div>
           <div class="help-row"><span class="hkey">s</span><span class="hdesc">new shell</span></div>
-          <div class="help-row"><span class="hkey">q</span><span class="hdesc">close window</span></div>
-          <div class="help-row"><span class="hkey">Q</span><span class="hdesc">close all in tab</span></div>
+          <div class="help-row"><span class="hkey">x</span><span class="hdesc">close selected pane</span></div>
         </div>
 
         <div class="help-section">
           <div class="section-title">TABS</div>
           <div class="help-row"><span class="hkey">t</span><span class="hdesc">new tab</span></div>
-          <div class="help-row"><span class="hkey">w</span><span class="hdesc">close tab</span></div>
+          <div class="help-row"><span class="hkey">Shift+X</span><span class="hdesc">close tab</span></div>
         </div>
 
         <div class="help-section">

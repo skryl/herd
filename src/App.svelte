@@ -1,68 +1,75 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { get } from 'svelte/store';
-  import Toolbar from './lib/Toolbar.svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { onDestroy, onMount } from 'svelte';
   import Canvas from './lib/Canvas.svelte';
-  import StatusBar from './lib/StatusBar.svelte';
   import CommandBar from './lib/CommandBar.svelte';
+  import DebugPane from './lib/DebugPane.svelte';
   import HelpPane from './lib/HelpPane.svelte';
   import Sidebar from './lib/Sidebar.svelte';
-  import DebugPane from './lib/DebugPane.svelte';
-  import { canvasState } from './lib/stores/canvas';
-  import { sidebarOpen, sidebarSelectedIdx } from './lib/stores/sidebar';
-  import { debugPaneOpen } from './lib/stores/debugPane';
+  import StatusBar from './lib/StatusBar.svelte';
+  import Toolbar from './lib/Toolbar.svelte';
   import {
-    spawnTerminal,
-    removeTerminal,
-    updateTerminal,
-    updateTerminalBySessionId,
-    removeTerminalBySessionId,
-    selectedTerminalId,
-    terminals,
+    activeTabId,
+    activeTabTerminals,
+    addTab,
+    appState,
+    applyPaneReadOnly,
+    applyTmuxSnapshot,
     autoArrange,
-  } from './lib/stores/terminals';
-  import { mode, commandBarOpen, helpOpen } from './lib/stores/mode';
-  import { nextTab, prevTab, selectNextTerminal, selectPrevTerminal, selectDirectional, activeTabId, addTab, removeTab } from './lib/stores/tabs';
-  import { getTileMethods } from './lib/stores/tileRegistry';
-  import { invoke } from '@tauri-apps/api/core';
-  import { createPty, writePty } from './lib/tauri';
-  import type { ShellSpawnedEvent, ShellTitleChangedEvent } from './lib/types';
+    beginSidebarRename,
+    bootstrapAppState,
+    canvasState,
+    commandBarOpen,
+    debugPaneOpen,
+    dispatchIntent,
+    helpOpen,
+    mode,
+    moveSidebarSelection,
+    nextTab,
+    prevTab,
+    removeTab,
+    selectedTerminalId,
+    selectDirectional,
+    selectNextTerminal,
+    selectPrevTerminal,
+    sidebarOpen,
+    terminals,
+    updateTerminal,
+  } from './lib/stores/appState';
+  import type { TmuxSnapshot } from './lib/types';
 
-  let unlistenSpawn: UnlistenFn | null = null;
-  let unlistenTitle: UnlistenFn | null = null;
-  let unlistenDestroy: UnlistenFn | null = null;
+  let unlistenTmuxState: UnlistenFn | null = null;
+  let unlistenReadOnly: UnlistenFn | null = null;
+  const CANVAS_PAN_STEP = 80;
+  const WINDOW_MOVE_STEP = 10;
 
   function handleSpawnShell() {
-    // Tell tmux to create a new window. The control mode reader will detect
-    // the new pane and emit shell-spawned, which creates the tile.
-    createPty(80, 24).catch((e: any) => console.error('create_pty failed:', e));
+    void dispatchIntent({ type: 'new-shell' });
   }
 
-
-  function zoomToSelected() {
-    const selId = get(selectedTerminalId);
-    if (!selId) return;
-    const term = get(terminals).find(t => t.id === selId);
-    if (!term) return;
-    const viewW = window.innerWidth;
-    const viewH = window.innerHeight - 54;
-    const zoom = Math.min(viewW * 0.8 / term.width, viewH * 0.8 / term.height, 2);
-    const panX = viewW / 2 - (term.x + term.width / 2) * zoom;
-    const panY = viewH / 2 - (term.y + term.height / 2) * zoom;
-    canvasState.set({ zoom, panX, panY });
+  function toggleSelectedZoom(fullscreen = false) {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight - 54;
+    void dispatchIntent(
+      fullscreen
+        ? { type: 'toggle-selected-fullscreen-zoom', viewportWidth, viewportHeight }
+        : { type: 'toggle-selected-zoom', viewportWidth, viewportHeight },
+    );
   }
 
   function fitAll() {
-    const tabId = get(activeTabId);
-    const tabTerms = get(terminals).filter(t => t.tabId === tabId);
-    if (tabTerms.length === 0) return;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const t of tabTerms) {
-      minX = Math.min(minX, t.x);
-      minY = Math.min(minY, t.y);
-      maxX = Math.max(maxX, t.x + t.width);
-      maxY = Math.max(maxY, t.y + t.height);
+    const list = get(activeTabTerminals);
+    if (list.length === 0) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const term of list) {
+      minX = Math.min(minX, term.x);
+      minY = Math.min(minY, term.y);
+      maxX = Math.max(maxX, term.x + term.width);
+      maxY = Math.max(maxY, term.y + term.height);
     }
     const viewW = window.innerWidth;
     const viewH = window.innerHeight - 54;
@@ -72,46 +79,101 @@
     canvasState.set({ zoom, panX, panY });
   }
 
-  function closeAllInTab() {
+  function closeActiveTabWithConfirmation() {
     const tabId = get(activeTabId);
-    const tabTerms = get(terminals).filter(t => t.tabId === tabId);
-    for (const t of tabTerms) removeTerminal(t.id);
+    if (!tabId) return;
+    const currentState = get(appState);
+    const panesInTab = get(activeTabTerminals).length;
+    if (panesInTab > 1) {
+      const sessionName = currentState.tmux.sessions[tabId]?.name || 'this tab';
+      const shouldClose = window.confirm(`Close "${sessionName}" and kill ${panesInTab} panes?`);
+      if (!shouldClose) return;
+    }
+    removeTab(tabId);
+  }
+
+  function zoomCanvasAtViewportCenter(zoomFactor: number) {
+    const viewport = document.querySelector<HTMLElement>('.canvas-viewport');
+    const rect = viewport?.getBoundingClientRect();
+    const cx = rect ? rect.width / 2 : window.innerWidth / 2;
+    const cy = rect ? rect.height / 2 : (window.innerHeight - 54) / 2;
+
+    canvasState.update((state) => {
+      const newZoom = Math.max(0.2, Math.min(3, state.zoom * zoomFactor));
+      const dx = cx - state.panX;
+      const dy = cy - state.panY;
+      const scale = newZoom / state.zoom;
+
+      return {
+        zoom: newZoom,
+        panX: cx - dx * scale,
+        panY: cy - dy * scale,
+      };
+    });
+  }
+
+  function panCanvas(dx: number, dy: number) {
+    canvasState.update((state) => ({
+      ...state,
+      panX: state.panX + dx,
+      panY: state.panY + dy,
+    }));
+  }
+
+  function moveSelectedTerminal(dx: number, dy: number) {
+    const selectedId = get(selectedTerminalId);
+    if (!selectedId) return;
+    const term = get(terminals).find((item) => item.id === selectedId);
+    if (!term) return;
+    updateTerminal(selectedId, { x: term.x + dx, y: term.y + dy });
+  }
+
+  function keyEventToData(e: KeyboardEvent): string | null {
+    if (e.metaKey || e.altKey) return null;
+    if (e.key === 'Enter') return '\r';
+    if (e.key === 'Backspace') return '\x7f';
+    if (e.key === 'Tab') return '\t';
+    if (e.key === 'ArrowUp') return '\x1b[A';
+    if (e.key === 'ArrowDown') return '\x1b[B';
+    if (e.key === 'ArrowRight') return '\x1b[C';
+    if (e.key === 'ArrowLeft') return '\x1b[D';
+    if (e.key === 'Home') return '\x1b[H';
+    if (e.key === 'End') return '\x1b[F';
+    if (e.key === 'Delete') return '\x1b[3~';
+    if (e.key === ' ' || e.code === 'Space') return ' ';
+    if (e.key.length === 1) {
+      if (e.ctrlKey) {
+        const code = e.key.toLowerCase().charCodeAt(0) - 96;
+        if (code >= 1 && code <= 26) return String.fromCharCode(code);
+        return null;
+      }
+      return e.key;
+    }
+    return null;
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    const state = get(appState);
     const currentMode = get(mode);
-    const cmdBarOpen = get(commandBarOpen);
-    const isHelpOpen = get(helpOpen);
 
-    // Debug: write to a visible element
-    const selId2 = get(selectedTerminalId);
-    const tile2 = selId2 ? getTileMethods(selId2) : null;
-    const dbg = `[${currentMode}] key=${e.key} sel=${selId2?.slice(0,8)||'none'} wd=${!!tile2?.writeData}`;
-    const el = document.getElementById('herd-debug');
-    if (el) el.textContent = dbg;
+    if (get(commandBarOpen)) {
+      return;
+    }
 
-    // If command bar is open, let it handle keys
-    if (cmdBarOpen) return;
-
-    // Close help on any key
-    if (isHelpOpen) {
+    if (get(helpOpen)) {
       helpOpen.set(false);
       e.preventDefault();
       return;
     }
 
-    // Shift+Esc: exit input mode. Plain Esc passes through to the shell.
-    // In command mode, plain Esc closes sidebar/help.
     if (e.key === 'Escape') {
       if (currentMode === 'input') {
         if (e.shiftKey) {
-          mode.set('command');
+          void dispatchIntent({ type: 'exit-input-mode' });
           e.preventDefault();
         }
-        // Plain Esc in input mode: let it pass through to the shell
         return;
       }
-      // Command mode: close sidebar or no-op
       if (get(sidebarOpen)) {
         sidebarOpen.set(false);
         e.preventDefault();
@@ -121,264 +183,209 @@
       return;
     }
 
-    // In input mode: forward keystrokes directly to the selected pane
     if (currentMode === 'input') {
-      const selId = get(selectedTerminalId);
-      if (!selId) return;
-      const tile = getTileMethods(selId);
-      if (!tile?.writeData) return;
-
-      // Convert key events to terminal data
-      let data: string | null = null;
-      if (e.key === 'Enter') data = '\r';
-      else if (e.key === 'Backspace') data = '\x7f';
-      else if (e.key === 'Tab') data = '\t';
-      else if (e.key === 'ArrowUp') data = '\x1b[A';
-      else if (e.key === 'ArrowDown') data = '\x1b[B';
-      else if (e.key === 'ArrowRight') data = '\x1b[C';
-      else if (e.key === 'ArrowLeft') data = '\x1b[D';
-      else if (e.key === 'Home') data = '\x1b[H';
-      else if (e.key === 'End') data = '\x1b[F';
-      else if (e.key === 'Delete') data = '\x1b[3~';
-      else if (e.key.length === 1 && !e.metaKey) {
-        if (e.ctrlKey) {
-          // Ctrl+A through Ctrl+Z → 0x01-0x1A
-          const code = e.key.toLowerCase().charCodeAt(0) - 96;
-          if (code >= 1 && code <= 26) data = String.fromCharCode(code);
-        } else {
-          data = e.key;
-        }
-      }
-
+      const data = keyEventToData(e);
       if (data) {
-        document.title = `WRITING: ${data.length}b to ${selId?.slice(0,8)}`;
-        tile.writeData(data);
+        void dispatchIntent({ type: 'send-input', data });
         e.preventDefault();
-      } else {
-        document.title = `NO DATA for key=${e.key}`;
       }
       return;
     }
 
-    if (currentMode === 'command') {
-      // Sidebar toggle
-      if (e.key === 'b') {
-        sidebarOpen.update(v => !v);
+    const lowerKey = e.key.toLowerCase();
+
+    if (e.ctrlKey && !e.metaKey && !e.altKey && ['h', 'j', 'k', 'l'].includes(lowerKey)) {
+      const distance = WINDOW_MOVE_STEP * (e.shiftKey ? 2 : 1);
+      const dx = lowerKey === 'h' ? -distance : lowerKey === 'l' ? distance : 0;
+      const dy = lowerKey === 'k' ? -distance : lowerKey === 'j' ? distance : 0;
+      moveSelectedTerminal(dx, dy);
+      e.preventDefault();
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey && ['h', 'j', 'k', 'l'].includes(lowerKey)) {
+      const dx = lowerKey === 'h' ? -CANVAS_PAN_STEP : lowerKey === 'l' ? CANVAS_PAN_STEP : 0;
+      const dy = lowerKey === 'k' ? -CANVAS_PAN_STEP : lowerKey === 'j' ? CANVAS_PAN_STEP : 0;
+      panCanvas(dx, dy);
+      e.preventDefault();
+      return;
+    }
+
+    if (
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      e.shiftKey &&
+      (e.key === '_' || e.key === '-' || e.key === '+' || e.key === '=')
+    ) {
+      zoomCanvasAtViewportCenter(e.key === '+' || e.key === '=' ? 1.05 : 0.95);
+      e.preventDefault();
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === 'b') {
+      void dispatchIntent({ type: 'toggle-sidebar' });
+      e.preventDefault();
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === 'd') {
+      void dispatchIntent({ type: 'toggle-debug' });
+      e.preventDefault();
+      return;
+    }
+
+    if (e.metaKey || e.altKey || e.ctrlKey) {
+      return;
+    }
+
+    if (get(sidebarOpen)) {
+      if (e.key === 'j') {
+        moveSidebarSelection(1);
         e.preventDefault();
         return;
       }
-
-      // Debug pane toggle
-      if (e.key === 'd') {
-        debugPaneOpen.update(v => !v);
+      if (e.key === 'k') {
+        moveSidebarSelection(-1);
         e.preventDefault();
         return;
       }
-
-      // When sidebar is open, j/k/z control sidebar navigation
-      if (get(sidebarOpen)) {
-        if (e.key === 'j') {
-          sidebarSelectedIdx.update(i => i + 1);
-          e.preventDefault();
-          return;
-        }
-        if (e.key === 'k') {
-          sidebarSelectedIdx.update(i => Math.max(0, i - 1));
-          e.preventDefault();
-          return;
-        }
-        if (e.key === 'z') {
-          // Zoom to the currently highlighted sidebar item's tile
-          zoomToSelected();
-          e.preventDefault();
-          return;
-        }
-        if (e.key === 'i') {
-          const selTerm = get(terminals).find(t => t.id === get(selectedTerminalId));
-          if (!selTerm?.readOnly) {
-            sidebarOpen.set(false);
-            mode.set('input');
-          }
-          e.preventDefault();
-          return;
-        }
+      if (e.key === 'z') {
+        toggleSelectedZoom();
+        e.preventDefault();
+        return;
       }
-
-      switch (e.key) {
-        // --- Mode ---
-        case 'i': {
-          // Don't enter input mode on read-only tiles
-          const selTerm = get(terminals).find(t => t.id === get(selectedTerminalId));
-          if (selTerm?.readOnly) {
-            e.preventDefault();
-            break;
-          }
-          mode.set('input');
-          e.preventDefault();
-          break;
+      if (e.key === 'Z') {
+        toggleSelectedZoom(true);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'r') {
+        beginSidebarRename();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'i') {
+        const selectedId = get(selectedTerminalId);
+        if (selectedId && !state.tmux.panes[selectedId]?.readOnly) {
+          sidebarOpen.set(false);
+          void dispatchIntent({ type: 'enter-input-mode' });
         }
-        case '?':
-          helpOpen.set(true);
-          e.preventDefault();
-          break;
-        case ':':
-          commandBarOpen.set(true);
-          e.preventDefault();
-          break;
+        e.preventDefault();
+        return;
+      }
+    }
 
-        // --- Navigation (h/j/k/l directional, n/p cycle) ---
-        case 'h':
-        case 'j':
-        case 'k':
-        case 'l':
-          selectDirectional(e.key as 'h' | 'j' | 'k' | 'l');
-          e.preventDefault();
-          break;
-        case 'n':
-          selectNextTerminal();
-          e.preventDefault();
-          break;
-        case 'p':
-          selectPrevTerminal();
-          e.preventDefault();
-          break;
-        case 'N':
-          nextTab();
-          e.preventDefault();
-          break;
-        case 'P':
-          prevTab();
-          e.preventDefault();
-          break;
-        // --- Move selected window (H/J/K/L) ---
-        case 'H':
-        case 'J':
-        case 'K':
-        case 'L': {
-          const selId = get(selectedTerminalId);
-          if (selId) {
-            const term = get(terminals).find(t => t.id === selId);
-            if (term) {
-              const dx = e.key === 'H' ? -10 : e.key === 'L' ? 10 : 0;
-              const dy = e.key === 'K' ? -10 : e.key === 'J' ? 10 : 0;
-              updateTerminal(selId, { x: term.x + dx, y: term.y + dy });
-            }
-          }
-          e.preventDefault();
-          break;
-        }
-
-        // --- View ---
-        case 'z':
-          zoomToSelected();
-          e.preventDefault();
-          break;
-        case 'f':
-          fitAll();
-          e.preventDefault();
-          break;
-        case '0':
-          canvasState.set({ panX: 0, panY: 0, zoom: 1 });
-          e.preventDefault();
-          break;
-        case 'a':
-          autoArrange(get(activeTabId)).then(() => fitAll());
-          e.preventDefault();
-          break;
-
-        // --- Windows ---
-        case 's':
-          handleSpawnShell();
-          e.preventDefault();
-          break;
-        case 'q':
-          { const selId = get(selectedTerminalId); if (selId) { selectNextTerminal(); removeTerminal(selId); } }
-          e.preventDefault();
-          break;
-        case 'Q':
-          closeAllInTab();
-          e.preventDefault();
-          break;
-
-        // --- Tabs ---
-        case 't':
-          addTab();
-          e.preventDefault();
-          break;
-        case 'w':
-          removeTab(get(activeTabId));
-          e.preventDefault();
-          break;
+    switch (e.key) {
+      case 'i':
+        void dispatchIntent({ type: 'enter-input-mode' });
+        e.preventDefault();
+        break;
+      case '?':
+        void dispatchIntent({ type: 'open-help' });
+        e.preventDefault();
+        break;
+      case ':':
+        void dispatchIntent({ type: 'open-command-bar' });
+        e.preventDefault();
+        break;
+      case 'h':
+      case 'j':
+      case 'k':
+      case 'l':
+        selectDirectional(e.key as 'h' | 'j' | 'k' | 'l');
+        e.preventDefault();
+        break;
+      case 'n':
+        selectNextTerminal();
+        e.preventDefault();
+        break;
+      case 'p':
+        selectPrevTerminal();
+        e.preventDefault();
+        break;
+      case 'N':
+        nextTab();
+        e.preventDefault();
+        break;
+      case 'P':
+        prevTab();
+        e.preventDefault();
+        break;
+      case 'H':
+      case 'J':
+      case 'K':
+      case 'L': {
+        const dx = e.key === 'H' ? -CANVAS_PAN_STEP : e.key === 'L' ? CANVAS_PAN_STEP : 0;
+        const dy = e.key === 'K' ? -CANVAS_PAN_STEP : e.key === 'J' ? CANVAS_PAN_STEP : 0;
+        panCanvas(dx, dy);
+        e.preventDefault();
+        break;
+      }
+      case 'z':
+        toggleSelectedZoom();
+        e.preventDefault();
+        break;
+      case 'Z':
+        toggleSelectedZoom(true);
+        e.preventDefault();
+        break;
+      case 'f':
+        fitAll();
+        e.preventDefault();
+        break;
+      case '0':
+        void dispatchIntent({ type: 'reset-canvas' });
+        e.preventDefault();
+        break;
+      case 'a':
+        void autoArrange(get(activeTabId)).then(() => fitAll());
+        e.preventDefault();
+        break;
+      case 's':
+        handleSpawnShell();
+        e.preventDefault();
+        break;
+      case 'x':
+        void dispatchIntent({ type: 'close-selected-pane' });
+        e.preventDefault();
+        break;
+      case 'X':
+        closeActiveTabWithConfirmation();
+        e.preventDefault();
+        break;
+      case 't':
+        void addTab();
+        e.preventDefault();
+        break;
+      case 'w': {
+        closeActiveTabWithConfirmation();
+        e.preventDefault();
+        break;
       }
     }
   }
 
   onMount(async () => {
-    // Use raw addEventListener to ensure keydown always fires regardless of Svelte re-renders
+    await bootstrapAppState();
     window.addEventListener('keydown', handleKeyDown, true);
-
-    unlistenSpawn = await listen<ShellSpawnedEvent>('shell-spawned', (event) => {
-      const { session_id, pane_id, x, y, width, height, parent_session_id } = event.payload;
-      // Don't create duplicates (check both session_id and pane_id across ALL tabs)
-      const allTerms = get(terminals);
-      const existing = allTerms.find(t =>
-        t.sessionId === session_id || (pane_id && t.paneId === pane_id)
-      );
-      if (existing) return;
-
-      // If this pane has a parent, put it on the same tab as the parent
-      let tabId = get(activeTabId);
-      if (parent_session_id) {
-        const parent = allTerms.find(t => t.sessionId === parent_session_id);
-        if (parent) tabId = parent.tabId;
+    unlistenTmuxState = await listen<TmuxSnapshot>('tmux-state', (event) => {
+      applyTmuxSnapshot(event.payload);
+    });
+    unlistenReadOnly = await listen<{ session_id?: string; pane_id?: string; read_only: boolean }>('shell-read-only', (event) => {
+      const paneId = event.payload.pane_id ?? event.payload.session_id;
+      if (paneId) {
+        applyPaneReadOnly(paneId, event.payload.read_only);
       }
-
-      spawnTerminal(x, y, width || 640, height || 400, session_id, tabId, parent_session_id || undefined, pane_id);
-    });
-
-    // Clear all tiles when tmux restarts
-    await listen('shells-clear', () => {
-      terminals.set([]);
-      selectedTerminalId.set(null);
-    });
-
-    // Periodically clean orphan tiles (tiles whose panes no longer exist)
-    setInterval(async () => {
-      try {
-        const resp = await invoke<{ data: Array<{ id: string; pane_id: string }> }>('list_shells_raw');
-        const livePaneIds = new Set(resp.data?.map((s: any) => s.pane_id) || []);
-        const allTerms = get(terminals);
-        const orphans = allTerms.filter(t => t.paneId && !livePaneIds.has(t.paneId));
-        if (orphans.length > 0) {
-          terminals.update(list => list.filter(t => !t.paneId || livePaneIds.has(t.paneId)));
-        }
-      } catch {}
-    }, 5000);
-
-    unlistenTitle = await listen<ShellTitleChangedEvent>('shell-title-changed', (event) => {
-      const { session_id, title } = event.payload;
-      updateTerminalBySessionId(session_id, { title });
-    });
-
-    unlistenDestroy = await listen<string>('shell-destroyed', (event) => {
-      removeTerminalBySessionId(event.payload);
-    });
-
-    await listen<{ session_id: string; read_only: boolean }>('shell-read-only', (event) => {
-      const { session_id, read_only } = event.payload;
-      updateTerminalBySessionId(session_id, { readOnly: read_only });
     });
   });
 
   onDestroy(() => {
     window.removeEventListener('keydown', handleKeyDown, true);
-    if (unlistenSpawn) unlistenSpawn();
-    if (unlistenTitle) unlistenTitle();
-    if (unlistenDestroy) unlistenDestroy();
+    if (unlistenTmuxState) unlistenTmuxState();
+    if (unlistenReadOnly) unlistenReadOnly();
   });
 </script>
-
-{''}
 
 <Toolbar onSpawnShell={handleSpawnShell} />
 <Sidebar />

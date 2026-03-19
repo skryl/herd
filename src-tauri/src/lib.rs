@@ -4,8 +4,9 @@ mod socket;
 mod state;
 mod tmux;
 mod tmux_control;
+mod tmux_state;
 
-use tauri::{Manager, Emitter, Listener};
+use tauri::{Listener, Manager};
 use state::AppState;
 
 const SESSION_NAME: &str = "herd";
@@ -15,6 +16,21 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
+            commands::get_tmux_state,
+            commands::get_layout_state,
+            commands::save_layout_state,
+            commands::new_session,
+            commands::kill_session,
+            commands::select_session,
+            commands::rename_session,
+            commands::new_window,
+            commands::split_pane,
+            commands::kill_window,
+            commands::kill_pane,
+            commands::select_window,
+            commands::resize_window,
+            commands::rename_window,
+            commands::set_pane_title,
             commands::create_pty,
             commands::destroy_pty,
             commands::write_pty,
@@ -28,7 +44,6 @@ pub fn run() {
             commands::spawn_log_shell,
             commands::tmux_restart,
             commands::tmux_tree,
-            commands::save_tile_state,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -40,67 +55,54 @@ pub fn run() {
             }
 
             // Ensure tmux server and session exist
-            let server = tmux::server_name();
             let already_running = tmux::is_running();
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
             let herd_sock_env = format!("HERD_SOCK={}", socket::SOCKET_PATH);
 
             if !already_running {
-                // Create the session with a real shell
-                let status = std::process::Command::new("tmux")
-                    .args(["-L", server, "new-session", "-d",
-                           "-s", SESSION_NAME, "-x", "80", "-y", "24",
-                           "-e", &herd_sock_env,
-                           &shell])
-                    .status();
-                match status {
-                    Ok(s) if s.success() => log::info!("Created tmux session '{SESSION_NAME}'"),
-                    _ => log::error!("Failed to create tmux session"),
+                match tmux::output(&[
+                    "new-session",
+                    "-d",
+                    "-s",
+                    SESSION_NAME,
+                    "-x",
+                    "80",
+                    "-y",
+                    "24",
+                    "-e",
+                    &herd_sock_env,
+                    &shell,
+                ]) {
+                    Ok(output) if output.status.success() => log::info!("Created tmux session '{SESSION_NAME}'"),
+                    Ok(output) => log::error!(
+                        "Failed to create tmux session: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    Err(error) => log::error!("Failed to create tmux session: {error}"),
                 }
             } else {
                 log::info!("tmux server already running, reconnecting");
-                let has_session = std::process::Command::new("tmux")
-                    .args(["-L", server, "has-session", "-t", SESSION_NAME])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !has_session {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", server, "new-session", "-d",
-                               "-s", SESSION_NAME, "-x", "80", "-y", "24",
-                               "-e", &herd_sock_env,
-                               &shell])
-                        .status();
-                }
             }
 
-            // Prevent tmux from dying when last window closes
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", server, "set", "-g", "status", "off"])
-                .status();
-            // Fast shell for teammate windows — no .zshrc means no init delay,
-            // so Claude's send-keys won't race with shell startup
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", server, "set", "-g", "default-command", "zsh --no-rcs"])
-                .status();
-            // exit-empty off: keep server alive even with 0 sessions
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", server, "set", "-g", "exit-empty", "off"])
-                .status();
-            // When last window in session closes, don't destroy — create a new one
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", server, "set-hook", "-g", "session-closed",
-                       &format!("run-shell 'tmux -L {} new-session -d -s {} -e \"{}\" {}'",
-                                server, SESSION_NAME, herd_sock_env, shell)])
-                .status();
+            let attach_session = match tmux_state::ensure_default_session() {
+                Ok(name) => name,
+                Err(e) => {
+                    log::error!("Failed to ensure a tmux session exists: {e}");
+                    SESSION_NAME.to_string()
+                }
+            };
 
+            let _ = tmux::output(&["set", "-g", "status", "off"]);
+            let _ = tmux::output(&["set", "-g", "default-command", "zsh --no-rcs"]);
+            let _ = tmux::output(&["set", "-g", "exit-empty", "off"]);
             // Start control mode connection
             let handle = app.handle().clone();
-            match tmux_control::TmuxControl::start(SESSION_NAME, handle.clone()) {
+            match tmux_control::TmuxControl::start(&attach_session, handle.clone()) {
                 Ok(control) => {
                     let state = app.state::<AppState>();
                     state.set_control(control);
-                    log::info!("tmux control mode connected to '{SESSION_NAME}'");
+                    log::info!("tmux control mode connected to '{attach_session}'");
+                    let _ = crate::tmux_state::emit_snapshot(&app.handle());
                 }
                 Err(e) => {
                     log::error!("Failed to start tmux control mode: {e}");
@@ -111,16 +113,43 @@ pub fn run() {
             {
                 let state_reconnect = app.state::<AppState>().inner().clone();
                 let handle_reconnect = app.handle().clone();
-                app.handle().listen("tmux-cc-disconnected", move |_| {
+                app.handle().listen("tmux-cc-disconnected", move |event| {
+                    let disconnected_pid = serde_json::from_str::<i32>(event.payload()).ok();
+
+                    if let Some(pid) = disconnected_pid {
+                        if state_reconnect.current_control_pid() != Some(pid) {
+                            log::info!("Ignoring stale tmux -CC disconnect from pid {pid}");
+                            return;
+                        }
+                    }
+
                     log::info!("tmux -CC disconnected, reconnecting in 1s...");
                     let state = state_reconnect.clone();
                     let handle = handle_reconnect.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(1));
-                        match tmux_control::TmuxControl::start(SESSION_NAME, handle) {
+
+                        if let Some(pid) = disconnected_pid {
+                            if state.current_control_pid() != Some(pid) {
+                                log::info!("Skipping stale tmux -CC reconnect for pid {pid}");
+                                return;
+                            }
+                        }
+
+                        let session_name = match tmux_state::ensure_default_session() {
+                            Ok(name) => name,
+                            Err(e) => {
+                                log::error!("Failed to ensure a tmux session exists before reconnect: {e}");
+                                SESSION_NAME.to_string()
+                            }
+                        };
+
+                        let emit_handle = handle.clone();
+                        match tmux_control::TmuxControl::start(&session_name, handle) {
                             Ok(control) => {
                                 state.set_control(control);
                                 log::info!("tmux -CC reconnected");
+                                let _ = crate::tmux_state::emit_snapshot(&emit_handle);
                             }
                             Err(e) => log::error!("tmux -CC reconnect failed: {e}"),
                         }

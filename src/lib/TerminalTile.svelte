@@ -1,48 +1,57 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
+  import { onDestroy, onMount } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { createPty, destroyPty, writePty, resizePty, readPtyOutput, saveTileState } from './tauri';
-  import { removeTerminal, updateTerminal, selectedTerminalId } from './stores/terminals';
-  import { canvasState } from './stores/canvas';
-  import { mode } from './stores/mode';
-  import { registerTile, unregisterTile } from './stores/tileRegistry';
-  import type { TerminalInfo } from './types';
+  import { FitAddon } from '@xterm/addon-fit';
+  import { Terminal } from '@xterm/xterm';
+  import { readPaneOutput } from './tauri';
+  import type { TerminalInfo, PtyOutputEvent } from './types';
+  import {
+    canvasState,
+    mode,
+    persistPaneLayout,
+    reportPaneViewport,
+    removeTerminal,
+    selectedTerminalId,
+    updateTerminal,
+  } from './stores/appState';
 
   interface Props {
     info: TerminalInfo;
   }
+
   let { info }: Props = $props();
 
-  let isSelected = $derived($selectedTerminalId === info.id);
-  let isInputMode = $derived($mode === 'input');
-
-  let termRef: HTMLDivElement;
+  let termRef = $state<HTMLDivElement>();
   let terminal: Terminal;
   let fitAddon: FitAddon;
-  let sessionId = $state<string | null>(null);
-  let unlisten: UnlistenFn | null = null;
-  let unlisten2: UnlistenFn | null = null;
+  let helperTextarea: HTMLTextAreaElement | null = null;
+  let unlistenOutput: UnlistenFn | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  let syncFrame: number | null = null;
+  let lastViewportKey = '';
 
-  // Component designator (U1, U2, etc.)
-  let designator = $derived('U' + info.id.replace(/\D/g, ''));
-  // Show custom title if set, otherwise show designator
+  let isSelected = $derived($selectedTerminalId === info.id);
+  let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
 
-  // Drag state
   let isDragging = false;
   let dragStartX = 0;
   let dragStartY = 0;
   let origX = 0;
   let origY = 0;
 
-  // Resize state
   let isResizing = false;
   let resizeStartX = 0;
   let resizeStartY = 0;
   let origW = 0;
   let origH = 0;
+
+  function syncHelperTextarea() {
+    const nextTextarea = termRef?.querySelector('textarea');
+    const normalized = nextTextarea instanceof HTMLTextAreaElement ? nextTextarea : null;
+    if (normalized === helperTextarea) return;
+    helperTextarea = normalized;
+  }
 
   onMount(async () => {
     terminal = new Terminal({
@@ -81,62 +90,100 @@
 
     fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(termRef);
+    terminal.open(termRef!);
+    syncHelperTextarea();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    syncHelperTextarea();
+    void syncViewport(true);
 
-    await new Promise(r => setTimeout(r, 50));
-    fitAddon.fit();
-
-    const cols = terminal.cols;
-    const rows = terminal.rows;
-
-    // Register tile methods immediately — writeData uses sessionId which updates later
-    registerTile(info.id, {
-      scrollUp: () => terminal.scrollLines(-3),
-      scrollDown: () => terminal.scrollLines(3),
-      focusTerminal: () => terminal.focus(),
-      blurTerminal: () => terminal.blur(),
-      writeData: (data: string) => {
-        if (sessionId) writePty(sessionId, data).catch(() => {});
-      },
-    });
-
-    if (!info.sessionId) {
-      terminal.write('\r\nWaiting for session...\r\n');
-      return;
+    const initialOutput = await readPaneOutput(info.paneId).catch(() => '');
+    if (initialOutput) {
+      terminal.write(initialOutput);
     }
 
-    sessionId = info.sessionId;
-
-    // Listen on a single global event, filter by session_id or pane_id
-    unlisten = await listen<{ sid: string; pane: string; data: string }>('pty-output', (event) => {
-      const { sid, pane, data } = event.payload;
-      if (sid === sessionId || pane === info.paneId) {
-        terminal.write(data);
+    unlistenOutput = await listen<PtyOutputEvent>('pty-output', (event) => {
+      if (event.payload.pane_id === info.paneId) {
+        terminal.write(event.payload.data);
       }
     });
 
-    // Resize the pane to match our tile dimensions
-    await resizePty(sessionId, cols, rows).catch(() => {});
-
-    // Force the shell to redraw after a delay. The delay ensures our
-    // pty-output listener is fully registered before the output arrives.
-    setTimeout(() => {
-      if (sessionId) writePty(sessionId, '\x0c').catch(() => {});
-    }, 500);
+    resizeObserver = new ResizeObserver(() => {
+      queueViewportSync();
+    });
+    resizeObserver.observe(termRef!);
   });
 
   onDestroy(() => {
-    unregisterTile(info.id);
-    if (unlisten) unlisten();
-    if (unlisten2) unlisten2();
-    if (sessionId) destroyPty(sessionId).catch(() => {});
+    if (syncFrame !== null) {
+      cancelAnimationFrame(syncFrame);
+    }
+    if (resizeObserver) resizeObserver.disconnect();
+    if (unlistenOutput) unlistenOutput();
     if (terminal) terminal.dispose();
+  });
+
+  function queueViewportSync() {
+    if (syncFrame !== null) {
+      cancelAnimationFrame(syncFrame);
+    }
+    syncFrame = requestAnimationFrame(() => {
+      syncFrame = null;
+      void syncViewport();
+    });
+  }
+
+  async function syncViewport(requestResize = false) {
+    if (!terminal || !fitAddon || !termRef) return;
+    fitAddon.fit();
+    const cols = terminal.cols;
+    const rows = terminal.rows;
+    const pixelWidth = termRef.clientWidth;
+    const pixelHeight = termRef.clientHeight;
+    if (!cols || !rows || !pixelWidth || !pixelHeight) return;
+
+    const viewportKey = [
+      info.x,
+      info.y,
+      info.width,
+      info.height,
+      cols,
+      rows,
+      pixelWidth,
+      pixelHeight,
+    ].join(':');
+
+    if (viewportKey === lastViewportKey && !requestResize) return;
+    lastViewportKey = viewportKey;
+    await reportPaneViewport(info.paneId, cols, rows, pixelWidth, pixelHeight, requestResize);
+  }
+
+  $effect(() => {
+    info.x;
+    info.y;
+    info.width;
+    info.height;
+    if (terminal) {
+      queueViewportSync();
+    }
+  });
+
+  $effect(() => {
+    syncHelperTextarea();
+    if (!terminal || !helperTextarea) return;
+
+    if ($mode === 'input' && isSelected && !info.readOnly) {
+      helperTextarea.focus();
+      return;
+    }
+
+    if (document.activeElement === helperTextarea) {
+      helperTextarea.blur();
+    }
   });
 
   function handleTitleDblClick(e: MouseEvent) {
     const viewW = window.innerWidth;
     const viewH = window.innerHeight - 32;
-    // Zoom so the tile fills ~80% of the viewport
     const zoom = Math.min(viewW * 0.8 / info.width, viewH * 0.8 / info.height, 2);
     const panX = viewW / 2 - (info.x + info.width / 2) * zoom;
     const panY = viewH / 2 - (info.y + info.height / 2) * zoom;
@@ -174,21 +221,25 @@
     } else if (isResizing) {
       const dx = e.clientX - resizeStartX;
       const dy = e.clientY - resizeStartY;
-      const newW = Math.max(300, origW + dx);
-      const newH = Math.max(200, origH + dy);
-      updateTerminal(info.id, { width: newW, height: newH });
+      updateTerminal(info.id, {
+        width: Math.max(300, origW + dx),
+        height: Math.max(200, origH + dy),
+      });
     }
   }
 
   function handleWindowMouseUp() {
-    if (isResizing && fitAddon && sessionId) {
-      fitAddon.fit();
-      resizePty(sessionId, terminal.cols, terminal.rows).catch(() => {});
+    const wasDragging = isDragging;
+    const wasResizing = isResizing;
+
+    if (wasDragging) {
+      void persistPaneLayout(info.id);
     }
-    // Persist position/size after drag or resize
-    if ((isDragging || isResizing) && sessionId) {
-      saveTileState(sessionId, info.x, info.y, info.width, info.height, info.title).catch(() => {});
+
+    if (wasResizing) {
+      void syncViewport(true);
     }
+
     isDragging = false;
     isResizing = false;
   }
@@ -207,19 +258,15 @@
   style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
   onmousedown={(e) => {
     selectedTerminalId.set(info.id);
-    // In command mode, prevent xterm from stealing focus
     if ($mode === 'command') {
       e.preventDefault();
     }
     e.stopPropagation();
   }}
 >
-  <!-- Silkscreen component outline -->
   <div class="component-body">
-    <!-- Notch indicator (IC orientation mark) -->
     <div class="ic-notch"></div>
 
-    <!-- Header bar with designator -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="header-bar" onmousedown={handleTitleMouseDown} ondblclick={handleTitleDblClick}>
       <div class="header-left">
@@ -234,27 +281,18 @@
       </div>
     </div>
 
-    <!-- Terminal screen area -->
     <div class="screen-housing">
       <div class="screen-bezel">
         <div class="terminal-container" bind:this={termRef}></div>
       </div>
-      <!-- Phosphor glow effect -->
       <div class="phosphor-glow"></div>
-      <!-- Prevent xterm from stealing focus -->
-      <div class="input-shield"></div>
+      <div class="input-shield" class:pass-through={$mode === 'input'}></div>
     </div>
 
-    <!-- Bottom info strip -->
     <div class="info-strip">
       <span class="info-item">
-        {#if sessionId}
-          <span class="status-dot active"></span>
-          <span class="info-label">SID:{sessionId?.slice(0, 8)}</span>
-        {:else}
-          <span class="status-dot"></span>
-          <span class="info-label">INIT...</span>
-        {/if}
+        <span class="status-dot active"></span>
+        <span class="info-label">PID:{info.paneId.slice(0, 8)}</span>
       </span>
       <span class="info-item">
         <span class="info-label">{info.width}×{info.height}</span>
@@ -262,7 +300,6 @@
     </div>
   </div>
 
-  <!-- Resize handle -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="resize-handle" onmousedown={handleResizeMouseDown}>
     <svg width="10" height="10" viewBox="0 0 10 10">
@@ -289,7 +326,6 @@
     border-color: var(--phosphor-green-dim);
   }
 
-  /* ---- COMPONENT BODY ---- */
   .component-body {
     flex: 1;
     display: flex;
@@ -300,7 +336,6 @@
     min-width: 0;
   }
 
-  /* IC orientation notch */
   .ic-notch {
     position: absolute;
     top: -1px;
@@ -314,7 +349,6 @@
     background: var(--pcb-dark);
   }
 
-  /* ---- HEADER BAR ---- */
   .header-bar {
     display: flex;
     align-items: center;
@@ -337,7 +371,6 @@
 
   .designator {
     font-size: 11px;
-    font-weight: normal;
     color: var(--silk-white);
     letter-spacing: 1px;
   }
@@ -351,7 +384,6 @@
   .coord-info {
     font-size: 8px;
     color: var(--copper-dim);
-    letter-spacing: 0.5px;
   }
 
   .close-btn {
@@ -364,81 +396,73 @@
     border: 1px solid transparent;
     color: var(--silk-dim);
     cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 14px;
-    line-height: 1;
     padding: 0;
-    transition: all 0.1s;
   }
 
   .close-btn:hover {
-    border-color: var(--phosphor-red);
     color: var(--phosphor-red);
-    background: rgba(255, 51, 51, 0.1);
+    border-color: rgba(255, 51, 51, 0.2);
   }
 
   .close-x {
-    margin-top: -1px;
+    font-size: 12px;
+    line-height: 1;
   }
 
-  /* ---- TERMINAL SCREEN ---- */
   .screen-housing {
-    flex: 1;
     position: relative;
-    overflow: hidden;
+    flex: 1;
     min-height: 0;
+    background: linear-gradient(180deg, #0b1408 0%, #060d04 100%);
   }
 
   .screen-bezel {
     position: absolute;
-    inset: 3px;
-    border: 1px solid var(--pcb-light);
+    inset: 8px;
+    border: 1px solid var(--component-border);
+    background: #060d04;
     overflow: hidden;
   }
 
   .terminal-container {
     width: 100%;
     height: 100%;
-    padding: 2px 4px;
+    padding: 6px;
   }
 
-  .terminal-container :global(.xterm) {
-    height: 100%;
-  }
-
-  /* Block clicks to xterm in command mode */
-  .input-shield {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    cursor: default;
-  }
-
-  /* Green phosphor glow around terminal edge */
   .phosphor-glow {
     position: absolute;
-    inset: 2px;
+    inset: 8px;
     pointer-events: none;
-    box-shadow: inset 0 0 20px rgba(51, 255, 51, 0.03);
-    border: 1px solid rgba(51, 255, 51, 0.04);
+    box-shadow: inset 0 0 24px rgba(51, 255, 51, 0.06);
   }
 
-  /* ---- INFO STRIP ---- */
+  .input-shield {
+    position: absolute;
+    inset: 8px;
+    background: transparent;
+    pointer-events: auto;
+  }
+
+  .input-shield.pass-through {
+    pointer-events: none;
+  }
+
   .info-strip {
+    height: 20px;
+    padding: 0 8px;
+    border-top: 1px solid var(--component-border);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 16px;
-    padding: 0 8px;
-    background: var(--pcb-mask);
-    border-top: 1px solid var(--component-border);
     flex-shrink: 0;
+    background: rgba(0, 0, 0, 0.2);
   }
 
   .info-item {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
   }
 
   .info-label {
@@ -448,32 +472,26 @@
   }
 
   .status-dot {
-    width: 4px;
-    height: 4px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    background: var(--silk-dim);
+    background: var(--component-border);
   }
 
   .status-dot.active {
     background: var(--phosphor-green);
-    box-shadow: 0 0 4px var(--phosphor-green);
+    box-shadow: 0 0 6px rgba(51, 255, 51, 0.3);
   }
 
-  /* ---- RESIZE HANDLE ---- */
   .resize-handle {
     position: absolute;
-    bottom: 0;
-    right: 16px;
+    right: 2px;
+    bottom: 2px;
     width: 14px;
     height: 14px;
     cursor: nwse-resize;
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 10;
-  }
-
-  .resize-handle:hover :global(line) {
-    stroke: var(--phosphor-green-dim);
   }
 </style>

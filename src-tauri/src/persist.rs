@@ -12,12 +12,9 @@ pub struct TileState {
     pub y: f64,
     pub width: f64,
     pub height: f64,
-    pub title: String,
-    pub parent_tmux_session: Option<String>,
-    pub tab_id: Option<String>,
 }
 
-/// Maps tmux session name → tile state.
+/// Maps tmux pane ID -> tile state.
 pub type HerdState = HashMap<String, TileState>;
 
 fn state_path() -> String {

@@ -1,32 +1,327 @@
-use crate::state::AppState;
+use crate::{
+    persist::TileState,
+    state::AppState,
+    tmux,
+    tmux_state,
+};
 use std::process::Command;
-use tauri::Emitter;
+use tauri::Manager;
 
-#[tauri::command]
-pub fn create_pty(
-    state: tauri::State<'_, AppState>,
-    _app: tauri::AppHandle,
-    _cols: u16,
-    _rows: u16,
+fn active_session_id(snapshot: &tmux_state::TmuxSnapshot) -> Result<String, String> {
+    snapshot
+        .active_session_id
+        .clone()
+        .or_else(|| snapshot.sessions.first().map(|session| session.id.clone()))
+        .ok_or("no tmux session available".into())
+}
+
+fn active_window_id_for_session(
+    snapshot: &tmux_state::TmuxSnapshot,
+    session_id: &str,
 ) -> Result<String, String> {
-    // Create a new window in the tmux session; the control mode reader
-    // will detect the new pane and emit shell-spawned with a session_id.
-    state.with_control(|ctrl| {
-        ctrl.create_window()?;
-        // The actual session_id is assigned asynchronously when the pane is detected.
-        // Return a placeholder — the frontend will get the real ID via the shell-spawned event.
-        Ok("pending".to_string())
+    snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.active_window_id.clone().or_else(|| session.window_ids.first().cloned()))
+        .ok_or_else(|| format!("no tmux window available for session {session_id}"))
+}
+
+fn active_pane_id_for_window(
+    snapshot: &tmux_state::TmuxSnapshot,
+    window_id: &str,
+) -> Result<String, String> {
+    snapshot
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.pane_ids.first().cloned())
+        .ok_or_else(|| format!("no tmux pane available for window {window_id}"))
+}
+
+fn active_pane_id_for_session(
+    snapshot: &tmux_state::TmuxSnapshot,
+    session_id: &str,
+) -> Result<String, String> {
+    let window_id = active_window_id_for_session(snapshot, session_id)?;
+    active_pane_id_for_window(snapshot, &window_id)
+}
+
+fn tmux_control_client_alive(control_pid: Option<libc::pid_t>) -> bool {
+    let Some(control_pid) = control_pid else {
+        return false;
+    };
+
+    let output = match tmux::output(&["list-clients", "-F", "#{client_pid}\t#{client_control_mode}"]) {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    let control_pid = control_pid.to_string();
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let mut parts = line.split('\t');
+        matches!(
+            (parts.next(), parts.next()),
+            (Some(client_pid), Some("1")) if client_pid == control_pid
+        )
+    })
+}
+
+fn tmux_control_client_tty(control_pid: Option<libc::pid_t>) -> Option<String> {
+    let control_pid = control_pid?;
+    let output = tmux::output(&[
+        "list-clients",
+        "-F",
+        "#{client_pid}\t#{client_tty}\t#{client_control_mode}",
+    ])
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    control_client_tty_from_output(&String::from_utf8_lossy(&output.stdout), Some(control_pid))
+}
+
+fn switch_control_client_to_session(state: &AppState, session_id: &str) -> Result<(), String> {
+    if let Some(client_tty) = tmux_control_client_tty(state.current_control_pid()) {
+        let output = tmux::output(&["switch-client", "-c", &client_tty, "-t", session_id])?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(format!(
+            "tmux switch-client failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    tmux_state::select_session(session_id)
+}
+
+fn control_client_tty_from_output(output: &str, control_pid: Option<libc::pid_t>) -> Option<String> {
+    let control_pid = control_pid?;
+    let control_pid = control_pid.to_string();
+    output.lines().find_map(|line| {
+        let mut parts = line.split('\t');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(client_pid), Some(client_tty), Some("1")) if client_pid == control_pid => {
+                Some(client_tty.to_string())
+            }
+            _ => None,
+        }
     })
 }
 
 #[tauri::command]
-pub fn destroy_pty(
+pub fn get_tmux_state(state: tauri::State<'_, AppState>) -> Result<tmux_state::TmuxSnapshot, String> {
+    tmux_state::snapshot(&state)
+}
+
+#[tauri::command]
+pub fn get_layout_state(
     state: tauri::State<'_, AppState>,
-    session_id: String,
+) -> Result<std::collections::HashMap<String, TileState>, String> {
+    let states = state.tile_states.lock().map_err(|e| e.to_string())?;
+    Ok(states.clone())
+}
+
+#[tauri::command]
+pub fn save_layout_state(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> Result<(), String> {
-    state.with_control(|ctrl| {
-        ctrl.kill_pane_by_id(&session_id)
-    })
+    state.set_tile_state(&pane_id, TileState { x, y, width, height });
+    state.save();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn new_session(app: tauri::AppHandle, name: Option<String>) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let session_id = tmux_state::create_session(name.as_deref())?;
+    switch_control_client_to_session(state.inner(), &session_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(session_id)
+}
+
+#[tauri::command]
+pub fn kill_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let active_session_id = snapshot.active_session_id.clone();
+    let is_only_session = snapshot.sessions.len() <= 1;
+
+    let fallback_session_id = if is_only_session {
+        Some(tmux_state::create_session(Some(crate::SESSION_NAME))?)
+    } else {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id != session_id)
+            .map(|session| session.id.clone())
+    };
+
+    if active_session_id.as_deref() == Some(session_id.as_str()) {
+        if let Some(fallback) = fallback_session_id.as_ref() {
+            switch_control_client_to_session(state.inner(), fallback)?;
+        }
+    }
+
+    tmux_state::kill_session(&session_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn select_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    switch_control_client_to_session(state.inner(), &session_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_session(app: tauri::AppHandle, session_id: String, name: String) -> Result<(), String> {
+    tmux_state::rename_session(&session_id, &name)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn new_window(app: tauri::AppHandle, target_session_id: Option<String>) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let before = tmux_state::snapshot(state.inner())?;
+    let session_id = target_session_id.unwrap_or(active_session_id(&before)?);
+    let target_pane_id = active_pane_id_for_session(&before, &session_id)?;
+    let pane_id = tmux_state::create_window(Some(&target_pane_id), None)?;
+
+    let after = tmux_state::snapshot(state.inner())?;
+    let window_id = after
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| pane.window_id.clone())
+        .ok_or("tmux did not report the new window for the created pane")?;
+
+    tmux_state::select_window(&window_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(window_id)
+}
+
+#[tauri::command]
+pub fn split_pane(app: tauri::AppHandle, target_pane_id: Option<String>) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let session_id = if let Some(pane_id) = target_pane_id.as_ref() {
+        snapshot
+            .panes
+            .iter()
+            .find(|pane| &pane.id == pane_id)
+            .map(|pane| pane.session_id.clone())
+            .ok_or_else(|| format!("No tmux pane found for {pane_id}"))?
+    } else {
+        active_session_id(&snapshot)?
+    };
+    new_window(app, Some(session_id))
+}
+
+#[tauri::command]
+pub fn kill_window(app: tauri::AppHandle, window_id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .cloned()
+        .ok_or_else(|| format!("No tmux window found for {window_id}"))?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == window.session_id)
+        .cloned()
+        .ok_or_else(|| format!("No tmux session found for {}", window.session_id))?;
+
+    if session.window_ids.len() <= 1 {
+        tmux_state::respawn_window(&window_id)?;
+        tmux_state::emit_snapshot(&app)?;
+        return Ok(());
+    }
+
+    tmux_state::kill_window(&window_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn kill_pane(app: tauri::AppHandle, pane_id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let window_id = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| pane.window_id.clone())
+        .ok_or_else(|| format!("No tmux pane found for {pane_id}"))?;
+    kill_window(app, window_id)
+}
+
+#[tauri::command]
+pub fn select_window(app: tauri::AppHandle, window_id: String) -> Result<(), String> {
+    tmux_state::select_window(&window_id)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resize_window(_app: tauri::AppHandle, window_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    tmux_state::resize_window(&window_id, cols, rows)
+}
+
+#[tauri::command]
+pub fn rename_window(app: tauri::AppHandle, window_id: String, name: String) -> Result<(), String> {
+    tmux_state::rename_window(&window_id, &name)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_pane_title(app: tauri::AppHandle, pane_id: String, title: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let window_id = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| pane.window_id.clone())
+        .ok_or_else(|| format!("No tmux pane found for {pane_id}"))?;
+    tmux_state::rename_window(&window_id, &title)?;
+    tmux_state::set_pane_title(&pane_id, &title)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(())
+}
+
+// Compatibility alias: create a new single-pane tmux window in the active session.
+#[tauri::command]
+pub fn create_pty(app: tauri::AppHandle, _cols: u16, _rows: u16) -> Result<String, String> {
+    let window_id = new_window(app.clone(), None)?;
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    snapshot
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.pane_ids.first().cloned())
+        .ok_or("tmux did not report a pane for the new window".into())
+}
+
+// Compatibility alias: pane IDs are still the IO identity, but tiles are windows.
+#[tauri::command]
+pub fn destroy_pty(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    kill_pane(app, session_id)
 }
 
 #[tauri::command]
@@ -45,22 +340,19 @@ pub fn read_pty_output(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<String, String> {
-    // First try the buffer
     let buffered = state.read_output(&session_id).unwrap_or_default();
     if !buffered.is_empty() {
         return Ok(buffered);
     }
 
-    // Fallback: capture current pane content directly from tmux
-    let guard = state.tmux_writer.lock().map_err(|e| e.to_string())?;
-    let writer = guard.as_ref().ok_or("writer not initialized")?;
-    let pane_id = writer.pane_id_for(&session_id)
-        .ok_or_else(|| format!("No pane for session {session_id}"))?;
-
-    let output = Command::new("tmux")
-        .args(["-L", crate::tmux::server_name(), "capture-pane", "-t", &pane_id, "-e", "-p"])
-        .output()
-        .map_err(|e| format!("capture-pane failed: {e}"))?;
+    let output = tmux::output(&[
+        "capture-pane",
+        "-t",
+        &session_id,
+        "-e",
+        "-p",
+    ])
+    .map_err(|e| format!("capture-pane failed: {e}"))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -69,101 +361,62 @@ pub fn read_pty_output(
     }
 }
 
+// Compatibility alias: visual resize is now frontend-only, so this is a no-op.
 #[tauri::command]
 pub fn resize_pty(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-    cols: u16,
-    rows: u16,
+    _state: tauri::State<'_, AppState>,
+    _session_id: String,
+    _cols: u16,
+    _rows: u16,
 ) -> Result<(), String> {
-    state.with_control(|ctrl| {
-        ctrl.resize_by_id(&session_id, cols, rows)
-    })
+    Ok(())
 }
 
 #[tauri::command]
-pub fn save_tile_state(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    title: String,
-) -> Result<(), String> {
-    state.with_control(|ctrl| {
-        if let Some(pane_id) = ctrl.writer.pane_id_for(&session_id) {
-            if let Some(mut ts) = state.get_tile_state(&pane_id) {
-                ts.x = x;
-                ts.y = y;
-                ts.width = width;
-                ts.height = height;
-                ts.title = title;
-                state.set_tile_state(&pane_id, ts);
-                state.save();
-            }
-        }
-        Ok(())
-    })
-}
-
-#[tauri::command]
-pub fn tmux_tree() -> Result<serde_json::Value, String> {
-    let output = Command::new("tmux")
-        .args(["-L", crate::tmux::server_name(),
-               "list-panes", "-a", "-F",
-               "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_dead}"])
-        .output()
-        .map_err(|e| format!("tmux list-panes failed: {e}"))?;
-
-    if !output.status.success() {
-        return Ok(serde_json::json!([]));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut sessions: std::collections::BTreeMap<String, Vec<serde_json::Value>> = std::collections::BTreeMap::new();
-
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 7 { continue; }
-        let session_name = parts[0];
-        if session_name.starts_with('_') { continue; }
-
-        let pane = serde_json::json!({
-            "window_index": parts[1],
-            "window_name": parts[2],
-            "pane_id": parts[3],
-            "command": parts[4],
-            "pid": parts[5],
-            "dead": parts[6] == "1",
-        });
-
-        sessions.entry(session_name.to_string())
-            .or_default()
-            .push(pane);
-    }
-
-    let tree: Vec<serde_json::Value> = sessions.into_iter().map(|(name, panes)| {
+pub fn tmux_tree(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let snapshot = tmux_state::snapshot(&state)?;
+    let tree = snapshot.sessions.into_iter().map(|session| {
+        let windows = snapshot.windows.iter()
+            .filter(|window| window.session_id == session.id)
+            .map(|window| {
+                let pane = snapshot.panes.iter().find(|pane| pane.window_id == window.id);
+                serde_json::json!({
+                    "window_index": window.index.to_string(),
+                    "window_name": window.name,
+                    "window_id": window.id,
+                    "pane_id": pane.as_ref().map(|pane| pane.id.clone()),
+                    "command": pane.as_ref().map(|pane| pane.command.clone()).unwrap_or_default(),
+                    "dead": pane.as_ref().map(|pane| pane.dead).unwrap_or(false),
+                })
+            })
+            .collect::<Vec<_>>();
         serde_json::json!({
-            "session": name,
-            "panes": panes,
+            "session_id": session.id,
+            "session": session.name,
+            "windows": windows,
         })
-    }).collect();
-
+    }).collect::<Vec<_>>();
     Ok(serde_json::json!(tree))
 }
 
 #[tauri::command]
 pub fn spawn_log_shell(
-    _state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, AppState>,
     cmd: String,
 ) -> Result<(), String> {
-    let server = crate::tmux::server_name();
-    // Create a new window running the log command directly
-    Command::new("tmux")
-        .args(["-L", server, "new-window", "-t", crate::SESSION_NAME, &cmd])
-        .status()
-        .map_err(|e| format!("Failed to create log window: {e}"))?;
+    let snapshot = tmux_state::snapshot(&state)?;
+    let session_id = active_session_id(&snapshot)?;
+    let target_pane_id = active_pane_id_for_session(&snapshot, &session_id)?;
+    let pane_id = tmux_state::create_window(Some(&target_pane_id), Some(&cmd))?;
+    let latest = tmux_state::snapshot(&state)?;
+    if let Some(window_id) = latest
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| pane.window_id.clone())
+    {
+        let _ = tmux_state::select_window(&window_id);
+    }
     Ok(())
 }
 
@@ -172,56 +425,48 @@ pub fn tmux_restart(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let server = crate::tmux::server_name();
-
-    // Clear backend state and kill the -CC child process
     state.with_control(|ctrl| {
         ctrl.clear_all();
         Ok(())
     }).ok();
 
-    // Tell frontend to clear all tiles
-    let _ = app.emit("shells-clear", ());
-
-    // Kill ALL tmux processes for our server (including zombie -CC forkpty children)
     let _ = Command::new("pkill")
-        .args(["-9", "-f", "tmux -L herd"])
+        .args(["-9", "-f", "tmux .* -L herd"])
         .status();
-
-    // Remove stale socket
     let _ = std::fs::remove_file("/private/tmp/tmux-501/herd");
-
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
-    // Create fresh session with a real shell
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let herd_sock_env = format!("HERD_SOCK={}", crate::socket::SOCKET_PATH);
-
-    let status = Command::new("tmux")
-        .args(["-L", server, "new-session", "-d",
-               "-s", crate::SESSION_NAME, "-x", "80", "-y", "24",
-               "-e", &herd_sock_env,
-               &shell])
-        .status()
+    let output = tmux::output(&[
+            "new-session",
+            "-d",
+            "-s",
+            crate::SESSION_NAME,
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "-e",
+            &herd_sock_env,
+            &shell,
+        ])
         .map_err(|e| format!("Failed to create tmux session: {e}"))?;
-    if !status.success() {
-        return Err("tmux new-session failed".into());
+    if !output.status.success() {
+        return Err(format!(
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
 
-    let _ = Command::new("tmux")
-        .args(["-L", server, "set", "-g", "status", "off"])
-        .status();
-    let _ = Command::new("tmux")
-        .args(["-L", server, "set", "-g", "exit-empty", "off"])
-        .status();
-    let _ = Command::new("tmux")
-        .args(["-L", server, "set", "-g", "default-command", "zsh --no-rcs"])
-        .status();
+    let _ = tmux::output(&["set", "-g", "status", "off"]);
+    let _ = tmux::output(&["set", "-g", "exit-empty", "off"]);
+    let _ = tmux::output(&["set", "-g", "default-command", "zsh --no-rcs"]);
 
-    // Start control mode
-    match crate::tmux_control::TmuxControl::start(crate::SESSION_NAME, app) {
+    match crate::tmux_control::TmuxControl::start(crate::SESSION_NAME, app.clone()) {
         Ok(control) => {
             state.set_control(control);
+            let _ = tmux_state::emit_snapshot(&app);
             log::info!("tmux restarted and control mode reconnected");
             Ok(())
         }
@@ -230,35 +475,13 @@ pub fn tmux_restart(
 }
 
 #[tauri::command]
-pub fn sync_panes(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    // Re-emit shell-spawned events for all known panes
-    state.with_control(|ctrl| {
-        for (pane_id, session_id) in ctrl.list_panes() {
-            let payload = serde_json::json!({
-                "session_id": session_id,
-                "pane_id": pane_id,
-                "x": 100.0,
-                "y": 100.0,
-                "width": 640.0,
-                "height": 400.0,
-            });
-            let _ = app.emit("shell-spawned", &payload);
-        }
-        Ok(())
-    })
+pub fn sync_panes(app: tauri::AppHandle) -> Result<(), String> {
+    tmux_state::emit_snapshot(&app)
 }
 
 #[tauri::command]
 pub fn redraw_all_panes() -> Result<(), String> {
-    let server = crate::tmux::server_name();
-    // Force redraw by doing a resize bounce on each pane
-    let output = Command::new("tmux")
-        .args(["-L", server, "list-panes", "-s", "-t", crate::SESSION_NAME, "-F", "#{pane_id}"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = tmux::output(&["list-panes", "-a", "-F", "#{pane_id}"])?;
 
     let panes: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -266,10 +489,7 @@ pub fn redraw_all_panes() -> Result<(), String> {
         .collect();
 
     for pane_id in &panes {
-        // Send Ctrl+L via direct tmux command
-        let _ = Command::new("tmux")
-            .args(["-L", server, "send-keys", "-t", pane_id, "C-l"])
-            .status();
+        let _ = tmux::output(&["send-keys", "-t", pane_id, "C-l"]);
     }
 
     Ok(())
@@ -309,21 +529,57 @@ pub fn __write_dom_result(result: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn tmux_status() -> serde_json::Value {
-    let server_alive = Command::new("tmux")
-        .args(["-L", crate::tmux::server_name(), "list-sessions"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let cc_alive = Command::new("pgrep")
-        .args(["-f", "tmux -L herd -CC"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+pub fn tmux_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    let server_alive = tmux::is_running();
+    let cc_alive = tmux_control_client_alive(state.current_control_pid());
 
     serde_json::json!({
         "server": server_alive,
         "cc": cc_alive,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{control_client_tty_from_output, tmux_control_client_alive};
+
+    fn control_client_alive_from_output(output: &str, control_pid: Option<libc::pid_t>) -> bool {
+        let Some(control_pid) = control_pid else {
+            return false;
+        };
+        let control_pid = control_pid.to_string();
+        output.lines().any(|line| {
+            let mut parts = line.split('\t');
+            matches!(
+                (parts.next(), parts.next()),
+                (Some(client_pid), Some("1")) if client_pid == control_pid
+            )
+        })
+    }
+
+    #[test]
+    fn matches_the_tracked_control_client() {
+        let output = "92568\t1\n91234\t0\n";
+        assert!(control_client_alive_from_output(output, Some(92568)));
+        assert!(!control_client_alive_from_output(output, Some(91234)));
+        assert!(!control_client_alive_from_output(output, Some(99999)));
+        assert!(!control_client_alive_from_output(output, None));
+    }
+
+    #[test]
+    fn helper_returns_false_without_a_live_tmux_server() {
+        assert!(!tmux_control_client_alive(None));
+    }
+
+    #[test]
+    fn finds_the_tracked_control_client_tty() {
+        let output = "92568\t/dev/ttys009\t1\n91234\t/dev/ttys010\t0\n";
+        assert_eq!(
+            control_client_tty_from_output(output, Some(92568)),
+            Some("/dev/ttys009".to_string())
+        );
+        assert_eq!(control_client_tty_from_output(output, Some(91234)), None);
+        assert_eq!(control_client_tty_from_output(output, Some(99999)), None);
+        assert_eq!(control_client_tty_from_output(output, None), None);
+    }
 }

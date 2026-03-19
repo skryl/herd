@@ -39,7 +39,7 @@
   async function handleTmuxClick() {
     if (tmuxAlive) {
       await invoke('spawn_log_shell', {
-        cmd: 'bash -c \'tmux -L herd list-sessions; echo "---"; tmux -L herd list-panes -s -t herd -F "w#{window_index}: #{pane_id} #{pane_current_command}"; echo "---"; echo "Watching..."; while true; do tmux -L herd list-panes -s -t herd -F "w#{window_index}: #{pane_id} #{pane_current_command}" 2>/dev/null; sleep 2; echo "---"; done\''
+        cmd: 'bash -c \'tmux -f /dev/null -L herd list-sessions -F "#{session_id} #{session_name}"; echo "---"; tmux -f /dev/null -L herd list-windows -a -F "#{session_id} w#{window_index}: #{window_id} #{window_name} panes=#{window_panes}"; echo "---"; tmux -f /dev/null -L herd list-panes -a -F "#{session_id} w#{window_index}: #{window_id} #{pane_id} #{pane_current_command}"; echo "---"; echo "Watching..."; while true; do tmux -f /dev/null -L herd list-sessions -F "#{session_id} #{session_name}" 2>/dev/null; echo "---"; tmux -f /dev/null -L herd list-windows -a -F "#{session_id} w#{window_index}: #{window_id} #{window_name} panes=#{window_panes}" 2>/dev/null; echo "---"; tmux -f /dev/null -L herd list-panes -a -F "#{session_id} w#{window_index}: #{window_id} #{pane_id} #{pane_current_command}" 2>/dev/null; sleep 2; echo "---"; done\''
       }).catch((e: any) => console.error('spawn_log_shell failed:', e));
     } else {
       try {

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 // https://vite.dev/config/
@@ -7,5 +7,8 @@ export default defineConfig({
   clearScreen: false,
   server: {
     strictPort: true,
+  },
+  test: {
+    environment: 'node',
   },
 })

@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::persist::{self, HerdState, TileState};
 use crate::tmux_control::{TmuxControl, TmuxWriter, OutputBuffers};
 
@@ -9,6 +9,7 @@ pub struct AppState {
     pub tmux_writer: Arc<Mutex<Option<Arc<TmuxWriter>>>>,
     pub output_buffers: Arc<Mutex<Option<OutputBuffers>>>,
     pub tile_states: Arc<Mutex<HerdState>>,
+    pub snapshot_version: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -18,15 +19,18 @@ impl AppState {
             tmux_writer: Arc::new(Mutex::new(None)),
             output_buffers: Arc::new(Mutex::new(None)),
             tile_states: Arc::new(Mutex::new(persist::load())),
+            snapshot_version: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn set_control(&self, control: Arc<Mutex<TmuxControl>>) {
-        if let Ok(old_guard) = self.tmux_control.lock() {
-            if let Some(ref old) = *old_guard {
-                if let (Ok(mut new_ctrl), Ok(old_ctrl)) = (control.lock(), old.lock()) {
-                    new_ctrl.inherit_state(&old_ctrl);
-                }
+        let old = self.tmux_control.lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+
+        if let Some(ref old_control) = old {
+            if let (Ok(mut new_ctrl), Ok(old_ctrl)) = (control.lock(), old_control.lock()) {
+                new_ctrl.inherit_state(&old_ctrl);
             }
         }
 
@@ -41,18 +45,26 @@ impl AppState {
         if let Ok(mut c) = self.tmux_control.lock() {
             *c = Some(control);
         }
+
+        if let Some(old_control) = old {
+            if let Ok(old_ctrl) = old_control.lock() {
+                old_ctrl.terminate();
+            }
+        }
+    }
+
+    pub fn current_control_pid(&self) -> Option<libc::pid_t> {
+        let guard = self.tmux_control.lock().ok()?;
+        let control = guard.as_ref()?;
+        let ctrl = control.lock().ok()?;
+        Some(ctrl.child_pid())
     }
 
     pub fn read_output(&self, session_id: &str) -> Result<String, String> {
         let guard = self.output_buffers.lock().map_err(|e| e.to_string())?;
         let bufs_arc = guard.as_ref().ok_or("output buffers not initialized")?;
-        // Get pane_id from writer
-        let writer_guard = self.tmux_writer.lock().map_err(|e| e.to_string())?;
-        let writer = writer_guard.as_ref().ok_or("writer not initialized")?;
-        let pane_id = writer.pane_id_for(session_id)
-            .ok_or_else(|| format!("No pane for session {session_id}"))?;
         let mut bufs = bufs_arc.lock().map_err(|e| e.to_string())?;
-        match bufs.get_mut(&pane_id) {
+        match bufs.get_mut(session_id) {
             Some(b) => {
                 let bytes: Vec<u8> = b.drain(..).collect();
                 Ok(String::from_utf8_lossy(&bytes).to_string())
@@ -95,5 +107,9 @@ impl AppState {
         if let Ok(states) = self.tile_states.lock() {
             persist::save(&states);
         }
+    }
+
+    pub fn next_snapshot_version(&self) -> u64 {
+        self.snapshot_version.fetch_add(1, Ordering::SeqCst) + 1
     }
 }

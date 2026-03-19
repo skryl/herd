@@ -1,4 +1,1 @@
-import { writable } from 'svelte/store';
-
-export const sidebarOpen = writable(false);
-export const sidebarSelectedIdx = writable(0);
+export { sidebarOpen, sidebarSelectedIdx } from './appState';

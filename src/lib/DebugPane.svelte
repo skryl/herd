@@ -9,7 +9,7 @@
 
   let logLines = $state<string[]>([]);
   let pollInterval: ReturnType<typeof setInterval>;
-  let logRef: HTMLDivElement;
+  let logRef = $state<HTMLDivElement>();
   let lastSocketSize = 0;
   let lastCcSize = 0;
   let autoFollow = true;
