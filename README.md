@@ -2,27 +2,34 @@
 
 ![Herd screenshot](docs/screenshots/claudes.png)
 
-Herd is a Tauri desktop app for managing terminal work as a spatial canvas instead of a stack of tabs. It runs an isolated `tmux` server, projects shells into a zoomable 2D workspace, and exposes a local socket + MCP bridge so agents can spawn and control more shells from inside Herd.
+Herd is a Tauri desktop app for managing terminal work as a spatial canvas instead of a stack of tabs. It runs an isolated `tmux` server, projects shells into a zoomable 2D workspace, and exposes a local Unix socket plus an MCP bridge so tools and agents can drive the canvas from inside Herd.
+
+## Docs
+
+- [`docs/keyboard-shortcuts.md`](docs/keyboard-shortcuts.md): keyboard modes, navigation, view controls, sidebar controls, and command bar shortcuts
+- [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md): socket API, `test_driver`, compatibility notes, and manual `socat` examples
 
 ## What It Does
 
 - Renders terminal shells as draggable, resizable tiles on a pannable canvas
-- Keeps runtime shell topology in `tmux` and canvas geometry in Herd-owned layout metadata
-- Supports keyboard-first navigation with command mode and input mode
-- Exposes a local Unix socket at `/tmp/herd.sock`
-- Ships a separate stdio MCP server in `mcp-server/` that forwards to the socket API
-- Persists tile layout across app restarts in `tmp/herd-state.json`
+- Keeps runtime shell topology in `tmux` and canvas geometry in Herd-owned layout state
+- Maps tabs to tmux sessions and visible tiles to tmux windows with their primary pane
+- Draws parent/child links for shells spawned from another pane, including Claude hook tiles and tmux-created teammate panes
+- Supports keyboard-first control through command mode, input mode, the sidebar tree, the command bar, and the help overlay
+- Exposes a local Unix socket and a separate stdio MCP server in `mcp-server/`
+- Ships a typed in-app `test_driver` API used by the integration suite
 
 ## Current Runtime Model
 
 Herd currently behaves like this:
 
-- Herd starts its own isolated tmux server with `tmux -f /dev/null -L herd`
+- Herd starts or reconnects to its own isolated tmux server with `tmux -f /dev/null -L herd`
 - The frontend hydrates from backend `TmuxSnapshot` updates
-- `tmux` owns shell lifecycle, focus, active selection, and naming
-- Herd owns only presentation state such as tile positions, canvas zoom/pan, overlays, and local UI mode
-- UI tabs currently map to tmux sessions
-- Visible shell tiles currently map to single-pane tmux windows, with some compatibility APIs still referring to pane IDs as `session_id`
+- `tmux` owns shell lifecycle, focus, session/window naming, and output buffers
+- Herd owns tile geometry, canvas zoom/pan, overlays, parent-line rendering, local read-only state, and UI mode
+- A tab maps to a tmux session
+- A visible shell tile maps to a tmux window with its primary pane
+- New shells are created by splitting from an existing pane and immediately breaking that pane into its own window so every tile remains independent on the canvas
 
 ## Stack
 
@@ -31,6 +38,7 @@ Herd currently behaves like this:
 - Backend: Rust
 - Terminal runtime: tmux control mode
 - Agent bridge: Model Context Protocol (MCP) over stdio, backed by Herd's Unix socket
+- Test stack: Vitest plus a typed socket-driven integration harness
 
 ## Prerequisites
 
@@ -54,7 +62,7 @@ Install root dependencies:
 npm install
 ```
 
-Install and build the MCP bridge:
+Build the MCP bridge if you want to use the checked-in `.mcp.json` entry:
 
 ```bash
 cd mcp-server
@@ -71,7 +79,19 @@ npm run tauri dev
 
 That starts the Vite dev server, launches Tauri, ensures the private tmux server exists, and opens the Herd window.
 
-To produce a desktop build:
+For frontend-only iteration:
+
+```bash
+npm run dev
+```
+
+Frontend-only production bundle:
+
+```bash
+npm run build
+```
+
+Desktop build:
 
 ```bash
 npm run tauri build
@@ -79,121 +99,20 @@ npm run tauri build
 
 ## Runtime Files
 
-During local development, Herd writes state and logs under `tmp/` when possible:
+By default, Herd uses the runtime name `herd` and writes:
 
-- `tmp/herd-state.json`: persisted tile geometry
+- `/tmp/herd.sock`: local newline-delimited JSON socket API
 - `tmp/herd-socket.log`: socket traffic log
 - `tmp/herd-cc.log`: tmux control-mode log
+- `tmp/herd-state.json`: persisted tile geometry
 
-The public Unix socket path is:
-
-```text
-/tmp/herd.sock
-```
-
-## Keyboard Controls
-
-Herd is primarily keyboard-driven.
-
-### Modes
-
-- `i`: enter input mode for the selected shell
-- `Shift+Esc`: leave input mode and return to command mode
-- `:`: open the command bar
-- `?`: open help
-
-### Navigation
-
-- `h j k l`: move focus between tiles
-- `H J K L`: move the selected tile
-- `n` / `p`: cycle windows in the current tab
-- `N` / `P`: cycle tabs
-- `b`: toggle the tmux tree sidebar
-- `d`: toggle the debug pane
-
-### View
-
-- `z`: zoom to selected tile
-- `f`: fit all tiles in view
-- `0`: reset zoom and pan
-- `a`: auto-arrange shells in a grid
-
-### Shell And Tab Actions
-
-- `s`: new shell
-- `q`: close selected shell
-- `Q`: close all shells in the current tab
-- `t`: new tab
-- `w`: close current tab
-
-### Command Bar
-
-Examples:
-
-- `:sh`: new shell
-- `:q`: close selected shell
-- `:qa`: close all shells in the current tab
-- `:rename <name>`: rename selected shell
-- `:tn`: new tab
-- `:tc`: close tab
-- `:tr <name>`: rename tab
-- `:z`, `:fit`, `:reset`
-
-## Socket API
-
-Herd exposes a newline-delimited JSON protocol on `/tmp/herd.sock`.
-
-Supported commands:
-
-- `spawn_shell`
-- `destroy_shell`
-- `list_shells`
-- `send_input`
-- `read_output`
-- `set_title`
-- `set_read_only`
-- `dom_query`
-- `dom_keys`
-
-`dom_query` and `dom_keys` are test helpers for driving the live Tauri webview. Treat them as unstable internal tooling, not a polished external API.
-
-Example with `socat`:
-
-```bash
-export HERD_SOCK=/tmp/herd.sock
-
-printf '%s\n' '{"command":"list_shells"}' \
-  | socat - UNIX-CONNECT:$HERD_SOCK
-```
-
-Spawn a new shell:
-
-```bash
-printf '%s\n' '{"command":"spawn_shell"}' \
-  | socat - UNIX-CONNECT:$HERD_SOCK
-```
-
-Send input to a shell:
-
-```bash
-printf '%s\n' '{"command":"send_input","session_id":"%1","input":"pwd\n"}' \
-  | socat - UNIX-CONNECT:$HERD_SOCK
-```
-
-Read buffered output:
-
-```bash
-printf '%s\n' '{"command":"read_output","session_id":"%1"}' \
-  | socat - UNIX-CONNECT:$HERD_SOCK
-```
-
-Compatibility note: the socket API still uses `session_id` in a few places even when the value is actually a tmux pane ID.
+If you set `HERD_RUNTIME_ID`, Herd namespaces those files under `herd-<runtime_id>` instead. The integration suite uses that to run isolated app instances without colliding with the default runtime.
 
 ## MCP Server
 
-The repo includes a separate MCP server in [`mcp-server/`](/Users/skryl/Dev/herd/mcp-server) that forwards tool calls to Herd over `/tmp/herd.sock`.
+The repo includes a separate MCP server in [`mcp-server/`](mcp-server/) that forwards tool calls to Herd over the local socket.
 
-The checked-in [`.mcp.json`](/Users/skryl/Dev/herd/.mcp.json) points at:
+The checked-in [`.mcp.json`](.mcp.json) points at:
 
 ```json
 {
@@ -216,35 +135,37 @@ Available MCP tools:
 - `herd_read_output`
 - `herd_set_title`
 
+When `TMUX_PANE` or `HERD_SESSION_ID` is present in the calling environment, `herd_spawn_shell` forwards parent context so spawned tiles stay linked to the originating shell.
+
 The app must be running before the MCP server can connect successfully.
 
 ## Claude Integration
 
 Claude works best when it is launched inside a Herd shell, not from an unrelated terminal.
 
-- Herd runs shells inside its own isolated tmux server: `tmux -f /dev/null -L herd`
-- Herd injects `HERD_SOCK=/tmp/herd.sock` into shells it creates, so processes inside those shells can call back into Herd
-- If you start Claude with `claude --teammate-mode tmux`, Claude uses tmux as its team runtime
-- Herd watches that same tmux server through control mode and rebuilds the UI from tmux snapshots
-- When Claude creates teammate terminals through tmux, Herd sees the new tmux topology and renders those teammates as additional shells on the canvas
+The active project hooks are configured in [`.claude/settings.json`](.claude/settings.json):
 
-In practice, the flow looks like this:
+- `PreToolUse` matcher `Agent` -> [`.claude/hooks/on-agent-start.sh`](.claude/hooks/on-agent-start.sh)
+- `PreToolUse` matcher `Bash` -> [`.claude/hooks/on-bg-bash.sh`](.claude/hooks/on-bg-bash.sh)
+
+In the current setup:
+
+- Herd injects `HERD_SOCK` into the tmux shells it creates so processes inside those shells can call back into Herd
+- The hook scripts use `TMUX_PANE` when available so child tiles retain visible parent linkage
+- The `Agent` hook creates a normal child tile, titles it, launches the child process, and streams transcript/task updates into that tile
+- The background `Bash` hook only acts on `run_in_background` calls and marks the spawned tile as read-only
+- Herd also discovers tmux-created teammate panes directly through control mode, so tmux-created Claude teammates still appear as linked tiles even without a socket callback
+
+Typical flow:
 
 1. Open a shell in Herd.
 2. Start Claude in that shell with `claude --teammate-mode tmux`.
-3. Ask Claude to create teammates.
-4. Claude creates more tmux terminals.
-5. Herd detects the tmux changes and shows the teammates as new terminal tiles.
-
-This is the important boundary:
-
-- tmux is the shared runtime and process topology layer
-- Herd is the visual shell manager that projects tmux state onto the canvas
-- `HERD_SOCK` and the MCP bridge are optional control paths available from inside those tmux shells when Claude or its teammates need to ask Herd to spawn or manipulate shells directly
+3. Ask Claude to create teammates or run background tool work.
+4. Herd renders those hook-spawned or tmux-created children as additional linked tiles on the canvas.
 
 ## Testing
 
-Static checks and unit tests:
+Static checks and tests:
 
 ```bash
 npm run check
@@ -252,22 +173,24 @@ npm run test:unit
 npm run test:integration
 ```
 
-tmux integration script:
+Lower-level tmux integration script:
 
 ```bash
 bash bin/test-herd.sh
 ```
 
-The managed integration suite includes live coverage for:
+The managed integration suite currently covers:
 
-- the active Claude `PreToolUse` hooks, including normal Claude agent tiles launched from the hook path and background Bash read-only tiles
-- tmux-created teammate windows appearing as separate Herd tiles with preserved parent lineage
-
-The `test_dom_query` and `test_dom_keys` socket commands remain available for manual debugging only. They are not part of the supported automated test suite.
+- the typed in-app `test_driver` API
+- the configured Claude `PreToolUse` `Agent` hook
+- the configured Claude `PreToolUse` background `Bash` hook
+- tmux-created teammate panes appearing as linked child tiles with preserved lineage
 
 ## Repo Layout
 
-- [`src/`](/Users/skryl/Dev/herd/src): Svelte frontend
-- [`src-tauri/`](/Users/skryl/Dev/herd/src-tauri): Rust backend and Tauri app
-- [`mcp-server/`](/Users/skryl/Dev/herd/mcp-server): stdio MCP bridge
-- [`bin/`](/Users/skryl/Dev/herd/bin): helper scripts and integration test utilities
+- [`docs/`](docs/): reference docs and screenshots
+- [`src/`](src/): Svelte frontend
+- [`src-tauri/`](src-tauri/): Rust backend and Tauri app
+- [`mcp-server/`](mcp-server/): stdio MCP bridge
+- [`tests/integration/`](tests/integration/): typed socket-driven integration suite
+- [`bin/`](bin/): helper scripts and lower-level tmux test utilities
