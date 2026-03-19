@@ -1,5 +1,6 @@
 mod commands;
 mod persist;
+mod runtime;
 mod socket;
 mod state;
 mod tmux;
@@ -9,7 +10,6 @@ mod tmux_state;
 use tauri::{Listener, Manager};
 use state::AppState;
 
-const SESSION_NAME: &str = "herd";
 const DEFAULT_WEBVIEW_ZOOM: f64 = 1.5;
 
 fn connect_tmux_control(
@@ -38,7 +38,7 @@ fn connect_tmux_control(
         Ok(name) => name,
         Err(error) => {
             log::error!("Failed to ensure a tmux session exists: {error}");
-            SESSION_NAME.to_string()
+            runtime::session_name().to_string()
         }
     };
 
@@ -86,6 +86,8 @@ pub fn run() {
             commands::sync_panes,
             commands::redraw_all_panes,
             commands::__write_dom_result,
+            commands::__resolve_test_driver_request,
+            commands::__set_test_driver_state,
             commands::spawn_log_shell,
             commands::tmux_restart,
             commands::tmux_tree,
@@ -102,14 +104,14 @@ pub fn run() {
             // Ensure tmux server and session exist
             let already_running = tmux::is_running();
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            let herd_sock_env = format!("HERD_SOCK={}", socket::SOCKET_PATH);
+            let herd_sock_env = format!("HERD_SOCK={}", runtime::socket_path());
 
             if !already_running {
                 match tmux::output(&[
                     "new-session",
                     "-d",
                     "-s",
-                    SESSION_NAME,
+                    runtime::session_name(),
                     "-x",
                     "80",
                     "-y",
@@ -118,7 +120,9 @@ pub fn run() {
                     &herd_sock_env,
                     &shell,
                 ]) {
-                    Ok(output) if output.status.success() => log::info!("Created tmux session '{SESSION_NAME}'"),
+                    Ok(output) if output.status.success() => {
+                        log::info!("Created tmux session '{}'", runtime::session_name())
+                    }
                     Ok(output) => log::error!(
                         "Failed to create tmux session: {}",
                         String::from_utf8_lossy(&output.stderr).trim()

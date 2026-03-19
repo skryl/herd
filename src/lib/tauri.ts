@@ -74,3 +74,29 @@ export async function saveLayoutState(
 ): Promise<void> {
   return invoke('save_layout_state', { paneId, x, y, width, height });
 }
+
+export async function tmuxStatus(): Promise<{ server: boolean; cc: boolean }> {
+  return invoke<{ server: boolean; cc: boolean }>('tmux_status');
+}
+
+export async function setTestDriverState(options: {
+  frontendReady?: boolean;
+  bootstrapComplete?: boolean;
+}): Promise<void> {
+  return invoke('__set_test_driver_state', {
+    frontendReady: options.frontendReady ?? null,
+    bootstrapComplete: options.bootstrapComplete ?? null,
+  });
+}
+
+export async function resolveTestDriverRequest(
+  requestId: string,
+  data?: unknown,
+  error?: string,
+): Promise<void> {
+  return invoke('__resolve_test_driver_request', {
+    requestId,
+    data: data ?? null,
+    error: error ?? null,
+  });
+}

@@ -6,13 +6,15 @@
   import { readPaneOutput } from './tauri';
   import type { TerminalInfo, PtyOutputEvent } from './types';
   import {
-    canvasState,
     mode,
     persistPaneLayout,
+    registerPaneDriverHandle,
     reportPaneViewport,
     removeTerminal,
+    selectTile,
     selectedTerminalId,
     updateTerminal,
+    zoomCanvasToTile,
   } from './stores/appState';
 
   interface Props {
@@ -29,6 +31,7 @@
   let resizeObserver: ResizeObserver | null = null;
   let syncFrame: number | null = null;
   let lastViewportKey = '';
+  let unregisterDriverHandle: (() => void) | null = null;
 
   let isSelected = $derived($selectedTerminalId === info.id);
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
@@ -95,6 +98,13 @@
     await new Promise((resolve) => setTimeout(resolve, 50));
     syncHelperTextarea();
     void syncViewport(true);
+    unregisterDriverHandle = registerPaneDriverHandle(info.paneId, {
+      focusInput() {
+        syncHelperTextarea();
+        helperTextarea?.focus();
+      },
+      syncViewport,
+    });
 
     const initialOutput = await readPaneOutput(info.paneId).catch(() => '');
     if (initialOutput) {
@@ -119,6 +129,7 @@
     }
     if (resizeObserver) resizeObserver.disconnect();
     if (unlistenOutput) unlistenOutput();
+    if (unregisterDriverHandle) unregisterDriverHandle();
     if (terminal) terminal.dispose();
   });
 
@@ -182,12 +193,7 @@
   });
 
   function handleTitleDblClick(e: MouseEvent) {
-    const viewW = window.innerWidth;
-    const viewH = window.innerHeight - 32;
-    const zoom = Math.min(viewW * 0.8 / info.width, viewH * 0.8 / info.height, 2);
-    const panX = viewW / 2 - (info.x + info.width / 2) * zoom;
-    const panY = viewH / 2 - (info.y + info.height / 2) * zoom;
-    canvasState.set({ zoom, panX, panY });
+    zoomCanvasToTile(info.paneId, window.innerWidth, window.innerHeight - 32);
     e.stopPropagation();
   }
 
@@ -257,7 +263,7 @@
   class:selected={isSelected}
   style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
   onmousedown={(e) => {
-    selectedTerminalId.set(info.id);
+    selectTile(info.id);
     if ($mode === 'command') {
       e.preventDefault();
     }

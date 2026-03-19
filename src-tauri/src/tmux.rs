@@ -3,8 +3,9 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::runtime;
+
 const TMUX_CONFIG: &str = "/dev/null";
-const TMUX_SERVER: &str = "herd";
 const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn command() -> Command {
@@ -12,7 +13,7 @@ pub fn command() -> Command {
     command
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
-        .args(["-f", TMUX_CONFIG, "-L", TMUX_SERVER]);
+        .args(["-f", TMUX_CONFIG, "-L", runtime::tmux_server_name()]);
     command
 }
 
@@ -28,7 +29,11 @@ pub fn output(args: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("tmux spawn failed: {e}"))?;
 
     let deadline = Instant::now() + TMUX_COMMAND_TIMEOUT;
-    let command_line = format!("tmux -f {TMUX_CONFIG} -L {TMUX_SERVER} {}", args.join(" "));
+    let command_line = format!(
+        "tmux -f {TMUX_CONFIG} -L {} {}",
+        runtime::tmux_server_name(),
+        args.join(" "),
+    );
 
     loop {
         match child.try_wait().map_err(|e| format!("tmux wait failed: {e}"))? {
@@ -73,5 +78,5 @@ pub fn is_running() -> bool {
 
 /// Get the tmux server name.
 pub fn server_name() -> &'static str {
-    TMUX_SERVER
+    runtime::tmux_server_name()
 }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Output;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{socket, state::AppState, tmux, SESSION_NAME};
+use crate::{runtime, state::AppState, tmux};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TmuxSnapshot {
@@ -422,14 +422,14 @@ pub fn ensure_default_session() -> Result<String, String> {
     if let Some(name) = first_session_name()? {
         return Ok(name);
     }
-    let herd_sock = format!("HERD_SOCK={}", socket::SOCKET_PATH);
+    let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     ensure_success(
         run_tmux(&[
             "new-session",
             "-d",
             "-s",
-            SESSION_NAME,
+            runtime::session_name(),
             "-x",
             "80",
             "-y",
@@ -440,7 +440,7 @@ pub fn ensure_default_session() -> Result<String, String> {
         ])?,
         "tmux new-session failed",
     )?;
-    Ok(SESSION_NAME.to_string())
+    Ok(runtime::session_name().to_string())
 }
 
 pub fn first_session_name() -> Result<Option<String>, String> {
@@ -456,7 +456,7 @@ pub fn first_session_name() -> Result<Option<String>, String> {
 }
 
 pub fn create_session(name: Option<&str>) -> Result<String, String> {
-    let herd_sock = format!("HERD_SOCK={}", socket::SOCKET_PATH);
+    let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let session_name = unique_session_name(name)?;
     let output = ensure_success(
@@ -482,7 +482,7 @@ pub fn create_session(name: Option<&str>) -> Result<String, String> {
 }
 
 pub fn create_window(target_pane: Option<&str>, command: Option<&str>) -> Result<String, String> {
-    let herd_sock = format!("HERD_SOCK={}", socket::SOCKET_PATH);
+    let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let command = command.unwrap_or(&shell);
 
@@ -521,7 +521,7 @@ pub fn kill_window(window_id: &str) -> Result<(), String> {
 }
 
 pub fn respawn_window(window_id: &str) -> Result<(), String> {
-    let herd_sock = format!("HERD_SOCK={}", socket::SOCKET_PATH);
+    let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     ensure_success(
         run_tmux(&[

@@ -1,6 +1,15 @@
 <script lang="ts">
   import TerminalTile from './TerminalTile.svelte';
-  import { activeTabConnections, activeTabTerminals, canvasState, debugPaneOpen, mode, sidebarOpen } from './stores/appState';
+  import {
+    activeTabConnections,
+    activeTabTerminals,
+    canvasState,
+    debugPaneOpen,
+    mode,
+    panCanvasBy,
+    sidebarOpen,
+    wheelCanvas,
+  } from './stores/appState';
 
   let isPanning = false;
   let lastX = 0;
@@ -13,22 +22,8 @@
       return;
     }
     e.preventDefault();
-    canvasState.update((state) => {
-      const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05;
-      const newZoom = Math.max(0.2, Math.min(3, state.zoom * zoomFactor));
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const dx = cx - state.panX;
-      const dy = cy - state.panY;
-      const scale = newZoom / state.zoom;
-
-      return {
-        zoom: newZoom,
-        panX: cx - dx * scale,
-        panY: cy - dy * scale,
-      };
-    });
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    wheelCanvas(e.deltaY, e.clientX - rect.left, e.clientY - rect.top);
   }
 
   function handleMouseDown(e: MouseEvent) {
@@ -53,11 +48,7 @@
     const dy = e.clientY - lastY;
     lastX = e.clientX;
     lastY = e.clientY;
-    canvasState.update((current) => ({
-      ...current,
-      panX: current.panX + dx,
-      panY: current.panY + dy,
-    }));
+    panCanvasBy(dx, dy);
   }
 
   function handleMouseUp() {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const STATE_FILE: &str = "tmp/herd-state.json";
+use crate::runtime;
 
 /// Tile metadata that gets persisted across Herd restarts.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -18,9 +18,7 @@ pub struct TileState {
 pub type HerdState = HashMap<String, TileState>;
 
 fn state_path() -> String {
-    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let p = project_dir.join(STATE_FILE);
-    p.to_string_lossy().to_string()
+    runtime::state_path().to_string()
 }
 
 /// Load persisted state from disk.

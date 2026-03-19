@@ -1,3 +1,4 @@
+import { tick } from 'svelte';
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import {
   getLayoutState,
@@ -28,6 +29,8 @@ import type {
   SidebarTreeItem,
   Tab,
   TerminalInfo,
+  TestDriverProjection,
+  TestDriverStatus,
   TmuxPane,
   TmuxSession,
   TmuxSnapshot,
@@ -39,7 +42,7 @@ const GRID_SNAP = 20;
 const GAP = 30;
 const DEFAULT_TILE_WIDTH = 640;
 const DEFAULT_TILE_HEIGHT = 400;
-const AUTO_ARRANGE_PATTERNS = ['stack-down', 'stack-right', 'fan', 'spiral', 'circle', 'snowflake'] as const;
+const AUTO_ARRANGE_PATTERNS = ['stack-down', 'stack-right', 'spiral', 'circle', 'snowflake'] as const;
 type AutoArrangePattern = (typeof AUTO_ARRANGE_PATTERNS)[number];
 
 type TmuxEffect =
@@ -1161,9 +1164,24 @@ export function calculateWindowSizeRequest(
 }
 
 const pendingWindowResizeRequests = new Map<string, string>();
+const paneDriverHandles = new Map<string, PaneDriverHandle>();
+
+export interface PaneDriverHandle {
+  focusInput: () => void;
+  syncViewport: (requestResize?: boolean) => Promise<void>;
+}
 
 export function __resetWindowResizeTrackingForTest() {
   pendingWindowResizeRequests.clear();
+}
+
+export function registerPaneDriverHandle(paneId: string, handle: PaneDriverHandle): () => void {
+  paneDriverHandles.set(paneId, handle);
+  return () => {
+    if (paneDriverHandles.get(paneId) === handle) {
+      paneDriverHandles.delete(paneId);
+    }
+  };
 }
 
 function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo | null {
@@ -1313,6 +1331,179 @@ export function buildCanvasConnections(state: AppStateTree): CanvasConnection[] 
 
 export const activeTabConnections = derived(appState, ($state) => buildCanvasConnections($state));
 
+function activeViewportWidth(viewportWidth?: number): number {
+  return viewportWidth ?? window.innerWidth;
+}
+
+function activeViewportHeight(viewportHeight?: number): number {
+  return viewportHeight ?? (window.innerHeight - 54);
+}
+
+export function panCanvasBy(dx: number, dy: number) {
+  canvasState.update((state) => ({
+    ...state,
+    panX: state.panX + dx,
+    panY: state.panY + dy,
+  }));
+}
+
+export function zoomCanvasAtPoint(x: number, y: number, zoomFactor: number) {
+  canvasState.update((state) => {
+    const newZoom = Math.max(0.2, Math.min(3, state.zoom * zoomFactor));
+    const dx = x - state.panX;
+    const dy = y - state.panY;
+    const scale = newZoom / state.zoom;
+
+    return {
+      zoom: newZoom,
+      panX: x - dx * scale,
+      panY: y - dy * scale,
+    };
+  });
+}
+
+export function zoomCanvasAtViewportCenter(zoomFactor: number, viewportWidth?: number, viewportHeight?: number) {
+  zoomCanvasAtPoint(
+    activeViewportWidth(viewportWidth) / 2,
+    activeViewportHeight(viewportHeight) / 2,
+    zoomFactor,
+  );
+}
+
+export function wheelCanvas(deltaY: number, clientX: number, clientY: number) {
+  zoomCanvasAtPoint(clientX, clientY, deltaY > 0 ? 0.95 : 1.05);
+}
+
+export function fitCanvasToActiveTab(viewportWidth?: number, viewportHeight?: number) {
+  const list = get(activeTabTerminals);
+  if (list.length === 0) return;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const term of list) {
+    minX = Math.min(minX, term.x);
+    minY = Math.min(minY, term.y);
+    maxX = Math.max(maxX, term.x + term.width);
+    maxY = Math.max(maxY, term.y + term.height);
+  }
+
+  const viewW = activeViewportWidth(viewportWidth);
+  const viewH = activeViewportHeight(viewportHeight);
+  const contentW = maxX - minX;
+  const contentH = maxY - minY;
+  const zoom = Math.min(viewW * 0.9 / contentW, viewH * 0.9 / contentH, 2);
+  const panX = (viewW - contentW * zoom) / 2 - minX * zoom;
+  const panY = (viewH - contentH * zoom) / 2 - minY * zoom;
+  canvasState.set({ zoom, panX, panY });
+}
+
+export function zoomCanvasToTile(paneId: string, viewportWidth?: number, viewportHeight?: number) {
+  const term = get(terminals).find((item) => item.id === paneId);
+  if (!term) return;
+  const viewW = activeViewportWidth(viewportWidth);
+  const viewH = activeViewportHeight(viewportHeight);
+  const zoom = Math.min(viewW * 0.8 / term.width, viewH * 0.8 / term.height, 2);
+  const panX = viewW / 2 - (term.x + term.width / 2) * zoom;
+  const panY = viewH / 2 - (term.y + term.height / 2) * zoom;
+  canvasState.set({ zoom, panX, panY });
+}
+
+export function selectTile(paneId: string) {
+  selectedTerminalId.set(paneId);
+}
+
+export async function moveSelectedTerminalBy(dx: number, dy: number) {
+  await dispatchIntent({ type: 'move-selected-pane', dx, dy });
+}
+
+export async function dragTileBy(paneId: string, dx: number, dy: number, persist = true) {
+  const term = get(terminals).find((item) => item.id === paneId);
+  if (!term) return;
+  selectedTerminalId.set(paneId);
+  updateTerminal(paneId, { x: term.x + dx, y: term.y + dy });
+  if (persist) {
+    await persistPaneLayout(paneId);
+  }
+}
+
+export async function resizeTileTo(
+  paneId: string,
+  width: number,
+  height: number,
+  persist = true,
+  requestResize = true,
+) {
+  selectedTerminalId.set(paneId);
+  updateTerminal(paneId, {
+    width: Math.max(300, width),
+    height: Math.max(200, height),
+  });
+  if (persist) {
+    await persistPaneLayout(paneId);
+  }
+  await tick();
+  const handle = paneDriverHandles.get(paneId);
+  if (handle) {
+    await handle.syncViewport(requestResize);
+  }
+}
+
+export function buildTestDriverProjection(
+  state: AppStateTree,
+  status: TestDriverStatus,
+): TestDriverProjection {
+  return {
+    mode: state.ui.mode,
+    command_bar: {
+      open: state.ui.commandBarOpen,
+      text: state.ui.commandText,
+    },
+    help_open: state.ui.helpOpen,
+    sidebar: {
+      open: state.ui.sidebarOpen,
+      selected_index: state.ui.sidebarSelectedIdx,
+      items: buildSidebarItems(state),
+    },
+    close_tab_confirmation: state.ui.closeTabConfirmation,
+    selected_pane_id: state.ui.selectedPaneId,
+    canvas: state.ui.canvas,
+    tabs: state.tmux.sessionOrder
+      .map((id) => state.tmux.sessions[id])
+      .filter(Boolean)
+      .map((session) => ({
+        id: session.id,
+        name: session.name || 'Session',
+      })),
+    active_tab_id: state.tmux.activeSessionId,
+    active_tab_terminals: state.tmux.windowOrder
+      .filter((windowId) => state.tmux.windows[windowId]?.session_id === state.tmux.activeSessionId)
+      .map((windowId) => {
+        const paneId = state.tmux.windows[windowId]?.pane_ids[0];
+        return paneId ? terminalInfoForPane(state, paneId) : null;
+      })
+      .filter((term): term is TerminalInfo => Boolean(term)),
+    active_tab_connections: buildCanvasConnections(state).map((connection) => ({
+      child_window_id: connection.childWindowId,
+      parent_window_id: connection.parentWindowId,
+      x1: connection.x1,
+      y1: connection.y1,
+      x2: connection.x2,
+      y2: connection.y2,
+      cx1: connection.cx1,
+      cy1: connection.cy1,
+      cx2: connection.cx2,
+      cy2: connection.cy2,
+    })),
+    indicators: {
+      tmux: status.tmux_server_alive,
+      cc: status.control_client_alive,
+      sock: true,
+    },
+  };
+}
+
 export function setCanvasState(value: CanvasState) {
   canvasState.set(value);
 }
@@ -1373,6 +1564,14 @@ export function setSidebarSelection(index: number) {
 
 export function moveSidebarSelection(delta: number) {
   void dispatchIntent({ type: 'move-sidebar-selection', delta });
+}
+
+export function openSidebar() {
+  sidebarOpen.set(true);
+}
+
+export function closeSidebar() {
+  sidebarOpen.set(false);
 }
 
 export function beginSidebarRename() {
@@ -1559,7 +1758,7 @@ function circleRingPosition(index: number, total: number): { ring: number; slot:
   let ring = 1;
 
   while (remainingTotal > 0) {
-    const capacity = Math.max(6, ring * 8);
+    const capacity = ring * 6;
     const slots = Math.min(remainingTotal, capacity);
     if (remainingIndex < slots) {
       return { ring, slot: remainingIndex, slots };
@@ -1602,6 +1801,11 @@ function arrangedPositionForIndex(
 ): { x: number; y: number } {
   const anchorStepX = Math.max(anchor.width, width) + GAP;
   const anchorStepY = Math.max(anchor.height, height) + GAP;
+  const radialStep = Math.max(
+    anchorStepX,
+    anchorStepY,
+    Math.hypot((anchor.width + width) / 2 + GAP, (anchor.height + height) / 2 + GAP),
+  );
   const step = index + 1;
 
   switch (pattern) {
@@ -1615,11 +1819,6 @@ function arrangedPositionForIndex(
         x: anchor.x + step * anchorStepX,
         y: anchor.y,
       };
-    case 'fan':
-      return {
-        x: anchor.x + step * Math.round(anchorStepX * 0.68),
-        y: anchor.y + step * Math.round(anchorStepY * 0.38),
-      };
     case 'spiral': {
       const { col, row } = spiralOffset(index);
       return {
@@ -1630,13 +1829,13 @@ function arrangedPositionForIndex(
     case 'circle': {
       const { ring, slot, slots } = circleRingPosition(index, total);
       const angle = -Math.PI / 2 + (slot * Math.PI * 2) / Math.max(slots, 1);
-      return radialPosition(anchor, width, height, angle, anchorStepX * ring, anchorStepY * ring);
+      return radialPosition(anchor, width, height, angle, radialStep * ring, radialStep * ring);
     }
     case 'snowflake': {
       const ring = Math.floor(index / 6) + 1;
       const spoke = index % 6;
       const angle = -Math.PI / 3 + spoke * (Math.PI / 3);
-      return radialPosition(anchor, width, height, angle, anchorStepX * ring, anchorStepY * ring);
+      return radialPosition(anchor, width, height, angle, radialStep * ring, radialStep * ring);
     }
   }
 }
@@ -1684,12 +1883,14 @@ export async function autoArrange(sessionId: string | null) {
         index,
         siblingCount,
       );
-      arrangedEntries[windowId] = {
-        x: snapToGrid(position.x),
-        y: snapToGrid(position.y),
+      arrangedEntries[windowId] = findOpenPosition(
+        position.x,
+        position.y,
         width,
         height,
-      };
+        Object.keys(arrangedEntries),
+        arrangedEntries,
+      );
       entries[windowId] = arrangedEntries[windowId];
     });
     return {
@@ -1738,31 +1939,23 @@ export async function executeCommandBarCommand(command: string) {
       break;
     }
     case 'fit-all': {
-      const list = get(activeTabTerminals);
-      if (list.length === 0) break;
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const term of list) {
-        minX = Math.min(minX, term.x);
-        minY = Math.min(minY, term.y);
-        maxX = Math.max(maxX, term.x + term.width);
-        maxY = Math.max(maxY, term.y + term.height);
-      }
-      const viewW = window.innerWidth;
-      const viewH = window.innerHeight - 54;
-      const contentW = maxX - minX;
-      const contentH = maxY - minY;
-      const zoom = Math.min(viewW * 0.9 / contentW, viewH * 0.9 / contentH, 2);
-      const panX = (viewW - contentW * zoom) / 2 - minX * zoom;
-      const panY = (viewH - contentH * zoom) / 2 - minY * zoom;
-      canvasState.set({ zoom, panX, panY });
+      fitCanvasToActiveTab(window.innerWidth, window.innerHeight - 54);
       break;
     }
     default:
       break;
   }
+}
+
+export function cancelCommandBar() {
+  commandBarOpen.set(false);
+  commandText.set('');
+}
+
+export async function submitCommandBar() {
+  const command = get(commandText).trim();
+  await executeCommandBarCommand(command);
+  cancelCommandBar();
 }
 
 export function parseCommandBarCommand(command: string): CommandBarAction {

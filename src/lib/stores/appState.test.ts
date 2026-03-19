@@ -122,6 +122,18 @@ function snapshotWithMainWindowCount(count: number): TmuxSnapshot {
   };
 }
 
+function entriesOverlap(
+  left: { x: number; y: number; width: number; height: number },
+  right: { x: number; y: number; width: number; height: number },
+): boolean {
+  return (
+    left.x < right.x + right.width &&
+    left.x + left.width > right.x &&
+    left.y < right.y + right.height &&
+    left.y + left.height > right.y
+  );
+}
+
 beforeEach(() => {
   appState.set(freshState());
   __resetWindowResizeTrackingForTest();
@@ -528,7 +540,7 @@ describe('autoArrange', () => {
     expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(2, '@2', 100, 540, 640, 400);
   });
 
-  it('cycles through different arrangements on repeated calls', async () => {
+  it('advances through the remaining arrangement cycle on repeated calls', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
     state.layout.entries['@1'] = { x: 100, y: 100, width: 640, height: 400 };
     state.layout.entries['@2'] = { x: 880, y: 60, width: 640, height: 400 };
@@ -544,9 +556,17 @@ describe('autoArrange', () => {
     await autoArrange('$1');
     const third = get(appState).layout.entries['@2'];
 
+    await autoArrange('$1');
+    const fourth = get(appState).layout.entries['@2'];
+
+    await autoArrange('$1');
+    const fifth = get(appState).layout.entries['@2'];
+
     expect(first).toEqual({ x: 100, y: 540, width: 640, height: 400 });
     expect(second).toEqual({ x: 780, y: 100, width: 640, height: 400 });
-    expect(third).toEqual({ x: 560, y: 260, width: 640, height: 400 });
+    expect(third).toEqual({ x: 780, y: 100, width: 640, height: 400 });
+    expect(fourth).toEqual({ x: 100, y: -700, width: 640, height: 400 });
+    expect(fifth).toEqual({ x: 500, y: -580, width: 640, height: 400 });
   });
 
   it('adds circle and snowflake radial arrangements around the selected tile', async () => {
@@ -557,7 +577,6 @@ describe('autoArrange', () => {
     state.ui.selectedPaneId = '%1';
     appState.set(state);
 
-    await autoArrange('$1');
     await autoArrange('$1');
     await autoArrange('$1');
     await autoArrange('$1');
@@ -574,14 +593,35 @@ describe('autoArrange', () => {
     expect(spiral['@4']).toEqual({ x: 780, y: 540, width: 640, height: 400 });
 
     expect(circle['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(circle['@2']).toEqual({ x: 100, y: -320, width: 640, height: 400 });
-    expect(circle['@4']).toEqual({ x: 680, y: -120, width: 640, height: 400 });
-    expect(circle['@5']).toEqual({ x: 680, y: 320, width: 640, height: 400 });
+    expect(circle['@2']).toEqual({ x: 100, y: -700, width: 640, height: 400 });
+    expect(circle['@4']).toEqual({ x: 780, y: -300, width: 640, height: 400 });
+    expect(circle['@5']).toEqual({ x: 780, y: 500, width: 640, height: 400 });
 
     expect(snowflake['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(snowflake['@2']).toEqual({ x: 440, y: -280, width: 640, height: 400 });
-    expect(snowflake['@4']).toEqual({ x: 780, y: 100, width: 640, height: 400 });
-    expect(snowflake['@5']).toEqual({ x: 440, y: 480, width: 640, height: 400 });
+    expect(snowflake['@2']).toEqual({ x: 500, y: -580, width: 640, height: 400 });
+    expect(snowflake['@4']).toEqual({ x: 900, y: 100, width: 640, height: 400 });
+    expect(snowflake['@5']).toEqual({ x: 500, y: 780, width: 640, height: 400 });
+  });
+
+  it('keeps all arranged windows non-overlapping across the full cycle', async () => {
+    const state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(7));
+    for (const windowId of state.tmux.sessions['$1'].window_ids) {
+      state.layout.entries[windowId] = { x: 100, y: 100, width: 640, height: 400 };
+    }
+    state.ui.selectedPaneId = '%1';
+    appState.set(state);
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      await autoArrange('$1');
+      const entries = get(appState).layout.entries;
+      const arranged = state.tmux.sessions['$1'].window_ids.map((windowId) => entries[windowId]);
+
+      for (let left = 0; left < arranged.length; left += 1) {
+        for (let right = left + 1; right < arranged.length; right += 1) {
+          expect(entriesOverlap(arranged[left], arranged[right])).toBe(false);
+        }
+      }
+    }
   });
 });
 

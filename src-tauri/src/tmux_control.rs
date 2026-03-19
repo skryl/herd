@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::tmux;
+use crate::{runtime, tmux};
 
 /// Thread-safe writer + id map for sending input without contending with the reader.
 pub struct TmuxWriter {
@@ -154,17 +154,12 @@ impl TmuxControl {
         let refresh_pending = Arc::new(Mutex::new(false));
         thread::spawn(move || {
             // Open CC log file
-            let cc_log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp");
             let cc_log: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(
-                if cc_log_path.is_dir() {
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(cc_log_path.join("herd-cc.log"))
-                        .ok()
-                } else {
-                    None
-                }
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(runtime::cc_log_path())
+                    .ok()
             ));
 
             let reader = BufReader::new(reader);
@@ -281,7 +276,7 @@ impl TmuxControl {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         self.writer.send_raw(&format!(
             "new-window -e HERD_SOCK={} {}\n",
-            crate::socket::SOCKET_PATH, shell
+            runtime::socket_path(), shell
         ))
     }
 

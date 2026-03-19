@@ -1,4 +1,6 @@
 pub mod protocol;
 pub mod server;
 
-pub const SOCKET_PATH: &str = "/tmp/herd.sock";
+pub fn socket_path() -> &'static str {
+    crate::runtime::socket_path()
+}

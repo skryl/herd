@@ -242,8 +242,6 @@ This is the important boundary:
 - Herd is the visual shell manager that projects tmux state onto the canvas
 - `HERD_SOCK` and the MCP bridge are optional control paths available from inside those tmux shells when Claude or its teammates need to ask Herd to spawn or manipulate shells directly
 
-The end-to-end test in [`test-e2e.ts`](/Users/skryl/Dev/herd/test-e2e.ts) includes a Claude teammate-mode flow if you want a concrete example.
-
 ## Testing
 
 Static checks and unit tests:
@@ -251,6 +249,7 @@ Static checks and unit tests:
 ```bash
 npm run check
 npm run test:unit
+npm run test:integration
 ```
 
 tmux integration script:
@@ -259,13 +258,12 @@ tmux integration script:
 bash bin/test-herd.sh
 ```
 
-End-to-end script against the real Tauri webview:
+The managed integration suite includes live coverage for:
 
-```bash
-npx tsx test-e2e.ts
-```
+- the active Claude `PreToolUse` hooks, including normal Claude agent tiles launched from the hook path and background Bash read-only tiles
+- tmux-created teammate windows appearing as separate Herd tiles with preserved parent lineage
 
-`test-e2e.ts` expects Herd to already be running and listening on `/tmp/herd.sock`.
+The `test_dom_query` and `test_dom_keys` socket commands remain available for manual debugging only. They are not part of the supported automated test suite.
 
 ## Repo Layout
 

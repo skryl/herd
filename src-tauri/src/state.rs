@@ -1,8 +1,14 @@
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::HashMap;
+use std::sync::mpsc::Sender;
+
+use serde_json::Value;
+
 use crate::persist::{self, HerdState, TileState};
 use crate::tmux_control::{TmuxControl, TmuxWriter, OutputBuffers};
+
+type PendingTestDriverRequests = HashMap<String, Sender<Result<Value, String>>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,6 +19,10 @@ pub struct AppState {
     pub snapshot_version: Arc<AtomicU64>,
     pub last_active_session: Arc<Mutex<Option<String>>>,
     pub window_parents: Arc<Mutex<HashMap<String, String>>>,
+    pub test_driver_frontend_ready: Arc<AtomicBool>,
+    pub test_driver_bootstrap_complete: Arc<AtomicBool>,
+    pub pending_test_driver_requests: Arc<Mutex<PendingTestDriverRequests>>,
+    pub test_driver_request_counter: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -25,6 +35,10 @@ impl AppState {
             snapshot_version: Arc::new(AtomicU64::new(0)),
             last_active_session: Arc::new(Mutex::new(None)),
             window_parents: Arc::new(Mutex::new(HashMap::new())),
+            test_driver_frontend_ready: Arc::new(AtomicBool::new(false)),
+            test_driver_bootstrap_complete: Arc::new(AtomicBool::new(false)),
+            pending_test_driver_requests: Arc::new(Mutex::new(HashMap::new())),
+            test_driver_request_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -176,6 +190,62 @@ impl AppState {
         if let Ok(mut parents) = self.window_parents.lock() {
             parents.retain(|child, parent| keep(child, parent));
         }
+    }
+
+    pub fn set_test_driver_frontend_ready(&self, ready: bool) {
+        self.test_driver_frontend_ready.store(ready, Ordering::SeqCst);
+    }
+
+    pub fn test_driver_frontend_ready(&self) -> bool {
+        self.test_driver_frontend_ready.load(Ordering::SeqCst)
+    }
+
+    pub fn set_test_driver_bootstrap_complete(&self, complete: bool) {
+        self.test_driver_bootstrap_complete.store(complete, Ordering::SeqCst);
+    }
+
+    pub fn test_driver_bootstrap_complete(&self) -> bool {
+        self.test_driver_bootstrap_complete.load(Ordering::SeqCst)
+    }
+
+    pub fn next_test_driver_request_id(&self) -> String {
+        let value = self.test_driver_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("test-driver-{value}")
+    }
+
+    pub fn register_test_driver_request(
+        &self,
+        request_id: &str,
+        sender: Sender<Result<Value, String>>,
+    ) -> Result<(), String> {
+        let mut pending = self.pending_test_driver_requests.lock().map_err(|e| e.to_string())?;
+        pending.insert(request_id.to_string(), sender);
+        Ok(())
+    }
+
+    pub fn cancel_test_driver_request(&self, request_id: &str) {
+        if let Ok(mut pending) = self.pending_test_driver_requests.lock() {
+            pending.remove(request_id);
+        }
+    }
+
+    pub fn resolve_test_driver_request(
+        &self,
+        request_id: &str,
+        result: Result<Value, String>,
+    ) -> Result<bool, String> {
+        let sender = self
+            .pending_test_driver_requests
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(request_id);
+
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 

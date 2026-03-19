@@ -1,5 +1,6 @@
 use crate::{
     persist::TileState,
+    runtime,
     state::AppState,
     tmux,
     tmux_state,
@@ -158,7 +159,7 @@ pub fn kill_session(app: tauri::AppHandle, session_id: String) -> Result<(), Str
     let is_only_session = snapshot.sessions.len() <= 1;
 
     let fallback_session_id = if is_only_session {
-        Some(tmux_state::create_session(Some(crate::SESSION_NAME))?)
+        Some(tmux_state::create_session(Some(runtime::session_name()))?)
     } else {
         snapshot
             .sessions
@@ -434,18 +435,18 @@ pub fn tmux_restart(
     }).ok();
 
     let _ = Command::new("pkill")
-        .args(["-9", "-f", "tmux .* -L herd"])
+        .args(["-9", "-f", &format!("tmux .* -L {}", runtime::tmux_server_name())])
         .status();
-    let _ = std::fs::remove_file("/private/tmp/tmux-501/herd");
+    let _ = std::fs::remove_file(runtime::tmux_socket_file_path());
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let herd_sock_env = format!("HERD_SOCK={}", crate::socket::SOCKET_PATH);
+    let herd_sock_env = format!("HERD_SOCK={}", runtime::socket_path());
     let output = tmux::output(&[
             "new-session",
             "-d",
             "-s",
-            crate::SESSION_NAME,
+            runtime::session_name(),
             "-x",
             "80",
             "-y",
@@ -466,10 +467,10 @@ pub fn tmux_restart(
     let _ = tmux::output(&["set", "-g", "exit-empty", "off"]);
     let _ = tmux::output(&["set", "-g", "default-command", "zsh --no-rcs"]);
 
-    match crate::tmux_control::TmuxControl::start(crate::SESSION_NAME, app.clone()) {
+    match crate::tmux_control::TmuxControl::start(runtime::session_name(), app.clone()) {
         Ok(control) => {
             state.set_control(control);
-            state.set_last_active_session(Some(crate::SESSION_NAME.to_string()));
+            state.set_last_active_session(Some(runtime::session_name().to_string()));
             let _ = tmux_state::emit_snapshot(&app);
             log::info!("tmux restarted and control mode reconnected");
             Ok(())
@@ -504,14 +505,8 @@ pub fn read_log_tail(log_name: String, offset: u64) -> Result<String, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let path = match log_name.as_str() {
-        "socket" => {
-            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp/herd-socket.log");
-            p.to_string_lossy().to_string()
-        }
-        "cc" => {
-            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tmp/herd-cc.log");
-            p.to_string_lossy().to_string()
-        }
+        "socket" => runtime::socket_log_path().to_string(),
+        "cc" => runtime::cc_log_path().to_string(),
         _ => return Err(format!("Unknown log: {log_name}")),
     };
 
@@ -528,8 +523,38 @@ pub fn read_log_tail(log_name: String, offset: u64) -> Result<String, String> {
 
 #[tauri::command]
 pub fn __write_dom_result(result: String) -> Result<(), String> {
-    std::fs::write("/tmp/herd-dom-result.json", result)
+    std::fs::write(runtime::dom_result_path(), result)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn __set_test_driver_state(
+    state: tauri::State<'_, AppState>,
+    frontend_ready: Option<bool>,
+    bootstrap_complete: Option<bool>,
+) -> Result<(), String> {
+    if let Some(ready) = frontend_ready {
+        state.set_test_driver_frontend_ready(ready);
+    }
+    if let Some(complete) = bootstrap_complete {
+        state.set_test_driver_bootstrap_complete(complete);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn __resolve_test_driver_request(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    data: Option<serde_json::Value>,
+    error: Option<String>,
+) -> Result<(), String> {
+    let result = match error {
+        Some(error) => Err(error),
+        None => Ok(data.unwrap_or(serde_json::Value::Null)),
+    };
+    let _ = state.resolve_test_driver_request(&request_id, result)?;
+    Ok(())
 }
 
 #[tauri::command]

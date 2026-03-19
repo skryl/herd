@@ -1,5 +1,117 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestDriverKey {
+    pub key: String,
+    #[serde(default)]
+    pub shift_key: bool,
+    #[serde(default)]
+    pub ctrl_key: bool,
+    #[serde(default)]
+    pub alt_key: bool,
+    #[serde(default)]
+    pub meta_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TestDriverRequest {
+    Ping,
+    WaitForReady {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitForBootstrap {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitForIdle {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        settle_ms: Option<u64>,
+    },
+    GetStateTree,
+    GetProjection,
+    GetStatus,
+    PressKeys {
+        keys: Vec<TestDriverKey>,
+        #[serde(default)]
+        viewport_width: Option<f64>,
+        #[serde(default)]
+        viewport_height: Option<f64>,
+    },
+    CommandBarOpen,
+    CommandBarSetText {
+        text: String,
+    },
+    CommandBarSubmit,
+    CommandBarCancel,
+    ToolbarSelectTab {
+        session_id: String,
+    },
+    ToolbarAddTab {
+        #[serde(default)]
+        name: Option<String>,
+    },
+    ToolbarSpawnShell,
+    SidebarOpen,
+    SidebarClose,
+    SidebarSelectItem {
+        index: usize,
+    },
+    SidebarMoveSelection {
+        delta: i32,
+    },
+    SidebarBeginRename,
+    TileSelect {
+        pane_id: String,
+    },
+    TileClose {
+        pane_id: String,
+    },
+    TileDrag {
+        pane_id: String,
+        dx: f64,
+        dy: f64,
+    },
+    TileResize {
+        pane_id: String,
+        width: f64,
+        height: f64,
+    },
+    TileTitleDoubleClick {
+        pane_id: String,
+        #[serde(default)]
+        viewport_width: Option<f64>,
+        #[serde(default)]
+        viewport_height: Option<f64>,
+    },
+    CanvasPan {
+        dx: f64,
+        dy: f64,
+    },
+    CanvasZoomAt {
+        x: f64,
+        y: f64,
+        zoom_factor: f64,
+    },
+    CanvasWheel {
+        delta_y: f64,
+        client_x: f64,
+        client_y: f64,
+    },
+    CanvasFitAll {
+        #[serde(default)]
+        viewport_width: Option<f64>,
+        #[serde(default)]
+        viewport_height: Option<f64>,
+    },
+    CanvasReset,
+    ConfirmCloseTab,
+    CancelCloseTab,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum SocketCommand {
@@ -30,10 +142,12 @@ pub enum SocketCommand {
     SetTitle { session_id: String, title: String },
     #[serde(rename = "set_read_only")]
     SetReadOnly { session_id: String, read_only: bool },
-    #[serde(rename = "dom_query")]
-    DomQuery { js: String },
-    #[serde(rename = "dom_keys")]
-    DomKeys { keys: String },
+    #[serde(rename = "test_driver")]
+    TestDriver { request: TestDriverRequest },
+    #[serde(rename = "test_dom_query")]
+    TestDomQuery { js: String },
+    #[serde(rename = "test_dom_keys")]
+    TestDomKeys { keys: String },
     #[serde(rename = "tmux_pane_created")]
     TmuxPaneCreated {
         tmux_session: String,

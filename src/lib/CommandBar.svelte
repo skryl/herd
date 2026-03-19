@@ -1,17 +1,14 @@
 <script lang="ts">
-  import { commandBarOpen, commandText, executeCommandBarCommand } from './stores/appState';
+  import { cancelCommandBar, commandBarOpen, commandText, submitCommandBar } from './stores/appState';
 
   let inputRef = $state<HTMLInputElement>();
 
   async function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
-      commandBarOpen.set(false);
-      commandText.set('');
+      cancelCommandBar();
       e.preventDefault();
     } else if (e.key === 'Enter') {
-      await executeCommandBarCommand($commandText.trim());
-      commandBarOpen.set(false);
-      commandText.set('');
+      await submitCommandBar();
       e.preventDefault();
     }
   }
