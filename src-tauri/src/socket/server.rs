@@ -115,9 +115,40 @@ fn handle_command(
     app: &AppHandle,
 ) -> SocketResponse {
     match cmd {
-        SocketCommand::SpawnShell { x: _, y: _, width: _, height: _, parent_session_id: _ } => {
-            match crate::commands::new_window(app.clone(), None) {
+        SocketCommand::SpawnShell { x: _, y: _, width: _, height: _, parent_session_id, parent_pane_id } => {
+            let before = match crate::tmux_state::snapshot(state) {
+                Ok(snapshot) => snapshot,
+                Err(e) => return SocketResponse::error(e),
+            };
+
+            let target_session_id = parent_pane_id
+                .as_ref()
+                .and_then(|pane_id| {
+                    before
+                        .panes
+                        .iter()
+                        .find(|pane| &pane.id == pane_id)
+                        .map(|pane| pane.session_id.clone())
+                })
+                .or(parent_session_id.clone())
+                .or(before.active_session_id.clone());
+
+            let parent_window_id = parent_pane_id
+                .as_ref()
+                .and_then(|pane_id| {
+                    before
+                        .panes
+                        .iter()
+                        .find(|pane| &pane.id == pane_id)
+                        .map(|pane| pane.window_id.clone())
+                });
+
+            match crate::commands::new_window(app.clone(), target_session_id) {
                 Ok(window_id) => {
+                    if let Some(parent_window_id) = parent_window_id.clone() {
+                        state.set_window_parent(&window_id, Some(parent_window_id));
+                        let _ = crate::tmux_state::emit_snapshot(app);
+                    }
                     let snapshot = crate::tmux_state::snapshot(state);
                     let pane_id = snapshot
                         .ok()
@@ -128,9 +159,11 @@ fn handle_command(
                                 .find(|window| window.id == window_id)
                                 .and_then(|window| window.pane_ids.first().cloned())
                         })
-                        .unwrap_or(window_id);
+                        .unwrap_or_else(|| window_id.clone());
                     SocketResponse::success(Some(serde_json::json!({
                         "session_id": pane_id,
+                        "window_id": window_id,
+                        "parent_window_id": parent_window_id,
                     })))
                 }
                 Err(e) => SocketResponse::error(e),

@@ -10,6 +10,51 @@ use tauri::{Listener, Manager};
 use state::AppState;
 
 const SESSION_NAME: &str = "herd";
+const DEFAULT_WEBVIEW_ZOOM: f64 = 1.5;
+
+fn connect_tmux_control(
+    handle: tauri::AppHandle,
+    state: &AppState,
+    preferred_session: Option<String>,
+) -> Result<String, String> {
+    let mut last_error: Option<String> = None;
+    let preferred_session = preferred_session.filter(|session| !session.trim().is_empty());
+
+    if let Some(target) = preferred_session.clone() {
+        match tmux_control::TmuxControl::start(&target, handle.clone()) {
+            Ok(control) => {
+                state.set_control(control);
+                state.set_last_active_session(Some(target.clone()));
+                return Ok(target);
+            }
+            Err(error) => {
+                log::warn!("Failed to attach tmux control mode to '{target}': {error}");
+                last_error = Some(error);
+            }
+        }
+    }
+
+    let fallback_session = match tmux_state::ensure_default_session() {
+        Ok(name) => name,
+        Err(error) => {
+            log::error!("Failed to ensure a tmux session exists: {error}");
+            SESSION_NAME.to_string()
+        }
+    };
+
+    if preferred_session.as_deref() == Some(fallback_session.as_str()) {
+        return Err(last_error.unwrap_or_else(|| "failed to start tmux control mode".to_string()));
+    }
+
+    match tmux_control::TmuxControl::start(&fallback_session, handle) {
+        Ok(control) => {
+            state.set_control(control);
+            state.set_last_active_session(Some(fallback_session.clone()));
+            Ok(fallback_session)
+        }
+        Err(error) => Err(last_error.unwrap_or(error)),
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -84,23 +129,20 @@ pub fn run() {
                 log::info!("tmux server already running, reconnecting");
             }
 
-            let attach_session = match tmux_state::ensure_default_session() {
-                Ok(name) => name,
-                Err(e) => {
-                    log::error!("Failed to ensure a tmux session exists: {e}");
-                    SESSION_NAME.to_string()
+            if let Some(webview) = app.get_webview_window("main") {
+                if let Err(error) = webview.set_zoom(DEFAULT_WEBVIEW_ZOOM) {
+                    log::warn!("Failed to set default webview zoom: {error}");
                 }
-            };
+            }
 
             let _ = tmux::output(&["set", "-g", "status", "off"]);
             let _ = tmux::output(&["set", "-g", "default-command", "zsh --no-rcs"]);
             let _ = tmux::output(&["set", "-g", "exit-empty", "off"]);
             // Start control mode connection
             let handle = app.handle().clone();
-            match tmux_control::TmuxControl::start(&attach_session, handle.clone()) {
-                Ok(control) => {
-                    let state = app.state::<AppState>();
-                    state.set_control(control);
+            let state = app.state::<AppState>();
+            match connect_tmux_control(handle.clone(), state.inner(), state.last_active_session()) {
+                Ok(attach_session) => {
                     log::info!("tmux control mode connected to '{attach_session}'");
                     let _ = crate::tmux_state::emit_snapshot(&app.handle());
                 }
@@ -136,19 +178,11 @@ pub fn run() {
                             }
                         }
 
-                        let session_name = match tmux_state::ensure_default_session() {
-                            Ok(name) => name,
-                            Err(e) => {
-                                log::error!("Failed to ensure a tmux session exists before reconnect: {e}");
-                                SESSION_NAME.to_string()
-                            }
-                        };
-
                         let emit_handle = handle.clone();
-                        match tmux_control::TmuxControl::start(&session_name, handle) {
-                            Ok(control) => {
-                                state.set_control(control);
-                                log::info!("tmux -CC reconnected");
+                        let preferred_session = state.last_active_session();
+                        match connect_tmux_control(handle, &state, preferred_session) {
+                            Ok(session_name) => {
+                                log::info!("tmux -CC reconnected to '{session_name}'");
                                 let _ = crate::tmux_state::emit_snapshot(&emit_handle);
                             }
                             Err(e) => log::error!("tmux -CC reconnect failed: {e}"),

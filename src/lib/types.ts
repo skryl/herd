@@ -2,6 +2,7 @@ export interface TerminalInfo {
   id: string;
   paneId: string;
   windowId: string;
+  parentWindowId?: string | null;
   sessionId: string;
   tabId: string;
   x: number;
@@ -25,6 +26,12 @@ export interface CanvasZoomBookmark {
   mode: CanvasZoomMode;
   paneId: string;
   previousCanvas: CanvasState;
+}
+
+export interface CloseTabConfirmation {
+  sessionId: string;
+  sessionName: string;
+  paneCount: number;
 }
 
 export interface Tab {
@@ -63,6 +70,7 @@ export interface TmuxWindow {
   cols: number;
   rows: number;
   pane_ids: string[];
+  parent_window_id?: string | null;
 }
 
 export interface TmuxPane {
@@ -114,8 +122,10 @@ export interface UiState {
   debugPaneOpen: boolean;
   selectedPaneId: string | null;
   paneViewportHints: Record<string, PaneViewportHint>;
+  arrangementCycleBySession: Record<string, number>;
   canvas: CanvasState;
   zoomBookmark: CanvasZoomBookmark | null;
+  closeTabConfirmation: CloseTabConfirmation | null;
 }
 
 export interface TmuxStateSlice {

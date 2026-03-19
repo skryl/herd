@@ -4,6 +4,7 @@
   import { onDestroy, onMount } from 'svelte';
   import Canvas from './lib/Canvas.svelte';
   import CommandBar from './lib/CommandBar.svelte';
+  import ConfirmDialog from './lib/ConfirmDialog.svelte';
   import DebugPane from './lib/DebugPane.svelte';
   import HelpPane from './lib/HelpPane.svelte';
   import Sidebar from './lib/Sidebar.svelte';
@@ -20,6 +21,7 @@
     beginSidebarRename,
     bootstrapAppState,
     canvasState,
+    closeTabConfirmation,
     commandBarOpen,
     debugPaneOpen,
     dispatchIntent,
@@ -28,7 +30,6 @@
     moveSidebarSelection,
     nextTab,
     prevTab,
-    removeTab,
     selectedTerminalId,
     selectDirectional,
     selectNextTerminal,
@@ -77,19 +78,6 @@
     const panX = (viewW - (maxX - minX) * zoom) / 2 - minX * zoom;
     const panY = (viewH - (maxY - minY) * zoom) / 2 - minY * zoom;
     canvasState.set({ zoom, panX, panY });
-  }
-
-  function closeActiveTabWithConfirmation() {
-    const tabId = get(activeTabId);
-    if (!tabId) return;
-    const currentState = get(appState);
-    const panesInTab = get(activeTabTerminals).length;
-    if (panesInTab > 1) {
-      const sessionName = currentState.tmux.sessions[tabId]?.name || 'this tab';
-      const shouldClose = window.confirm(`Close "${sessionName}" and kill ${panesInTab} panes?`);
-      if (!shouldClose) return;
-    }
-    removeTab(tabId);
   }
 
   function zoomCanvasAtViewportCenter(zoomFactor: number) {
@@ -155,6 +143,18 @@
   function handleKeyDown(e: KeyboardEvent) {
     const state = get(appState);
     const currentMode = get(mode);
+    const pendingCloseTabConfirmation = get(closeTabConfirmation);
+
+    if (pendingCloseTabConfirmation) {
+      if (e.key === 'Escape' || e.key === 'n' || e.key === 'N') {
+        void dispatchIntent({ type: 'cancel-close-active-tab' });
+        e.preventDefault();
+      } else if (e.key === 'Enter' || e.key === 'y' || e.key === 'Y' || e.key === 'X') {
+        void dispatchIntent({ type: 'confirm-close-active-tab' });
+        e.preventDefault();
+      }
+      return;
+    }
 
     if (get(commandBarOpen)) {
       return;
@@ -351,7 +351,7 @@
         e.preventDefault();
         break;
       case 'X':
-        closeActiveTabWithConfirmation();
+        void dispatchIntent({ type: 'close-active-tab' });
         e.preventDefault();
         break;
       case 't':
@@ -359,7 +359,7 @@
         e.preventDefault();
         break;
       case 'w': {
-        closeActiveTabWithConfirmation();
+        void dispatchIntent({ type: 'close-active-tab' });
         e.preventDefault();
         break;
       }
@@ -391,6 +391,7 @@
 <Sidebar />
 <Canvas />
 <CommandBar />
+<ConfirmDialog />
 <DebugPane />
 <StatusBar />
 <HelpPane />

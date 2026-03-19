@@ -1,6 +1,6 @@
 <script lang="ts">
   import TerminalTile from './TerminalTile.svelte';
-  import { activeTabTerminals, canvasState, debugPaneOpen, mode, sidebarOpen } from './stores/appState';
+  import { activeTabConnections, activeTabTerminals, canvasState, debugPaneOpen, mode, sidebarOpen } from './stores/appState';
 
   let isPanning = false;
   let lastX = 0;
@@ -82,6 +82,19 @@
     class="canvas-world"
     style="transform: translate({$canvasState.panX}px, {$canvasState.panY}px) scale({$canvasState.zoom})"
   >
+    {#if $activeTabConnections.length > 0}
+      <svg class="connections-svg">
+        {#each $activeTabConnections as conn (conn.childWindowId)}
+          <path
+            d="M {conn.x1} {conn.y1} C {conn.cx1} {conn.cy1}, {conn.cx2} {conn.cy2}, {conn.x2} {conn.y2}"
+            class="conn-line"
+          />
+          <circle cx={conn.x1} cy={conn.y1} r="3" class="conn-dot-parent" />
+          <circle cx={conn.x2} cy={conn.y2} r="3" class="conn-dot" />
+        {/each}
+      </svg>
+    {/if}
+
     <div class="origin-mark">
       <div class="origin-h"></div>
       <div class="origin-v"></div>
@@ -129,6 +142,34 @@
     position: absolute;
     top: 0;
     left: 0;
+  }
+
+  .connections-svg {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .conn-line {
+    fill: none;
+    stroke: rgba(242, 176, 90, 0.58);
+    stroke-width: 2;
+    stroke-dasharray: 7 5;
+    filter: drop-shadow(0 0 5px rgba(242, 176, 90, 0.28));
+  }
+
+  .conn-dot,
+  .conn-dot-parent {
+    pointer-events: none;
+  }
+
+  .conn-dot {
+    fill: rgba(242, 176, 90, 0.95);
+  }
+
+  .conn-dot-parent {
+    fill: rgba(120, 229, 164, 0.95);
   }
 
   .origin-mark {

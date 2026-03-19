@@ -86,6 +86,7 @@ fn switch_control_client_to_session(state: &AppState, session_id: &str) -> Resul
     if let Some(client_tty) = tmux_control_client_tty(state.current_control_pid()) {
         let output = tmux::output(&["switch-client", "-c", &client_tty, "-t", session_id])?;
         if output.status.success() {
+            state.set_last_active_session(Some(session_id.to_string()));
             return Ok(());
         }
         return Err(format!(
@@ -94,7 +95,9 @@ fn switch_control_client_to_session(state: &AppState, session_id: &str) -> Resul
         ));
     }
 
-    tmux_state::select_session(session_id)
+    tmux_state::select_session(session_id)?;
+    state.set_last_active_session(Some(session_id.to_string()));
+    Ok(())
 }
 
 fn control_client_tty_from_output(output: &str, control_pid: Option<libc::pid_t>) -> Option<String> {
@@ -466,6 +469,7 @@ pub fn tmux_restart(
     match crate::tmux_control::TmuxControl::start(crate::SESSION_NAME, app.clone()) {
         Ok(control) => {
             state.set_control(control);
+            state.set_last_active_session(Some(crate::SESSION_NAME.to_string()));
             let _ = tmux_state::emit_snapshot(&app);
             log::info!("tmux restarted and control mode reconnected");
             Ok(())

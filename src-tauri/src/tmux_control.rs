@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::tmux;
 
@@ -225,6 +225,11 @@ impl TmuxControl {
                         }
                     }
                 } else if line.starts_with('%') {
+                    if let Some(session_id) = parse_session_changed_id(&line) {
+                        if let Some(state) = app.try_state::<crate::state::AppState>() {
+                            state.set_last_active_session(Some(session_id));
+                        }
+                    }
                     if !should_refresh_snapshot(&line) {
                         continue;
                     }
@@ -335,6 +340,13 @@ fn should_refresh_snapshot(line: &str) -> bool {
     .any(|prefix| line.starts_with(prefix))
 }
 
+fn parse_session_changed_id(line: &str) -> Option<String> {
+    line.strip_prefix("%session-changed ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|session_id| !session_id.is_empty())
+        .map(ToString::to_string)
+}
+
 fn kill_stale_control_clients(current_pid: libc::pid_t) {
     let output = match tmux::output(&["list-clients", "-F", "#{client_pid}\t#{client_control_mode}"]) {
         Ok(output) if output.status.success() => output,
@@ -409,4 +421,22 @@ fn decode_tmux_output(data: &str) -> Vec<u8> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_session_changed_id;
+
+    #[test]
+    fn parses_session_changed_events() {
+        assert_eq!(
+            parse_session_changed_id("%session-changed $1 tab"),
+            Some("$1".to_string())
+        );
+        assert_eq!(
+            parse_session_changed_id("%session-changed $1"),
+            Some("$1".to_string())
+        );
+        assert_eq!(parse_session_changed_id("%layout-change @1 ..."), None);
+    }
 }

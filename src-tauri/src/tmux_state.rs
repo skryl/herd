@@ -37,6 +37,8 @@ pub struct TmuxWindow {
     pub cols: u32,
     pub rows: u32,
     pub pane_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +70,7 @@ fn parse_snapshot(
     windows_stdout: &str,
     panes_stdout: &str,
     clients_stdout: &str,
+    tracked_control_pid: Option<libc::pid_t>,
 ) -> TmuxSnapshot {
     let mut sessions: Vec<TmuxSession> = Vec::new();
     let mut windows: Vec<TmuxWindow> = Vec::new();
@@ -96,17 +99,33 @@ fn parse_snapshot(
         });
     }
 
+    let tracked_control_pid = tracked_control_pid.map(|pid| pid.to_string());
+    let mut fallback_control_client: Option<(String, String, String)> = None;
+    let mut fallback_client: Option<(String, String, String)> = None;
+
     let client_state = clients_stdout.lines().find_map(|line| {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
+        if parts.len() < 5 {
             return None;
         }
-        Some((
-            parts[0].to_string(),
-            parts[1].to_string(),
+        let client_pid = parts[0];
+        let control_mode = parts[1] == "1";
+        let state = (
             parts[2].to_string(),
-        ))
-    });
+            parts[3].to_string(),
+            parts[4].to_string(),
+        );
+        if tracked_control_pid.as_deref() == Some(client_pid) && control_mode {
+            return Some(state);
+        }
+        if control_mode && fallback_control_client.is_none() {
+            fallback_control_client = Some(state.clone());
+        }
+        if fallback_client.is_none() {
+            fallback_client = Some(state);
+        }
+        None
+    }).or(fallback_control_client).or(fallback_client);
 
     let mut active_session_id = client_state.as_ref().map(|(session_id, _, _)| session_id.clone());
     let mut active_window_id = client_state.as_ref().map(|(_, window_id, _)| window_id.clone());
@@ -140,6 +159,7 @@ fn parse_snapshot(
             cols: parts[6].parse().unwrap_or_default(),
             rows: parts[7].parse().unwrap_or_default(),
             pane_ids: Vec::new(),
+            parent_window_id: None,
         });
     }
 
@@ -268,6 +288,108 @@ fn ensure_success(output: Output, context: &str) -> Result<Output, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneNormalizationRow {
+    session_id: String,
+    window_id: String,
+    pane_id: String,
+    active: bool,
+    title: String,
+}
+
+fn pane_normalization_plan(rows: &[PaneNormalizationRow]) -> Vec<(String, String, String, String)> {
+    let mut by_window: BTreeMap<&str, Vec<&PaneNormalizationRow>> = BTreeMap::new();
+    for row in rows {
+        by_window.entry(row.window_id.as_str()).or_default().push(row);
+    }
+
+    let mut moves = Vec::new();
+    for panes in by_window.values() {
+        if panes.len() <= 1 {
+            continue;
+        }
+        let keep_pane_id = panes
+            .iter()
+            .find(|row| row.active)
+            .or_else(|| panes.first())
+            .map(|row| row.pane_id.as_str());
+
+        for row in panes {
+            if Some(row.pane_id.as_str()) == keep_pane_id {
+                continue;
+            }
+            moves.push((
+                row.session_id.clone(),
+                row.window_id.clone(),
+                row.pane_id.clone(),
+                row.title.clone(),
+            ));
+        }
+    }
+
+    moves
+}
+
+pub fn normalize_multi_pane_windows(state: &AppState) -> Result<bool, String> {
+    let output = ensure_success(
+        run_tmux(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_active}\t#{pane_title}",
+        ])?,
+        "tmux list-panes failed during normalization",
+    )?;
+
+    let rows: Vec<PaneNormalizationRow> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 5 {
+                return None;
+            }
+            Some(PaneNormalizationRow {
+                session_id: parts[0].to_string(),
+                window_id: parts[1].to_string(),
+                pane_id: parts[2].to_string(),
+                active: parts[3] == "1",
+                title: parts[4].to_string(),
+            })
+        })
+        .collect();
+
+    let moves = pane_normalization_plan(&rows);
+    if moves.is_empty() {
+        return Ok(false);
+    }
+
+    for (session_id, source_window_id, pane_id, title) in moves {
+        let output = ensure_success(
+            run_tmux(&[
+                "break-pane",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-s",
+                &pane_id,
+                "-t",
+                &format!("{session_id}:"),
+            ])?,
+            "tmux break-pane failed during normalization",
+        )?;
+        let new_window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !new_window_id.is_empty() {
+            state.set_window_parent(&new_window_id, Some(source_window_id.clone()));
+        }
+        if !new_window_id.is_empty() && !title.trim().is_empty() {
+            let _ = rename_window(&new_window_id, &title);
+        }
+    }
+
+    Ok(true)
 }
 
 fn existing_session_names() -> Result<Vec<String>, String> {
@@ -496,30 +618,64 @@ pub fn snapshot(state: &AppState) -> Result<TmuxSnapshot, String> {
     let clients_output = run_tmux(&[
         "list-clients",
         "-F",
-        "#{session_id}\t#{window_id}\t#{pane_id}",
+        "#{client_pid}\t#{client_control_mode}\t#{session_id}\t#{window_id}\t#{pane_id}",
     ])?;
 
-    Ok(parse_snapshot(
+    let mut snapshot = parse_snapshot(
         state.next_snapshot_version(),
         &String::from_utf8_lossy(&sessions_output.stdout),
         &String::from_utf8_lossy(&windows_output.stdout),
         &String::from_utf8_lossy(&panes_output.stdout),
         &String::from_utf8_lossy(&clients_output.stdout),
-    ))
+        state.current_control_pid(),
+    );
+
+    let live_window_ids: BTreeSet<String> = snapshot.windows.iter().map(|window| window.id.clone()).collect();
+    let session_by_window: BTreeMap<String, String> = snapshot
+        .windows
+        .iter()
+        .map(|window| (window.id.clone(), window.session_id.clone()))
+        .collect();
+
+    state.retain_window_parents(|child, parent| {
+        if child == parent {
+            return false;
+        }
+        let Some(child_session_id) = session_by_window.get(child) else {
+            return false;
+        };
+        let Some(parent_session_id) = session_by_window.get(parent) else {
+            return false;
+        };
+        live_window_ids.contains(child)
+            && live_window_ids.contains(parent)
+            && child_session_id == parent_session_id
+    });
+
+    let window_parents = state.window_parents_snapshot();
+    for window in &mut snapshot.windows {
+        window.parent_window_id = window_parents.get(&window.id).cloned();
+    }
+
+    Ok(snapshot)
 }
 
 pub fn emit_snapshot(app: &AppHandle) -> Result<(), String> {
     let state = app
         .try_state::<AppState>()
         .ok_or("app state not initialized")?;
+    if normalize_multi_pane_windows(&state)? {
+        log::info!("Normalized tmux multi-pane windows back to single-pane windows");
+    }
     let snapshot = snapshot(&state)?;
+    state.set_last_active_session(snapshot.active_session_id.clone());
     app.emit("tmux-state", &snapshot)
         .map_err(|e| format!("emit tmux-state failed: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_snapshot;
+    use super::{pane_normalization_plan, parse_snapshot, PaneNormalizationRow};
 
     #[test]
     fn parse_snapshot_keeps_sessions_windows_and_panes() {
@@ -532,7 +688,8 @@ mod tests {
             "$1\t%0\t@0\t0\t0\tone\tzsh\t1\t0\t80\t24\n\
              $1\t%1\t@1\t1\t0\ttwo\tzsh\t1\t0\t90\t30\n\
              $2\t%2\t@2\t0\t0\tthree\tzsh\t1\t0\t120\t40\n",
-            "$2\t@2\t%2\n",
+            "92568\t1\t$2\t@2\t%2\n",
+            Some(92568),
         );
 
         assert_eq!(snapshot.active_session_id.as_deref(), Some("$2"));
@@ -545,5 +702,66 @@ mod tests {
         assert_eq!(snapshot.windows[2].session_id, "$2");
         assert_eq!(snapshot.windows[2].pane_ids, vec!["%2"]);
         assert_eq!(snapshot.panes[2].session_id, "$2");
+    }
+
+    #[test]
+    fn parse_snapshot_prefers_the_tracked_control_client() {
+        let snapshot = parse_snapshot(
+            8,
+            "$1\talpha\n$2\tbeta\n",
+            "$1\talpha\t@0\t0\tone\t1\t80\t24\n\
+             $2\tbeta\t@2\t0\tthree\t1\t120\t40\n",
+            "$1\t%0\t@0\t0\t0\tone\tzsh\t1\t0\t80\t24\n\
+             $2\t%2\t@2\t0\t0\tthree\tzsh\t1\t0\t120\t40\n",
+            "11111\t0\t$1\t@0\t%0\n\
+             92568\t1\t$2\t@2\t%2\n",
+            Some(92568),
+        );
+
+        assert_eq!(snapshot.active_session_id.as_deref(), Some("$2"));
+        assert_eq!(snapshot.active_window_id.as_deref(), Some("@2"));
+        assert_eq!(snapshot.active_pane_id.as_deref(), Some("%2"));
+    }
+
+    #[test]
+    fn pane_normalization_plan_keeps_the_active_pane_and_breaks_the_rest() {
+        let plan = pane_normalization_plan(&[
+            PaneNormalizationRow {
+                session_id: "$1".to_string(),
+                window_id: "@1".to_string(),
+                pane_id: "%1".to_string(),
+                active: false,
+                title: "Claude".to_string(),
+            },
+            PaneNormalizationRow {
+                session_id: "$1".to_string(),
+                window_id: "@1".to_string(),
+                pane_id: "%2".to_string(),
+                active: true,
+                title: "Agent A".to_string(),
+            },
+            PaneNormalizationRow {
+                session_id: "$1".to_string(),
+                window_id: "@1".to_string(),
+                pane_id: "%3".to_string(),
+                active: false,
+                title: "Agent B".to_string(),
+            },
+            PaneNormalizationRow {
+                session_id: "$2".to_string(),
+                window_id: "@2".to_string(),
+                pane_id: "%4".to_string(),
+                active: true,
+                title: "Shell".to_string(),
+            },
+        ]);
+
+        assert_eq!(
+            plan,
+            vec![
+                ("$1".to_string(), "@1".to_string(), "%1".to_string(), "Claude".to_string()),
+                ("$1".to_string(), "@1".to_string(), "%3".to_string(), "Agent B".to_string()),
+            ]
+        );
     }
 }

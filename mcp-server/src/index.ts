@@ -78,6 +78,7 @@ server.tool(
         width: params.width,
         height: params.height,
         parent_session_id: process.env.HERD_SESSION_ID || undefined,
+        parent_pane_id: process.env.TMUX_PANE || process.env.HERD_PANE_ID || undefined,
       });
       if (!resp.ok) return errorResult(resp.error || "Unknown error");
 

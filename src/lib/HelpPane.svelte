@@ -1,5 +1,116 @@
 <script lang="ts">
   import { helpOpen } from './stores/mode';
+
+  interface HelpRow {
+    key: string;
+    desc: string;
+  }
+
+  interface HelpSection {
+    title: string;
+    rows: HelpRow[];
+  }
+
+  const sections: HelpSection[] = [
+    {
+      title: 'MODE',
+      rows: [
+        { key: '?', desc: 'open help; any key or click closes it' },
+        { key: ':', desc: 'open command bar' },
+        { key: 'i', desc: 'enter input mode for the selected shell' },
+        { key: 'Shift+Esc', desc: 'leave input mode and return to command mode' },
+        { key: 'b', desc: 'toggle the tmux tree sidebar' },
+        { key: 'd', desc: 'toggle the debug pane' },
+      ],
+    },
+    {
+      title: 'NAVIGATION',
+      rows: [
+        { key: 'h / j / k / l', desc: 'focus left / down / up / right' },
+        { key: 'n / p', desc: 'select next / previous shell' },
+        { key: 'N / P', desc: 'select next / previous tab' },
+      ],
+    },
+    {
+      title: 'MOVE + PAN',
+      rows: [
+        { key: 'Ctrl+h/j/k/l', desc: 'move the selected shell' },
+        { key: 'Ctrl+Shift+h/j/k/l', desc: 'move the selected shell faster' },
+        { key: 'H / J / K / L', desc: 'pan the canvas' },
+      ],
+    },
+    {
+      title: 'VIEW',
+      rows: [
+        { key: 'z', desc: 'toggle zoom to the selected shell' },
+        { key: 'Z', desc: 'toggle fullscreen zoom' },
+        { key: 'Shift+-', desc: 'zoom the canvas out' },
+        { key: 'Shift+=', desc: 'zoom the canvas in' },
+        { key: 'f', desc: 'fit all shells in view' },
+        { key: '0', desc: 'reset canvas zoom and pan' },
+        { key: 'a', desc: 'cycle anchored shell arrangements, including circle and snowflake, then fit view' },
+      ],
+    },
+    {
+      title: 'SHELLS',
+      rows: [
+        { key: 's', desc: 'spawn a new shell' },
+        { key: 'x', desc: 'close the selected shell' },
+      ],
+    },
+    {
+      title: 'TABS',
+      rows: [
+        { key: 't', desc: 'create a new tab' },
+        { key: 'w', desc: 'close the active tab' },
+        { key: 'X', desc: 'close the active tab' },
+      ],
+    },
+    {
+      title: 'SIDEBAR',
+      rows: [
+        { key: 'j / k', desc: 'move the tree selection' },
+        { key: 'i', desc: 'enter input mode for the selected shell' },
+        { key: 'r', desc: 'prefill a rename command for the selected item' },
+        { key: 'z', desc: 'zoom to the selected shell' },
+        { key: 'Z', desc: 'fullscreen zoom the selected shell' },
+        { key: 'Esc / b', desc: 'close the sidebar' },
+      ],
+    },
+    {
+      title: 'INPUT MODE',
+      rows: [
+        { key: 'typing', desc: 'send printable keys to the shell' },
+        { key: 'Enter / Tab / Backspace', desc: 'send terminal control keys' },
+        { key: 'Arrows / Home / End / Delete', desc: 'send navigation keys' },
+        { key: 'Ctrl+A..Z', desc: 'send control characters' },
+      ],
+    },
+    {
+      title: 'COMMAND BAR',
+      rows: [
+        { key: 'Enter', desc: 'run the current command' },
+        { key: 'Esc', desc: 'close the command bar' },
+        { key: ':sh | :shell | :new', desc: 'spawn a new shell' },
+        { key: ':q | :close', desc: 'close the selected shell' },
+        { key: ':qa | :closeall', desc: 'close all shells in the active tab' },
+        { key: ':rename <name>', desc: 'rename the selected shell' },
+        { key: ':tn | :tabnew [name]', desc: 'create a new tab' },
+        { key: ':tc | :tabclose', desc: 'close the active tab' },
+        { key: ':tr | :tabrename <name>', desc: 'rename the active tab' },
+        { key: ':z | :zoom', desc: 'zoom to the selected shell' },
+        { key: ':fit', desc: 'fit all shells in view' },
+        { key: ':reset', desc: 'reset the canvas' },
+      ],
+    },
+    {
+      title: 'CLOSE CONFIRM',
+      rows: [
+        { key: 'Enter / y / Y / X', desc: 'confirm closing the tab' },
+        { key: 'Esc / n / N', desc: 'cancel closing the tab' },
+      ],
+    },
+  ];
 </script>
 
 {#if $helpOpen}
@@ -13,67 +124,17 @@
       </div>
 
       <div class="help-body">
-        <div class="help-section">
-          <div class="section-title">MODE</div>
-          <div class="help-row"><span class="hkey">i</span><span class="hdesc">enter input mode</span></div>
-          <div class="help-row"><span class="hkey">Shift+Esc</span><span class="hdesc">back to command mode</span></div>
-          <div class="help-row"><span class="hkey">:</span><span class="hdesc">open command bar</span></div>
-          <div class="help-row"><span class="hkey">?</span><span class="hdesc">toggle help</span></div>
-          <div class="help-row"><span class="hkey">b</span><span class="hdesc">toggle tmux tree sidebar</span></div>
-          <div class="help-row"><span class="hkey">d</span><span class="hdesc">toggle debug pane</span></div>
-        </div>
-
-        <div class="help-section">
-          <div class="section-title">NAVIGATION</div>
-          <div class="help-row"><span class="hkey">h</span><span class="hdesc">focus left</span></div>
-          <div class="help-row"><span class="hkey">j</span><span class="hdesc">focus down</span></div>
-          <div class="help-row"><span class="hkey">k</span><span class="hdesc">focus up</span></div>
-          <div class="help-row"><span class="hkey">l</span><span class="hdesc">focus right</span></div>
-          <div class="help-row"><span class="hkey">n</span><span class="hdesc">next window (cycle)</span></div>
-          <div class="help-row"><span class="hkey">p</span><span class="hdesc">prev window (cycle)</span></div>
-          <div class="help-row"><span class="hkey">Ctrl+h/j/k/l</span><span class="hdesc">move selected window</span></div>
-          <div class="help-row"><span class="hkey">Ctrl+Shift+h/j/k/l</span><span class="hdesc">move selected window 2x</span></div>
-          <div class="help-row"><span class="hkey">N</span><span class="hdesc">next tab</span></div>
-          <div class="help-row"><span class="hkey">P</span><span class="hdesc">prev tab</span></div>
-        </div>
-
-        <div class="help-section">
-          <div class="section-title">VIEW</div>
-          <div class="help-row"><span class="hkey">z</span><span class="hdesc">toggle zoom to window</span></div>
-          <div class="help-row"><span class="hkey">Shift+Z</span><span class="hdesc">toggle full-screen zoom</span></div>
-          <div class="help-row"><span class="hkey">Shift+-</span><span class="hdesc">zoom canvas out</span></div>
-          <div class="help-row"><span class="hkey">Shift++</span><span class="hdesc">zoom canvas in</span></div>
-          <div class="help-row"><span class="hkey">Shift+H/J/K/L</span><span class="hdesc">pan canvas</span></div>
-          <div class="help-row"><span class="hkey">f</span><span class="hdesc">fit all in view</span></div>
-          <div class="help-row"><span class="hkey">0</span><span class="hdesc">reset zoom/pan</span></div>
-          <div class="help-row"><span class="hkey">a</span><span class="hdesc">auto-arrange shells</span></div>
-        </div>
-
-        <div class="help-section">
-          <div class="section-title">WINDOWS</div>
-          <div class="help-row"><span class="hkey">s</span><span class="hdesc">new shell</span></div>
-          <div class="help-row"><span class="hkey">x</span><span class="hdesc">close selected pane</span></div>
-        </div>
-
-        <div class="help-section">
-          <div class="section-title">TABS</div>
-          <div class="help-row"><span class="hkey">t</span><span class="hdesc">new tab</span></div>
-          <div class="help-row"><span class="hkey">Shift+X</span><span class="hdesc">close tab</span></div>
-        </div>
-
-        <div class="help-section">
-          <div class="section-title">COMMAND BAR</div>
-          <div class="help-row"><span class="hkey">:sh</span><span class="hdesc">new shell</span></div>
-          <div class="help-row"><span class="hkey">:q</span><span class="hdesc">close window</span></div>
-          <div class="help-row"><span class="hkey">:qa</span><span class="hdesc">close all</span></div>
-          <div class="help-row"><span class="hkey">:rename &lt;n&gt;</span><span class="hdesc">rename window</span></div>
-          <div class="help-row"><span class="hkey">:tn</span><span class="hdesc">new tab</span></div>
-          <div class="help-row"><span class="hkey">:tc</span><span class="hdesc">close tab</span></div>
-          <div class="help-row"><span class="hkey">:tr &lt;n&gt;</span><span class="hdesc">rename tab</span></div>
-          <div class="help-row"><span class="hkey">:z</span><span class="hdesc">zoom to window</span></div>
-          <div class="help-row"><span class="hkey">:fit</span><span class="hdesc">fit all</span></div>
-          <div class="help-row"><span class="hkey">:reset</span><span class="hdesc">reset view</span></div>
-        </div>
+        {#each sections as section (section.title)}
+          <div class="help-section">
+            <div class="section-title">{section.title}</div>
+            {#each section.rows as row}
+              <div class="help-row">
+                <span class="hkey">{row.key}</span>
+                <span class="hdesc">{row.desc}</span>
+              </div>
+            {/each}
+          </div>
+        {/each}
       </div>
     </div>
   </div>
@@ -93,8 +154,8 @@
   .help-pane {
     background: var(--pcb-base);
     border: 1px solid var(--copper-dim);
-    width: 520px;
-    max-height: 80vh;
+    width: min(760px, calc(100vw - 32px));
+    max-height: min(82vh, 760px);
     display: flex;
     flex-direction: column;
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.8);
@@ -133,8 +194,9 @@
     padding: 8px 12px;
     overflow-y: auto;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 12px;
+    align-content: start;
   }
 
   .help-section {
@@ -154,7 +216,7 @@
 
   .help-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     padding: 1px 0;
   }
@@ -164,15 +226,17 @@
     color: var(--phosphor-green);
     background: rgba(51, 255, 51, 0.06);
     border: 1px solid var(--component-border);
-    padding: 0 4px;
-    min-width: 20px;
-    text-align: center;
+    padding: 1px 4px;
+    min-width: 96px;
+    text-align: left;
     flex-shrink: 0;
     font-family: var(--font-mono);
+    line-height: 1.3;
   }
 
   .hdesc {
     font-size: 9px;
     color: var(--silk-dim);
+    line-height: 1.35;
   }
 </style>

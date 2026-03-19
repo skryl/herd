@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 use crate::persist::{self, HerdState, TileState};
 use crate::tmux_control::{TmuxControl, TmuxWriter, OutputBuffers};
 
@@ -10,6 +11,8 @@ pub struct AppState {
     pub output_buffers: Arc<Mutex<Option<OutputBuffers>>>,
     pub tile_states: Arc<Mutex<HerdState>>,
     pub snapshot_version: Arc<AtomicU64>,
+    pub last_active_session: Arc<Mutex<Option<String>>>,
+    pub window_parents: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -20,6 +23,8 @@ impl AppState {
             output_buffers: Arc::new(Mutex::new(None)),
             tile_states: Arc::new(Mutex::new(persist::load())),
             snapshot_version: Arc::new(AtomicU64::new(0)),
+            last_active_session: Arc::new(Mutex::new(None)),
+            window_parents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -111,5 +116,83 @@ impl AppState {
 
     pub fn next_snapshot_version(&self) -> u64 {
         self.snapshot_version.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn set_last_active_session(&self, session_id: Option<String>) {
+        if let Ok(mut active) = self.last_active_session.lock() {
+            *active = session_id.filter(|value| !value.trim().is_empty());
+        }
+    }
+
+    pub fn last_active_session(&self) -> Option<String> {
+        self.last_active_session
+            .lock()
+            .ok()
+            .and_then(|active| active.clone())
+    }
+
+    pub fn set_window_parent(&self, child_window_id: &str, parent_window_id: Option<String>) {
+        if let Ok(mut parents) = self.window_parents.lock() {
+            let resolved_parent = parent_window_id
+                .and_then(|parent| resolve_root_parent_from_map(&parents, &parent).or(Some(parent)))
+                .filter(|parent| parent != child_window_id);
+            match resolved_parent {
+                Some(parent_window_id) => {
+                    parents.insert(child_window_id.to_string(), parent_window_id);
+                }
+                None => {
+                    parents.remove(child_window_id);
+                }
+            }
+        }
+    }
+
+    pub fn window_parents_snapshot(&self) -> HashMap<String, String> {
+        self.window_parents
+            .lock()
+            .map(|parents| {
+                parents
+                    .keys()
+                    .filter_map(|child| {
+                        resolve_root_parent_from_map(&parents, child)
+                            .map(|parent| (child.clone(), parent))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn resolve_root_window_parent(&self, window_id: &str) -> Option<String> {
+        self.window_parents
+            .lock()
+            .ok()
+            .and_then(|parents| resolve_root_parent_from_map(&parents, window_id))
+    }
+
+    pub fn retain_window_parents<F>(&self, mut keep: F)
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        if let Ok(mut parents) = self.window_parents.lock() {
+            parents.retain(|child, parent| keep(child, parent));
+        }
+    }
+}
+
+fn resolve_root_parent_from_map(
+    parents: &HashMap<String, String>,
+    window_id: &str,
+) -> Option<String> {
+    let mut current = parents.get(window_id)?.clone();
+    let mut seen = std::collections::HashSet::from([window_id.to_string()]);
+
+    loop {
+      if !seen.insert(current.clone()) {
+          return None;
+      }
+      match parents.get(&current).cloned() {
+          Some(next) => current = next,
+          None => return Some(current),
+      }
     }
 }

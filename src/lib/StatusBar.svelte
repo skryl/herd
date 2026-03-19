@@ -41,13 +41,13 @@
     {:else if $mode === 'command'}
       <span class="shortcut"><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span> focus</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">Shift+H/J/K/L</span> pan</span>
+      <span class="shortcut"><span class="key">H/J/K/L</span> pan</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">Shift+-/+</span> zoom</span>
+      <span class="shortcut"><span class="key">-/+</span> zoom</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">Ctrl+h/j/k/l</span> move</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">Ctrl+Shift+h/j/k/l</span> move x2</span>
+      <span class="shortcut"><span class="key">Ctrl+H/J/K/L</span> move x2</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">t</span> tab</span>
       <span class="sep">│</span>

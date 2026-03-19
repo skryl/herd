@@ -15,6 +15,8 @@ pub enum SocketCommand {
         height: Option<f64>,
         #[serde(default)]
         parent_session_id: Option<String>,
+        #[serde(default)]
+        parent_pane_id: Option<String>,
     },
     #[serde(rename = "destroy_shell")]
     DestroyShell { session_id: String },

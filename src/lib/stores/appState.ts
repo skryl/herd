@@ -3,7 +3,6 @@ import {
   getLayoutState,
   getTmuxState,
   killSession,
-  killPane,
   killWindow,
   newSession,
   newWindow,
@@ -20,6 +19,7 @@ import type {
   AppStateTree,
   CanvasState,
   CanvasZoomMode,
+  CloseTabConfirmation,
   HerdMode,
   LayoutEntry,
   LayoutStateMap,
@@ -39,6 +39,8 @@ const GRID_SNAP = 20;
 const GAP = 30;
 const DEFAULT_TILE_WIDTH = 640;
 const DEFAULT_TILE_HEIGHT = 400;
+const AUTO_ARRANGE_PATTERNS = ['stack-down', 'stack-right', 'fan', 'spiral', 'circle', 'snowflake'] as const;
+type AutoArrangePattern = (typeof AUTO_ARRANGE_PATTERNS)[number];
 
 type TmuxEffect =
   | { type: 'new-session'; name?: string }
@@ -56,6 +58,8 @@ export type UiIntent =
   | { type: 'new-tab' }
   | { type: 'close-selected-pane' }
   | { type: 'close-active-tab' }
+  | { type: 'confirm-close-active-tab' }
+  | { type: 'cancel-close-active-tab' }
   | { type: 'select-session'; sessionId: string }
   | { type: 'select-next-tab' }
   | { type: 'select-prev-tab' }
@@ -96,12 +100,14 @@ const initialUiState: UiState = {
   debugPaneOpen: false,
   selectedPaneId: null,
   paneViewportHints: {},
+  arrangementCycleBySession: {},
   canvas: {
     panX: 0,
     panY: 0,
     zoom: 1,
   },
   zoomBookmark: null,
+  closeTabConfirmation: null,
 };
 
 export const initialAppState: AppStateTree = {
@@ -390,6 +396,31 @@ function sidebarAnchorIndex(state: AppStateTree): number {
   return 0;
 }
 
+function countPanesInSession(tmux: AppStateTree['tmux'], sessionId: string): number {
+  const session = tmux.sessions[sessionId];
+  if (!session) return 0;
+  return session.window_ids.reduce((count, windowId) => {
+    const paneCount = tmux.paneOrderByWindow[windowId]?.length ?? tmux.windows[windowId]?.pane_ids.length ?? 0;
+    return count + paneCount;
+  }, 0);
+}
+
+function buildCloseTabConfirmation(
+  tmux: AppStateTree['tmux'],
+  sessionId: string,
+  force = false,
+): CloseTabConfirmation | null {
+  const session = tmux.sessions[sessionId];
+  if (!session) return null;
+  const paneCount = countPanesInSession(tmux, sessionId);
+  if (!force && paneCount <= 1) return null;
+  return {
+    sessionId,
+    sessionName: session.name || 'Session',
+    paneCount,
+  };
+}
+
 function selectedSidebarItem(state: AppStateTree): SidebarTreeItem | null {
   const items = buildSidebarItems(state);
   return items[clampSidebarIndex(state, state.ui.sidebarSelectedIdx)] ?? null;
@@ -422,6 +453,7 @@ export function buildSidebarRenameCommand(state: AppStateTree): string | null {
 function reconcileLayoutEntries(
   previousEntries: Record<string, LayoutEntry>,
   sessions: Record<string, TmuxSession>,
+  windows: Record<string, TmuxWindow>,
 ): Record<string, LayoutEntry> {
   const nextEntries: Record<string, LayoutEntry> = {};
 
@@ -430,6 +462,20 @@ function reconcileLayoutEntries(
       const existing = previousEntries[windowId];
       if (existing) {
         nextEntries[windowId] = existing;
+        continue;
+      }
+
+      const parentWindowId = windows[windowId]?.parent_window_id ?? null;
+      const parentEntry = parentWindowId ? nextEntries[parentWindowId] ?? previousEntries[parentWindowId] : null;
+      if (parentEntry) {
+        nextEntries[windowId] = findOpenPosition(
+          parentEntry.x + parentEntry.width + GAP + GRID_SNAP,
+          parentEntry.y,
+          DEFAULT_TILE_WIDTH,
+          DEFAULT_TILE_HEIGHT,
+          session.window_ids.filter((id) => id !== windowId),
+          nextEntries,
+        );
         continue;
       }
 
@@ -460,6 +506,19 @@ function reconcilePaneViewportHints(
     }
   }
   return nextHints;
+}
+
+function reconcileArrangementCycles(
+  previousCycles: Record<string, number>,
+  sessions: Record<string, TmuxSession>,
+): Record<string, number> {
+  const nextCycles: Record<string, number> = {};
+  for (const sessionId of Object.keys(sessions)) {
+    if (typeof previousCycles[sessionId] === 'number') {
+      nextCycles[sessionId] = previousCycles[sessionId];
+    }
+  }
+  return nextCycles;
 }
 
 function snapLayoutEntriesToTmux(
@@ -549,7 +608,7 @@ export function applyTmuxSnapshotToState(
   const { record: sessions, order: sessionOrder } = buildSessionsRecord(snapshot.sessions);
   const { record: windows, order: windowOrder } = buildWindowsRecord(snapshot.windows);
   const { panesRecord, paneOrderByWindow } = buildPanesRecord(snapshot.panes, previousState.tmux.panes);
-  const layoutEntries = reconcileLayoutEntries(previousState.layout.entries, sessions);
+  const layoutEntries = reconcileLayoutEntries(previousState.layout.entries, sessions, windows);
 
   const activeSessionId = snapshot.active_session_id ?? sessionOrder[0] ?? null;
   const activeWindowId = snapshot.active_window_id
@@ -572,7 +631,14 @@ export function applyTmuxSnapshotToState(
 
   const selectedPaneId = chooseSelectedPaneId(previousState, nextTmux);
   const paneViewportHints = reconcilePaneViewportHints(previousState.ui.paneViewportHints, panesRecord);
+  const arrangementCycleBySession = reconcileArrangementCycles(
+    previousState.ui.arrangementCycleBySession,
+    sessions,
+  );
   const snappedLayoutEntries = snapLayoutEntriesToTmux(layoutEntries, windows, paneViewportHints);
+  const closeTabConfirmation = previousState.ui.closeTabConfirmation
+    ? buildCloseTabConfirmation(nextTmux, previousState.ui.closeTabConfirmation.sessionId)
+    : null;
 
   const nextState: AppStateTree = {
     tmux: nextTmux,
@@ -583,6 +649,8 @@ export function applyTmuxSnapshotToState(
       ...previousState.ui,
       selectedPaneId,
       paneViewportHints,
+      arrangementCycleBySession,
+      closeTabConfirmation,
       sidebarSelectedIdx: previousState.ui.sidebarSelectedIdx,
     },
   };
@@ -628,15 +696,71 @@ export function reduceIntent(
     case 'close-selected-pane': {
       const paneId = state.ui.selectedPaneId;
       const windowId = paneId ? state.tmux.panes[paneId]?.window_id : null;
-      return windowId
-        ? { state, effects: [{ type: 'kill-window', windowId }] }
-        : { state, effects: [] };
+      const sessionId = paneId ? state.tmux.panes[paneId]?.session_id : null;
+      const session = sessionId ? state.tmux.sessions[sessionId] : null;
+      if (!windowId || !sessionId || !session) {
+        return { state, effects: [] };
+      }
+      if (session.window_ids.length <= 1) {
+        return {
+          state: {
+            ...state,
+            ui: {
+              ...state.ui,
+              closeTabConfirmation: buildCloseTabConfirmation(state.tmux, sessionId, true),
+            },
+          },
+          effects: [],
+        };
+      }
+      return { state, effects: [{ type: 'kill-window', windowId }] };
     }
 
     case 'close-active-tab':
-      return state.tmux.activeSessionId
-        ? { state, effects: [{ type: 'kill-session', sessionId: state.tmux.activeSessionId }] }
+      if (!state.tmux.activeSessionId) {
+        return { state, effects: [] };
+      }
+      {
+        const closeTabConfirmation = buildCloseTabConfirmation(state.tmux, state.tmux.activeSessionId);
+        return {
+          state: {
+            ...state,
+            ui: {
+              ...state.ui,
+              closeTabConfirmation,
+            },
+          },
+          effects: closeTabConfirmation
+            ? []
+            : [{ type: 'kill-session', sessionId: state.tmux.activeSessionId }],
+        };
+      }
+
+    case 'confirm-close-active-tab':
+      return state.ui.closeTabConfirmation
+        ? {
+          state: {
+            ...state,
+            ui: {
+              ...state.ui,
+              closeTabConfirmation: null,
+            },
+          },
+          effects: [{ type: 'kill-session', sessionId: state.ui.closeTabConfirmation.sessionId }],
+        }
         : { state, effects: [] };
+
+    case 'cancel-close-active-tab':
+      return {
+        state: {
+          ...state,
+          ui: {
+            ...state.ui,
+            closeTabConfirmation: null,
+          },
+        },
+        effects: [],
+      };
 
     case 'select-session':
       return { state, effects: [{ type: 'select-session', sessionId: intent.sessionId }] };
@@ -976,6 +1100,11 @@ export const debugPaneOpen = createWritableSlice<boolean>(
   (state, value) => ({ ...state, ui: { ...state.ui, debugPaneOpen: value } }),
 );
 
+export const closeTabConfirmation = createWritableSlice<CloseTabConfirmation | null>(
+  (state) => state.ui.closeTabConfirmation,
+  (state, value) => ({ ...state, ui: { ...state.ui, closeTabConfirmation: value } }),
+);
+
 export const canvasState = createWritableSlice<CanvasState>(
   (state) => state.ui.canvas,
   (state, value) => ({ ...state, ui: { ...state.ui, canvas: value, zoomBookmark: null } }),
@@ -1046,6 +1175,7 @@ function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo 
     id: pane.id,
     paneId: pane.id,
     windowId: window.id,
+    parentWindowId: window.parent_window_id ?? null,
     sessionId: pane.session_id,
     tabId: pane.session_id,
     x: entry.x,
@@ -1076,6 +1206,112 @@ export const activeTabTerminals = derived(appState, ($state) => {
     })
     .filter((term): term is TerminalInfo => Boolean(term));
 });
+
+export interface CanvasConnection {
+  childWindowId: string;
+  parentWindowId: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  cx1: number;
+  cy1: number;
+  cx2: number;
+  cy2: number;
+}
+
+export function buildCanvasConnections(state: AppStateTree): CanvasConnection[] {
+  const activeSessionId = state.tmux.activeSessionId;
+  if (!activeSessionId) return [];
+
+  const terminalsByWindowId = new Map<string, TerminalInfo>();
+  for (const windowId of state.tmux.windowOrder) {
+    const window = state.tmux.windows[windowId];
+    if (!window || window.session_id !== activeSessionId) continue;
+    const paneId = window.pane_ids[0];
+    if (!paneId) continue;
+    const term = terminalInfoForPane(state, paneId);
+    if (term) {
+      terminalsByWindowId.set(windowId, term);
+    }
+  }
+
+  const connections: CanvasConnection[] = [];
+  for (const child of terminalsByWindowId.values()) {
+    const parentWindowId = child.parentWindowId ?? null;
+    if (!parentWindowId) continue;
+    const parent = terminalsByWindowId.get(parentWindowId);
+    if (!parent) continue;
+
+    const parentCenterX = parent.x + parent.width / 2;
+    const parentCenterY = parent.y + parent.height / 2;
+    const childCenterX = child.x + child.width / 2;
+    const childCenterY = child.y + child.height / 2;
+    const dx = childCenterX - parentCenterX;
+    const dy = childCenterY - parentCenterY;
+
+    let x1: number;
+    let y1: number;
+    let x2: number;
+    let y2: number;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      if (dx > 0) {
+        x1 = parent.x + parent.width;
+        y1 = parentCenterY;
+        x2 = child.x;
+        y2 = childCenterY;
+      } else {
+        x1 = parent.x;
+        y1 = parentCenterY;
+        x2 = child.x + child.width;
+        y2 = childCenterY;
+      }
+    } else if (dy > 0) {
+      x1 = parentCenterX;
+      y1 = parent.y + parent.height;
+      x2 = childCenterX;
+      y2 = child.y;
+    } else {
+      x1 = parentCenterX;
+      y1 = parent.y;
+      x2 = childCenterX;
+      y2 = child.y + child.height;
+    }
+
+    const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+    const offset = Math.min(distance * 0.4, 80);
+    let cx1 = x1;
+    let cy1 = y1;
+    let cx2 = x2;
+    let cy2 = y2;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      cx1 = x1 + (dx > 0 ? offset : -offset);
+      cx2 = x2 + (dx > 0 ? -offset : offset);
+    } else {
+      cy1 = y1 + (dy > 0 ? offset : -offset);
+      cy2 = y2 + (dy > 0 ? -offset : offset);
+    }
+
+    connections.push({
+      childWindowId: child.windowId,
+      parentWindowId,
+      x1,
+      y1,
+      x2,
+      y2,
+      cx1,
+      cy1,
+      cx2,
+      cy2,
+    });
+  }
+
+  return connections;
+}
+
+export const activeTabConnections = derived(appState, ($state) => buildCanvasConnections($state));
 
 export function setCanvasState(value: CanvasState) {
   canvasState.set(value);
@@ -1200,7 +1436,8 @@ export async function reportPaneViewport(
 }
 
 export function removeTerminal(id: string) {
-  void killPane(id);
+  selectedTerminalId.set(id);
+  void dispatchIntent({ type: 'close-selected-pane' });
 }
 
 export function updateTerminal(id: string, updates: Partial<TerminalInfo>) {
@@ -1287,32 +1524,184 @@ export function selectDirectional(direction: 'h' | 'j' | 'k' | 'l') {
   }
 }
 
+function spiralOffset(index: number): { col: number; row: number } {
+  let x = 0;
+  let y = 0;
+  let dx = 1;
+  let dy = 0;
+  let segmentLength = 1;
+  let segmentProgress = 0;
+  let segmentTurns = 0;
+
+  for (let step = 0; step <= index; step += 1) {
+    x += dx;
+    y += dy;
+    segmentProgress += 1;
+    if (segmentProgress === segmentLength) {
+      segmentProgress = 0;
+      const nextDx = -dy;
+      const nextDy = dx;
+      dx = nextDx;
+      dy = nextDy;
+      segmentTurns += 1;
+      if (segmentTurns % 2 === 0) {
+        segmentLength += 1;
+      }
+    }
+  }
+
+  return { col: x, row: y };
+}
+
+function circleRingPosition(index: number, total: number): { ring: number; slot: number; slots: number } {
+  let remainingIndex = index;
+  let remainingTotal = total;
+  let ring = 1;
+
+  while (remainingTotal > 0) {
+    const capacity = Math.max(6, ring * 8);
+    const slots = Math.min(remainingTotal, capacity);
+    if (remainingIndex < slots) {
+      return { ring, slot: remainingIndex, slots };
+    }
+    remainingIndex -= slots;
+    remainingTotal -= slots;
+    ring += 1;
+  }
+
+  return { ring: 1, slot: 0, slots: 1 };
+}
+
+function radialPosition(
+  anchor: LayoutEntry,
+  width: number,
+  height: number,
+  angle: number,
+  radiusX: number,
+  radiusY: number,
+): { x: number; y: number } {
+  const anchorCenterX = anchor.x + anchor.width / 2;
+  const anchorCenterY = anchor.y + anchor.height / 2;
+  return {
+    x: anchorCenterX + Math.cos(angle) * radiusX - width / 2,
+    y: anchorCenterY + Math.sin(angle) * radiusY - height / 2,
+  };
+}
+
+function arrangementOrder(windowIds: string[], anchorWindowId: string): string[] {
+  return [anchorWindowId, ...windowIds.filter((windowId) => windowId !== anchorWindowId)];
+}
+
+function arrangedPositionForIndex(
+  pattern: AutoArrangePattern,
+  anchor: LayoutEntry,
+  width: number,
+  height: number,
+  index: number,
+  total: number,
+): { x: number; y: number } {
+  const anchorStepX = Math.max(anchor.width, width) + GAP;
+  const anchorStepY = Math.max(anchor.height, height) + GAP;
+  const step = index + 1;
+
+  switch (pattern) {
+    case 'stack-down':
+      return {
+        x: anchor.x,
+        y: anchor.y + step * anchorStepY,
+      };
+    case 'stack-right':
+      return {
+        x: anchor.x + step * anchorStepX,
+        y: anchor.y,
+      };
+    case 'fan':
+      return {
+        x: anchor.x + step * Math.round(anchorStepX * 0.68),
+        y: anchor.y + step * Math.round(anchorStepY * 0.38),
+      };
+    case 'spiral': {
+      const { col, row } = spiralOffset(index);
+      return {
+        x: anchor.x + col * anchorStepX,
+        y: anchor.y + row * anchorStepY,
+      };
+    }
+    case 'circle': {
+      const { ring, slot, slots } = circleRingPosition(index, total);
+      const angle = -Math.PI / 2 + (slot * Math.PI * 2) / Math.max(slots, 1);
+      return radialPosition(anchor, width, height, angle, anchorStepX * ring, anchorStepY * ring);
+    }
+    case 'snowflake': {
+      const ring = Math.floor(index / 6) + 1;
+      const spoke = index % 6;
+      const angle = -Math.PI / 3 + spoke * (Math.PI / 3);
+      return radialPosition(anchor, width, height, angle, anchorStepX * ring, anchorStepY * ring);
+    }
+  }
+}
+
 export async function autoArrange(sessionId: string | null) {
   if (!sessionId) return;
   const state = get(appState);
   const windowIds = state.tmux.sessions[sessionId]?.window_ids ?? [];
   if (windowIds.length === 0) return;
-
-  const cellW = DEFAULT_TILE_WIDTH;
-  const cellH = DEFAULT_TILE_HEIGHT;
-  const cols = Math.max(1, Math.floor(Math.sqrt(windowIds.length)));
+  const selectedPaneId = state.ui.selectedPaneId;
+  const selectedWindowId = selectedPaneId ? state.tmux.panes[selectedPaneId]?.window_id ?? null : null;
+  const anchorWindowId = selectedWindowId && windowIds.includes(selectedWindowId)
+    ? selectedWindowId
+    : windowIds[0];
+  const patternIndex = state.ui.arrangementCycleBySession[sessionId] ?? 0;
+  const pattern = AUTO_ARRANGE_PATTERNS[patternIndex % AUTO_ARRANGE_PATTERNS.length];
+  const orderedWindowIds = arrangementOrder(windowIds, anchorWindowId);
+  const anchorEntry = state.layout.entries[anchorWindowId] ?? {
+    x: 100,
+    y: 100,
+    width: DEFAULT_TILE_WIDTH,
+    height: DEFAULT_TILE_HEIGHT,
+  };
 
   const arrangedEntries: Record<string, LayoutEntry> = {};
 
   appState.update((current) => {
     const entries = { ...current.layout.entries };
-    windowIds.forEach((windowId, index) => {
+    arrangedEntries[anchorWindowId] = {
+      ...anchorEntry,
+      width: entries[anchorWindowId]?.width ?? anchorEntry.width,
+      height: entries[anchorWindowId]?.height ?? anchorEntry.height,
+    };
+    entries[anchorWindowId] = arrangedEntries[anchorWindowId];
+
+    const siblingCount = orderedWindowIds.length - 1;
+    orderedWindowIds.slice(1).forEach((windowId, index) => {
+      const width = entries[windowId]?.width ?? DEFAULT_TILE_WIDTH;
+      const height = entries[windowId]?.height ?? DEFAULT_TILE_HEIGHT;
+      const position = arrangedPositionForIndex(
+        pattern,
+        arrangedEntries[anchorWindowId],
+        width,
+        height,
+        index,
+        siblingCount,
+      );
       arrangedEntries[windowId] = {
-        x: snapToGrid((index % cols) * (cellW + GAP)),
-        y: snapToGrid(Math.floor(index / cols) * (cellH + GAP)),
-        width: entries[windowId]?.width ?? cellW,
-        height: entries[windowId]?.height ?? cellH,
+        x: snapToGrid(position.x),
+        y: snapToGrid(position.y),
+        width,
+        height,
       };
       entries[windowId] = arrangedEntries[windowId];
     });
     return {
       ...current,
       layout: { entries },
+      ui: {
+        ...current.ui,
+        arrangementCycleBySession: {
+          ...current.ui.arrangementCycleBySession,
+          [sessionId]: (patternIndex + 1) % AUTO_ARRANGE_PATTERNS.length,
+        },
+      },
     };
   });
 
