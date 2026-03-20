@@ -91,6 +91,10 @@ pub enum TestDriverRequest {
         dx: f64,
         dy: f64,
     },
+    CanvasContextMenu {
+        client_x: f64,
+        client_y: f64,
+    },
     CanvasZoomAt {
         x: f64,
         y: f64,
@@ -108,6 +112,15 @@ pub enum TestDriverRequest {
         viewport_height: Option<f64>,
     },
     CanvasReset,
+    TileContextMenu {
+        pane_id: String,
+        client_x: f64,
+        client_y: f64,
+    },
+    ContextMenuSelect {
+        item_id: String,
+    },
+    ContextMenuDismiss,
     ConfirmCloseTab,
     CancelCloseTab,
 }
@@ -144,6 +157,8 @@ pub enum SocketCommand {
     SetTitle { session_id: String, title: String },
     #[serde(rename = "set_read_only")]
     SetReadOnly { session_id: String, read_only: bool },
+    #[serde(rename = "set_tile_role")]
+    SetTileRole { session_id: String, role: String },
     #[serde(rename = "test_driver")]
     TestDriver { request: TestDriverRequest },
     #[serde(rename = "test_dom_query")]

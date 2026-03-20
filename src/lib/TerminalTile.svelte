@@ -7,6 +7,7 @@
   import type { TerminalInfo, PtyOutputEvent } from './types';
   import {
     mode,
+    openPaneContextMenu,
     persistPaneLayout,
     registerPaneDriverHandle,
     reportPaneViewport,
@@ -253,6 +254,17 @@
   function handleClose() {
     removeTerminal(info.id);
   }
+
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectTile(info.id);
+    const viewport = (e.currentTarget as HTMLElement).closest('.canvas-viewport') as HTMLElement | null;
+    const rect = viewport?.getBoundingClientRect();
+    const clientX = rect ? e.clientX - rect.left : e.clientX;
+    const clientY = rect ? e.clientY - rect.top : e.clientY;
+    openPaneContextMenu(info.id, clientX, clientY);
+  }
 </script>
 
 <svelte:window onmousemove={handleWindowMouseMove} onmouseup={handleWindowMouseUp} />
@@ -269,6 +281,7 @@
     }
     e.stopPropagation();
   }}
+  oncontextmenu={handleContextMenu}
 >
   <div class="component-body">
     <div class="ic-notch"></div>

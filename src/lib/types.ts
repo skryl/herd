@@ -12,12 +12,56 @@ export interface TerminalInfo {
   title: string;
   command: string;
   readOnly?: boolean;
+  kind?: PaneKind;
 }
 
 export interface CanvasState {
   panX: number;
   panY: number;
   zoom: number;
+}
+
+export type PaneKind = 'regular' | 'claude' | 'output';
+
+export type ContextMenuTarget = 'canvas' | 'pane';
+
+export interface ClaudeCommandDescriptor {
+  name: string;
+  execution: 'execute' | 'insert';
+  source: 'builtin' | 'custom' | 'skill' | 'mcp' | 'unknown';
+}
+
+export interface ClaudeMenuData {
+  commands: ClaudeCommandDescriptor[];
+  skills: ClaudeCommandDescriptor[];
+}
+
+export interface ContextMenuItem {
+  id: string;
+  label: string;
+  kind: 'action' | 'separator' | 'label' | 'status' | 'submenu';
+  disabled: boolean;
+  children?: ContextMenuItem[];
+}
+
+export interface ContextMenuState {
+  open: boolean;
+  target: ContextMenuTarget;
+  paneId: string | null;
+  clientX: number;
+  clientY: number;
+  worldX: number | null;
+  worldY: number | null;
+  claudeCommands: ClaudeCommandDescriptor[];
+  claudeSkills: ClaudeCommandDescriptor[];
+  loadingClaudeCommands: boolean;
+  claudeCommandsError: string | null;
+}
+
+export interface PendingSpawnPlacement {
+  sessionId: string;
+  worldX: number;
+  worldY: number;
 }
 
 export type ArrangementMode = 'circle' | 'snowflake' | 'stack-down' | 'stack-right' | 'spiral';
@@ -129,6 +173,8 @@ export interface UiState {
   canvas: CanvasState;
   zoomBookmark: CanvasZoomBookmark | null;
   closeTabConfirmation: CloseTabConfirmation | null;
+  contextMenu: ContextMenuState | null;
+  pendingSpawnPlacement: PendingSpawnPlacement | null;
 }
 
 export interface TmuxStateSlice {
@@ -138,7 +184,7 @@ export interface TmuxStateSlice {
   sessionOrder: string[];
   windows: Record<string, TmuxWindow>;
   windowOrder: string[];
-  panes: Record<string, TmuxPane & { readOnly?: boolean }>;
+  panes: Record<string, TmuxPane & { readOnly?: boolean; role?: PaneKind }>;
   paneOrderByWindow: Record<string, string[]>;
   activeSessionId: string | null;
   activeWindowId: string | null;
@@ -199,10 +245,14 @@ export type TestDriverRequest =
   | { type: 'tile_resize'; pane_id: string; width: number; height: number }
   | { type: 'tile_title_double_click'; pane_id: string; viewport_width?: number; viewport_height?: number }
   | { type: 'canvas_pan'; dx: number; dy: number }
+  | { type: 'canvas_context_menu'; client_x: number; client_y: number }
   | { type: 'canvas_zoom_at'; x: number; y: number; zoom_factor: number }
   | { type: 'canvas_wheel'; delta_y: number; client_x: number; client_y: number }
   | { type: 'canvas_fit_all'; viewport_width?: number; viewport_height?: number }
   | { type: 'canvas_reset' }
+  | { type: 'tile_context_menu'; pane_id: string; client_x: number; client_y: number }
+  | { type: 'context_menu_select'; item_id: string }
+  | { type: 'context_menu_dismiss' }
   | { type: 'confirm_close_tab' }
   | { type: 'cancel_close_tab' };
 
@@ -230,6 +280,19 @@ export interface TestDriverProjection {
     items: SidebarTreeItem[];
   };
   close_tab_confirmation: CloseTabConfirmation | null;
+  context_menu: {
+    target: ContextMenuTarget;
+    pane_id: string | null;
+    client_x: number;
+    client_y: number;
+    world_x: number | null;
+    world_y: number | null;
+    claude_commands: ClaudeCommandDescriptor[];
+    claude_skills: ClaudeCommandDescriptor[];
+    loading_claude_commands: boolean;
+    claude_commands_error: string | null;
+    items: ContextMenuItem[];
+  } | null;
   selected_pane_id: string | null;
   canvas: CanvasState;
   tabs: Tab[];

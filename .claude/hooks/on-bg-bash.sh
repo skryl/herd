@@ -105,6 +105,15 @@ print(json.dumps({"command": "set_read_only", "session_id": sid, "read_only": Tr
 ' "$sid" 2>/dev/null)" >/dev/null 2>&1
 }
 
+set_tile_role() {
+  local sid="$1"
+  socket_request "$(python3 -c '
+import json, sys
+sid = sys.argv[1]
+print(json.dumps({"command": "set_tile_role", "session_id": sid, "role": "output"}))
+' "$sid" 2>/dev/null)" >/dev/null 2>&1
+}
+
 send_tile_input() {
   local sid="$1"
   local command_input="$2"
@@ -134,6 +143,7 @@ SID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)
 if [ -n "$SID" ]; then
   set_tile_title "$SID" "BG: $DESC"
   set_tile_read_only "$SID"
+  set_tile_role "$SID"
   start_task_watcher "$SID"
   send_tile_input "$SID" "echo Running: $CMD"$'\n'
 fi

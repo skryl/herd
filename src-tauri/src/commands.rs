@@ -5,8 +5,33 @@ use crate::{
     tmux,
     tmux_state,
 };
-use std::process::Command;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use tauri::Manager;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCommandDescriptor {
+    pub name: String,
+    pub execution: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeMenuData {
+    pub commands: Vec<ClaudeCommandDescriptor>,
+    pub skills: Vec<ClaudeCommandDescriptor>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeInitDiscovery {
+    #[serde(default)]
+    slash_commands: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+}
 
 fn active_session_id(snapshot: &tmux_state::TmuxSnapshot) -> Result<String, String> {
     snapshot
@@ -101,6 +126,208 @@ fn switch_control_client_to_session(state: &AppState, session_id: &str) -> Resul
     Ok(())
 }
 
+fn pane_current_path(pane_id: &str) -> Result<String, String> {
+    let output = tmux::output(&["display-message", "-p", "-t", pane_id, "#{pane_current_path}"])?;
+    if !output.status.success() {
+        return Err(format!(
+            "tmux display-message failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cwd.is_empty() {
+        return Err(format!("tmux returned an empty cwd for pane {pane_id}"));
+    }
+    Ok(cwd)
+}
+
+fn builtin_claude_command(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "clear" => Some(("execute", "builtin")),
+        "cost" => Some(("execute", "builtin")),
+        "context" => Some(("execute", "builtin")),
+        "debug" => Some(("execute", "builtin")),
+        "help" => Some(("execute", "builtin")),
+        "init" => Some(("execute", "builtin")),
+        "insights" => Some(("execute", "builtin")),
+        "memory" => Some(("execute", "builtin")),
+        "pr-comments" => Some(("execute", "builtin")),
+        "review" => Some(("execute", "builtin")),
+        "security-review" => Some(("execute", "builtin")),
+        "compact" => Some(("insert", "builtin")),
+        "model" => Some(("insert", "builtin")),
+        _ => None,
+    }
+}
+
+fn env_fixture_claude_menu() -> Result<Option<ClaudeInitDiscovery>, String> {
+    let Some(value) = std::env::var("HERD_CLAUDE_MENU_FIXTURE").ok() else {
+        return Ok(None);
+    };
+
+    if value.trim().is_empty() {
+        return Ok(Some(ClaudeInitDiscovery {
+            slash_commands: Vec::new(),
+            skills: Vec::new(),
+        }));
+    }
+
+    serde_json::from_str::<ClaudeInitDiscovery>(&value)
+        .map(Some)
+        .map_err(|error| format!("invalid HERD_CLAUDE_MENU_FIXTURE: {error}"))
+}
+
+fn discover_claude_menu_from_cli(cwd: &str) -> Result<ClaudeInitDiscovery, String> {
+    if let Some(menu) = env_fixture_claude_menu()? {
+        return Ok(menu);
+    }
+
+    let mut child = Command::new("claude")
+        .arg("-p")
+        .arg("--verbose")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("ok")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to spawn claude for command discovery: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("failed to capture claude discovery stdout")?;
+    let reader = BufReader::new(stdout);
+    let mut discovered: Option<ClaudeInitDiscovery> = None;
+
+    for line in reader.lines().take(20) {
+        let line = line.map_err(|error| format!("failed reading claude discovery output: {error}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let is_init = value.get("type").and_then(|value| value.as_str()) == Some("system")
+            && value.get("subtype").and_then(|value| value.as_str()) == Some("init");
+        if !is_init {
+            continue;
+        }
+        let slash_commands = value
+            .get("slash_commands")
+            .and_then(|value| value.as_array())
+            .ok_or("claude init output missing slash_commands")?
+            .iter()
+            .filter_map(|value| value.as_str().map(|value| value.to_string()))
+            .collect::<Vec<_>>();
+        let skills = value
+            .get("skills")
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(|value| value.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        discovered = Some(ClaudeInitDiscovery {
+            slash_commands,
+            skills,
+        });
+        break;
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    discovered.ok_or("claude discovery did not yield an init slash_commands payload".into())
+}
+
+fn find_custom_claude_command_file(cwd: &str, name: &str) -> Option<PathBuf> {
+    let command_name = name.replace(':', "/");
+    let md_name = format!("{command_name}.md");
+    let home_commands = std::env::var("HOME").ok().map(PathBuf::from);
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    let mut current = Some(PathBuf::from(cwd));
+    while let Some(path) = current {
+        roots.push(path.join(".claude/commands"));
+        current = path.parent().map(Path::to_path_buf);
+    }
+
+    if let Some(home) = home_commands {
+        roots.push(home.join(".claude/commands"));
+    }
+
+    roots.into_iter()
+        .map(|root| root.join(&md_name))
+        .find(|path| path.exists())
+}
+
+fn custom_command_has_argument_hint(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|content| {
+            content.lines().take(20).any(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("argument-hint:") || trimmed.starts_with("argument_hint:")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn enrich_claude_commands(command_names: Vec<String>, cwd: &str) -> Vec<ClaudeCommandDescriptor> {
+    command_names
+        .into_iter()
+        .map(|name| {
+            if let Some((execution, source)) = builtin_claude_command(&name) {
+                return ClaudeCommandDescriptor {
+                    name,
+                    execution: execution.to_string(),
+                    source: source.to_string(),
+                };
+            }
+
+            if let Some(path) = find_custom_claude_command_file(cwd, &name) {
+                let execution = if custom_command_has_argument_hint(&path) {
+                    "insert"
+                } else {
+                    "execute"
+                };
+                return ClaudeCommandDescriptor {
+                    name,
+                    execution: execution.to_string(),
+                    source: "custom".to_string(),
+                };
+            }
+
+            ClaudeCommandDescriptor {
+                name,
+                execution: "insert".to_string(),
+                source: "unknown".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn skillify_commands(commands: Vec<ClaudeCommandDescriptor>) -> Vec<ClaudeCommandDescriptor> {
+    commands
+        .into_iter()
+        .map(|mut command| {
+            command.source = "skill".to_string();
+            command
+        })
+        .collect()
+}
+
+fn build_claude_menu_data(discovery: ClaudeInitDiscovery, cwd: &str) -> ClaudeMenuData {
+    ClaudeMenuData {
+        commands: enrich_claude_commands(discovery.slash_commands, cwd),
+        skills: skillify_commands(enrich_claude_commands(discovery.skills, cwd)),
+    }
+}
+
 fn control_client_tty_from_output(output: &str, control_pid: Option<libc::pid_t>) -> Option<String> {
     let control_pid = control_pid?;
     let control_pid = control_pid.to_string();
@@ -126,6 +353,21 @@ pub fn get_layout_state(
 ) -> Result<std::collections::HashMap<String, TileState>, String> {
     let states = state.tile_states.lock().map_err(|e| e.to_string())?;
     Ok(states.clone())
+}
+
+#[tauri::command]
+pub fn get_claude_menu_data_for_pane(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+) -> Result<ClaudeMenuData, String> {
+    let cwd = pane_current_path(&pane_id)?;
+    if let Some(cached) = state.cached_claude_commands(&cwd) {
+        return Ok(cached);
+    }
+
+    let menu = build_claude_menu_data(discover_claude_menu_from_cli(&cwd)?, &cwd);
+    state.set_cached_claude_commands(cwd, menu.clone());
+    Ok(menu)
 }
 
 #[tauri::command]
@@ -584,7 +826,26 @@ pub fn tmux_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_client_tty_from_output, tmux_control_client_alive};
+    use super::{
+        control_client_tty_from_output,
+        enrich_claude_commands,
+        tmux_control_client_alive,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herd-commands-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     fn control_client_alive_from_output(output: &str, control_pid: Option<libc::pid_t>) -> bool {
         let Some(control_pid) = control_pid else {
@@ -624,5 +885,48 @@ mod tests {
         assert_eq!(control_client_tty_from_output(output, Some(91234)), None);
         assert_eq!(control_client_tty_from_output(output, Some(99999)), None);
         assert_eq!(control_client_tty_from_output(output, None), None);
+    }
+
+    #[test]
+    fn enriches_builtin_and_unknown_claude_commands() {
+        let cwd = temp_test_dir("builtin");
+        let commands = enrich_claude_commands(
+            vec!["clear".into(), "model".into(), "mcp:deploy".into()],
+            cwd.to_str().unwrap(),
+        );
+
+        assert_eq!(commands[0].name, "clear");
+        assert_eq!(commands[0].execution, "execute");
+        assert_eq!(commands[0].source, "builtin");
+
+        assert_eq!(commands[1].name, "model");
+        assert_eq!(commands[1].execution, "insert");
+        assert_eq!(commands[1].source, "builtin");
+
+        assert_eq!(commands[2].name, "mcp:deploy");
+        assert_eq!(commands[2].execution, "insert");
+        assert_eq!(commands[2].source, "unknown");
+
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn custom_command_argument_hint_marks_insert_execution() {
+        let cwd = temp_test_dir("custom");
+        let command_dir = cwd.join(".claude/commands");
+        fs::create_dir_all(&command_dir).unwrap();
+        fs::write(
+            command_dir.join("plan.md"),
+            "---\nargument-hint: ticket\n---\n# Plan\n",
+        )
+        .unwrap();
+
+        let commands = enrich_claude_commands(vec!["plan".into()], cwd.to_str().unwrap());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "plan");
+        assert_eq!(commands[0].execution, "insert");
+        assert_eq!(commands[0].source, "custom");
+
+        let _ = fs::remove_dir_all(cwd);
     }
 }

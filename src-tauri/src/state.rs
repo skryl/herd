@@ -23,6 +23,7 @@ pub struct AppState {
     pub test_driver_bootstrap_complete: Arc<AtomicBool>,
     pub pending_test_driver_requests: Arc<Mutex<PendingTestDriverRequests>>,
     pub test_driver_request_counter: Arc<AtomicU64>,
+    pub claude_command_cache: Arc<Mutex<HashMap<String, crate::commands::ClaudeMenuData>>>,
 }
 
 impl AppState {
@@ -39,6 +40,7 @@ impl AppState {
             test_driver_bootstrap_complete: Arc::new(AtomicBool::new(false)),
             pending_test_driver_requests: Arc::new(Mutex::new(HashMap::new())),
             test_driver_request_counter: Arc::new(AtomicU64::new(0)),
+            claude_command_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -246,6 +248,26 @@ impl AppState {
         }
 
         Ok(false)
+    }
+
+    pub fn cached_claude_commands(
+        &self,
+        cwd: &str,
+    ) -> Option<crate::commands::ClaudeMenuData> {
+        self.claude_command_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(cwd).cloned())
+    }
+
+    pub fn set_cached_claude_commands(
+        &self,
+        cwd: String,
+        commands: crate::commands::ClaudeMenuData,
+    ) {
+        if let Ok(mut cache) = self.claude_command_cache.lock() {
+            cache.insert(cwd, commands);
+        }
     }
 }
 

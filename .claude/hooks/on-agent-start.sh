@@ -99,6 +99,16 @@ print(json.dumps({"command": "set_title", "session_id": sid, "title": title}))
 ' "$sid" "$title" 2>/dev/null)" >/dev/null 2>&1
 }
 
+set_tile_role() {
+  local sid="$1"
+  local role="$2"
+  socket_request "$(python3 -c '
+import json, sys
+sid, role = sys.argv[1], sys.argv[2]
+print(json.dumps({"command": "set_tile_role", "session_id": sid, "role": role}))
+' "$sid" "$role" 2>/dev/null)" >/dev/null 2>&1
+}
+
 send_tile_input() {
   local sid="$1"
   local command_input="$2"
@@ -389,8 +399,14 @@ SID="$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin
 
 if [ -n "$SID" ]; then
   if [ "$HOOK_MODE" = "team" ]; then
+    set_tile_role "$SID" "claude"
     launch_team_agent_tile "$SID"
   else
+    if [ "$RUN_IN_BACKGROUND" = "yes" ]; then
+      set_tile_role "$SID" "output"
+    else
+      set_tile_role "$SID" "claude"
+    fi
     launch_generic_agent_tile "$SID"
   fi
 fi

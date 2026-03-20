@@ -7,6 +7,7 @@ import {
   beginSidebarRename,
   buildTestDriverProjection,
   cancelCommandBar,
+  dismissContextMenu,
   closeSidebar,
   commandText,
   dispatchIntent,
@@ -16,8 +17,11 @@ import {
   moveSidebarSelection,
   openSidebar,
   panCanvasBy,
+  openCanvasContextMenu,
+  openPaneContextMenu,
   removeTerminal,
   resizeTileTo,
+  selectContextMenuItem,
   selectTile,
   setSidebarSelection,
   submitCommandBar,
@@ -155,6 +159,9 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
     case 'canvas_pan':
       panCanvasBy(request.dx, request.dy);
       return null;
+    case 'canvas_context_menu':
+      openCanvasContextMenu(request.client_x, request.client_y);
+      return null;
     case 'canvas_zoom_at':
       zoomCanvasAtPoint(request.x, request.y, request.zoom_factor);
       return null;
@@ -169,6 +176,15 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
       return null;
     case 'canvas_reset':
       await dispatchIntent({ type: 'reset-canvas' });
+      return null;
+    case 'tile_context_menu':
+      openPaneContextMenu(request.pane_id, request.client_x, request.client_y);
+      return null;
+    case 'context_menu_select':
+      await selectContextMenuItem(request.item_id);
+      return null;
+    case 'context_menu_dismiss':
+      dismissContextMenu();
       return null;
     case 'confirm_close_tab':
       await dispatchIntent({ type: 'confirm-close-active-tab' });

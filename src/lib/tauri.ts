@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { LayoutStateMap, TmuxSnapshot } from './types';
+import type { ClaudeMenuData, LayoutStateMap, TmuxSnapshot } from './types';
 
 export async function getTmuxState(): Promise<TmuxSnapshot> {
   return invoke<TmuxSnapshot>('get_tmux_state');
@@ -87,6 +87,10 @@ export async function setTestDriverState(options: {
     frontendReady: options.frontendReady ?? null,
     bootstrapComplete: options.bootstrapComplete ?? null,
   });
+}
+
+export async function getClaudeMenuDataForPane(paneId: string): Promise<ClaudeMenuData> {
+  return invoke<ClaudeMenuData>('get_claude_menu_data_for_pane', { paneId });
 }
 
 export async function resolveTestDriverRequest(

@@ -116,6 +116,7 @@ export async function startIntegrationRuntime(): Promise<HerdIntegrationRuntime>
       ...process.env,
       HERD_RUNTIME_ID: runtimeId,
       HERD_ENABLE_TEST_DRIVER: '1',
+      HERD_CLAUDE_MENU_FIXTURE: '{"slash_commands":["clear","model","codex"],"skills":["codex"]}',
       CARGO_TERM_COLOR: 'never',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -1,6 +1,7 @@
 import { tick } from 'svelte';
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import {
+  getClaudeMenuDataForPane,
   getLayoutState,
   getTmuxState,
   killSession,
@@ -21,11 +22,16 @@ import type {
   AppStateTree,
   CanvasState,
   CanvasZoomMode,
+  ClaudeCommandDescriptor,
   CloseTabConfirmation,
+  ContextMenuItem,
+  ContextMenuState,
   HerdMode,
   LayoutEntry,
   LayoutStateMap,
+  PendingSpawnPlacement,
   PaneViewportHint,
+  PaneKind,
   PtyOutputEvent,
   SidebarTreeItem,
   Tab,
@@ -112,6 +118,8 @@ const initialUiState: UiState = {
   },
   zoomBookmark: null,
   closeTabConfirmation: null,
+  contextMenu: null,
+  pendingSpawnPlacement: null,
 };
 
 export const initialAppState: AppStateTree = {
@@ -239,6 +247,7 @@ function buildPanesRecord(panes: TmuxPane[], existing: AppStateTree['tmux']['pan
     panesRecord[pane.id] = {
       ...pane,
       readOnly: existing[pane.id]?.readOnly ?? false,
+      role: existing[pane.id]?.role,
     };
     if (!paneOrderByWindow[pane.window_id]) {
       paneOrderByWindow[pane.window_id] = [];
@@ -454,6 +463,240 @@ export function buildSidebarRenameCommand(state: AppStateTree): string | null {
   return null;
 }
 
+function paneKindForPane(state: AppStateTree, paneId: string): PaneKind {
+  const pane = state.tmux.panes[paneId];
+  const window = pane ? state.tmux.windows[pane.window_id] : null;
+  if (!pane || !window) {
+    return 'regular';
+  }
+
+  if (pane.role === 'claude' || pane.role === 'output') {
+    return pane.role;
+  }
+
+  const titleSignals = [pane.title, window.name].join(' ');
+  if (titleSignals.includes('Claude Code') || /\bclaude\b/i.test(pane.command)) {
+    return 'claude';
+  }
+
+  return 'regular';
+}
+
+function canvasWorldCoordinates(state: AppStateTree, clientX: number, clientY: number) {
+  return {
+    worldX: Math.round((clientX - state.ui.canvas.panX) / state.ui.canvas.zoom),
+    worldY: Math.round((clientY - state.ui.canvas.panY) / state.ui.canvas.zoom),
+  };
+}
+
+export function openCanvasContextMenuInState(
+  state: AppStateTree,
+  clientX: number,
+  clientY: number,
+): AppStateTree {
+  const { worldX, worldY } = canvasWorldCoordinates(state, clientX, clientY);
+  const contextMenu: ContextMenuState = {
+    open: true,
+    target: 'canvas',
+    paneId: null,
+    clientX,
+    clientY,
+    worldX,
+    worldY,
+    claudeCommands: [],
+    claudeSkills: [],
+    loadingClaudeCommands: false,
+    claudeCommandsError: null,
+  };
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      contextMenu,
+    },
+  };
+}
+
+export function openPaneContextMenuInState(
+  state: AppStateTree,
+  paneId: string,
+  clientX: number,
+  clientY: number,
+): AppStateTree {
+  const contextMenu: ContextMenuState = {
+    open: true,
+    target: 'pane',
+    paneId,
+    clientX,
+    clientY,
+    worldX: null,
+    worldY: null,
+    claudeCommands: [],
+    claudeSkills: [],
+    loadingClaudeCommands: paneKindForPane(state, paneId) === 'claude',
+    claudeCommandsError: null,
+  };
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      selectedPaneId: paneId,
+      contextMenu,
+    },
+  };
+}
+
+export function dismissContextMenuInState(state: AppStateTree): AppStateTree {
+  if (!state.ui.contextMenu) return state;
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      contextMenu: null,
+    },
+  };
+}
+
+export function buildContextMenuItems(state: AppStateTree): ContextMenuItem[] {
+  const contextMenu = state.ui.contextMenu;
+  if (!contextMenu?.open) {
+    return [];
+  }
+
+  if (contextMenu.target === 'canvas') {
+    return [
+      { id: 'new-shell', label: 'New Shell', kind: 'action', disabled: false },
+    ];
+  }
+
+  if (!contextMenu.paneId) {
+    return [];
+  }
+
+  const items: ContextMenuItem[] = [];
+
+  if (paneKindForPane(state, contextMenu.paneId) === 'claude') {
+    const skillNames = new Set(contextMenu.claudeSkills.map((command) => command.name));
+    const skillItems = contextMenu.loadingClaudeCommands
+      ? [{ id: 'skills-loading', label: 'Loading…', kind: 'status', disabled: true } satisfies ContextMenuItem]
+      : contextMenu.claudeCommandsError
+        ? [{ id: 'skills-error', label: contextMenu.claudeCommandsError, kind: 'status', disabled: true } satisfies ContextMenuItem]
+        : contextMenu.claudeSkills.length > 0
+          ? contextMenu.claudeSkills.map((command) => ({
+            id: `claude-command:${command.name}`,
+            label: `/${command.name}`,
+            kind: 'action' as const,
+            disabled: false,
+          }))
+          : [{ id: 'skills-empty', label: 'No skills', kind: 'status', disabled: true } satisfies ContextMenuItem];
+
+    items.push({
+      id: 'claude-skills',
+      label: 'Skills',
+      kind: 'submenu',
+      disabled: false,
+      children: skillItems,
+    });
+    items.push({ id: 'separator-skills', label: '', kind: 'separator', disabled: true });
+  }
+
+  items.push({ id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false });
+
+  if (paneKindForPane(state, contextMenu.paneId) === 'claude') {
+    const skillNames = new Set(contextMenu.claudeSkills.map((command) => command.name));
+    const regularCommands = contextMenu.claudeCommands.filter((command) => !skillNames.has(command.name));
+
+    items.push({ id: 'separator-claude', label: '', kind: 'separator', disabled: true });
+    items.push({ id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true });
+    if (contextMenu.loadingClaudeCommands) {
+      items.push({ id: 'claude-loading', label: 'Loading…', kind: 'status', disabled: true });
+    } else if (contextMenu.claudeCommandsError) {
+      items.push({ id: 'claude-error', label: contextMenu.claudeCommandsError, kind: 'status', disabled: true });
+    } else if (regularCommands.length === 0) {
+      items.push({ id: 'claude-empty', label: 'No commands', kind: 'status', disabled: true });
+    } else {
+      for (const command of regularCommands) {
+        items.push({
+          id: `claude-command:${command.name}`,
+          label: `/${command.name}`,
+          kind: 'action',
+          disabled: false,
+        });
+      }
+    }
+  }
+
+  return items;
+}
+
+export function reduceContextMenuSelection(
+  state: AppStateTree,
+  itemId: string,
+): { state: AppStateTree; effects: TmuxEffect[] } {
+  const contextMenu = state.ui.contextMenu;
+  if (!contextMenu?.open) {
+    return { state, effects: [] };
+  }
+
+  if (itemId === 'new-shell' && contextMenu.target === 'canvas') {
+    const sessionId = state.tmux.activeSessionId;
+    if (!sessionId || contextMenu.worldX === null || contextMenu.worldY === null) {
+      return { state: dismissContextMenuInState(state), effects: [] };
+    }
+    const dismissedState = dismissContextMenuInState(state);
+    return {
+      state: {
+        ...dismissedState,
+        ui: {
+          ...dismissedState.ui,
+          pendingSpawnPlacement: {
+            sessionId,
+            worldX: contextMenu.worldX,
+            worldY: contextMenu.worldY,
+          },
+        },
+      },
+      effects: [{ type: 'new-window', sessionId }],
+    };
+  }
+
+  if (itemId === 'close-shell' && contextMenu.target === 'pane' && contextMenu.paneId) {
+    const selectedState = {
+      ...state,
+      ui: {
+        ...state.ui,
+        selectedPaneId: contextMenu.paneId,
+      },
+    };
+    return reduceIntent(dismissContextMenuInState(selectedState), { type: 'close-selected-pane' });
+  }
+
+  if (itemId.startsWith('claude-command:') && contextMenu.target === 'pane' && contextMenu.paneId) {
+    const commandName = itemId.slice('claude-command:'.length);
+    const command = contextMenu.claudeCommands.find((entry) => entry.name === commandName);
+    if (!command) {
+      return { state: dismissContextMenuInState(state), effects: [] };
+    }
+
+    const commandText = command.execution === 'execute'
+      ? `/${command.name}\r`
+      : `/${command.name} `;
+    const dismissedState = dismissContextMenuInState(state);
+    return {
+      state: {
+        ...dismissedState,
+        ui: {
+          ...dismissedState.ui,
+          selectedPaneId: contextMenu.paneId,
+        },
+      },
+      effects: [{ type: 'write-pane', paneId: contextMenu.paneId, data: commandText }],
+    };
+  }
+
+  return { state: dismissContextMenuInState(state), effects: [] };
+}
+
 function reconcileLayoutEntries(
   previousEntries: Record<string, LayoutEntry>,
   sessions: Record<string, TmuxSession>,
@@ -537,6 +780,50 @@ function reconcileArrangementModes(
     }
   }
   return nextModes;
+}
+
+function applyPendingSpawnPlacement(
+  previousState: AppStateTree,
+  nextTmux: AppStateTree['tmux'],
+  entries: Record<string, LayoutEntry>,
+): {
+  entries: Record<string, LayoutEntry>;
+  pendingSpawnPlacement: PendingSpawnPlacement | null;
+  consumedSessionId: string | null;
+} {
+  const pending = previousState.ui.pendingSpawnPlacement;
+  if (!pending) {
+    return { entries, pendingSpawnPlacement: null, consumedSessionId: null };
+  }
+
+  const session = nextTmux.sessions[pending.sessionId];
+  if (!session) {
+    return { entries, pendingSpawnPlacement: null, consumedSessionId: null };
+  }
+
+  const previousWindowIds = previousState.tmux.sessions[pending.sessionId]?.window_ids ?? [];
+  const newWindowIds = session.window_ids.filter((windowId) => !previousWindowIds.includes(windowId));
+  if (newWindowIds.length === 0) {
+    return { entries, pendingSpawnPlacement: pending, consumedSessionId: null };
+  }
+
+  const targetWindowId = newWindowIds[newWindowIds.length - 1];
+  const nextEntries = { ...entries };
+  const existing = nextEntries[targetWindowId];
+  const width = existing?.width ?? DEFAULT_TILE_WIDTH;
+  const height = existing?.height ?? DEFAULT_TILE_HEIGHT;
+  nextEntries[targetWindowId] = {
+    x: snapToGrid(pending.worldX),
+    y: snapToGrid(pending.worldY),
+    width,
+    height,
+  };
+
+  return {
+    entries: nextEntries,
+    pendingSpawnPlacement: null,
+    consumedSessionId: pending.sessionId,
+  };
 }
 
 function snapLayoutEntriesToTmux(
@@ -667,7 +954,8 @@ export function applyTmuxSnapshotToState(
     previousState.ui.arrangementModeBySession,
     sessions,
   );
-  const snappedLayoutEntries = snapLayoutEntriesToTmux(layoutEntries, windows, paneViewportHints);
+  const pendingPlacement = applyPendingSpawnPlacement(previousState, nextTmux, layoutEntries);
+  const snappedLayoutEntries = snapLayoutEntriesToTmux(pendingPlacement.entries, windows, paneViewportHints);
   const closeTabConfirmation = previousState.ui.closeTabConfirmation
     ? buildCloseTabConfirmation(nextTmux, previousState.ui.closeTabConfirmation.sessionId)
     : null;
@@ -684,6 +972,7 @@ export function applyTmuxSnapshotToState(
       arrangementCycleBySession,
       arrangementModeBySession,
       closeTabConfirmation,
+      pendingSpawnPlacement: pendingPlacement.pendingSpawnPlacement,
       sidebarSelectedIdx: previousState.ui.sidebarSelectedIdx,
     },
   };
@@ -691,6 +980,7 @@ export function applyTmuxSnapshotToState(
     const pattern = nextState.ui.arrangementModeBySession[sessionId];
     const previousWindowCount = previousState.tmux.sessions[sessionId]?.window_ids.length ?? 0;
     const nextWindowCount = nextTmux.sessions[sessionId]?.window_ids.length ?? 0;
+    if (pendingPlacement.consumedSessionId === sessionId) continue;
     if (!pattern || nextWindowCount <= previousWindowCount) continue;
     nextState = applyArrangementPattern(nextState, sessionId, pattern).state;
   }
@@ -714,6 +1004,28 @@ export function applyPaneReadOnlyToState(
         [paneId]: {
           ...pane,
           readOnly,
+        },
+      },
+    },
+  };
+}
+
+export function applyPaneRoleToState(
+  state: AppStateTree,
+  paneId: string,
+  role: PaneKind,
+): AppStateTree {
+  const pane = state.tmux.panes[paneId];
+  if (!pane) return state;
+  return {
+    ...state,
+    tmux: {
+      ...state.tmux,
+      panes: {
+        ...state.tmux.panes,
+        [paneId]: {
+          ...pane,
+          role,
         },
       },
     },
@@ -1067,6 +1379,14 @@ export async function dispatchIntent(intent: UiIntent) {
   }
 }
 
+export async function selectContextMenuItem(itemId: string) {
+  const { state, effects } = reduceContextMenuSelection(get(appState), itemId);
+  appState.set(state);
+  for (const effect of effects) {
+    await runEffect(effect);
+  }
+}
+
 export async function bootstrapAppState() {
   const [layout, snapshot] = await Promise.all([getLayoutState(), getTmuxState()]);
   appState.update((state) => applyTmuxSnapshotToState({
@@ -1088,6 +1408,10 @@ export function applyTmuxSnapshot(snapshot: TmuxSnapshot) {
 
 export function applyPaneReadOnly(paneId: string, readOnly: boolean) {
   appState.update((state) => applyPaneReadOnlyToState(state, paneId, readOnly));
+}
+
+export function applyPaneRole(paneId: string, role: PaneKind) {
+  appState.update((state) => applyPaneRoleToState(state, paneId, role));
 }
 
 function createWritableSlice<T>(
@@ -1145,6 +1469,8 @@ export const closeTabConfirmation = createWritableSlice<CloseTabConfirmation | n
   (state, value) => ({ ...state, ui: { ...state.ui, closeTabConfirmation: value } }),
 );
 
+export const contextMenuState = derived(appState, ($state) => $state.ui.contextMenu);
+
 export const canvasState = createWritableSlice<CanvasState>(
   (state) => state.ui.canvas,
   (state, value) => ({ ...state, ui: { ...state.ui, canvas: value, zoomBookmark: null } }),
@@ -1187,6 +1513,7 @@ export const activeArrangementMode = derived(appState, ($state) => {
 });
 
 export const sidebarItems = derived(appState, ($state) => buildSidebarItems($state));
+export const contextMenuItems = derived(appState, ($state) => buildContextMenuItems($state));
 
 export function calculateWindowSizeRequest(
   state: AppStateTree,
@@ -1245,6 +1572,7 @@ function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo 
     title: defaultWindowTitle(window, pane),
     command: pane.command,
     readOnly: pane.readOnly,
+    kind: paneKindForPane(state, pane.id),
   };
 }
 
@@ -1509,6 +1837,21 @@ export function buildTestDriverProjection(
       items: buildSidebarItems(state),
     },
     close_tab_confirmation: state.ui.closeTabConfirmation,
+    context_menu: state.ui.contextMenu
+      ? {
+        target: state.ui.contextMenu.target,
+        pane_id: state.ui.contextMenu.paneId,
+        client_x: state.ui.contextMenu.clientX,
+        client_y: state.ui.contextMenu.clientY,
+        world_x: state.ui.contextMenu.worldX,
+        world_y: state.ui.contextMenu.worldY,
+        claude_commands: state.ui.contextMenu.claudeCommands,
+        claude_skills: state.ui.contextMenu.claudeSkills,
+        loading_claude_commands: state.ui.contextMenu.loadingClaudeCommands,
+        claude_commands_error: state.ui.contextMenu.claudeCommandsError,
+        items: buildContextMenuItems(state),
+      }
+      : null,
     selected_pane_id: state.ui.selectedPaneId,
     canvas: state.ui.canvas,
     tabs: state.tmux.sessionOrder
@@ -1548,6 +1891,67 @@ export function buildTestDriverProjection(
 
 export function setCanvasState(value: CanvasState) {
   canvasState.set(value);
+}
+
+export function openCanvasContextMenu(clientX: number, clientY: number) {
+  appState.update((state) => openCanvasContextMenuInState(state, clientX, clientY));
+}
+
+export function openPaneContextMenu(paneId: string, clientX: number, clientY: number) {
+  appState.update((state) => openPaneContextMenuInState(state, paneId, clientX, clientY));
+  const state = get(appState);
+  if (paneKindForPane(state, paneId) !== 'claude') {
+    return;
+  }
+
+  void getClaudeMenuDataForPane(paneId)
+    .then((menu) => {
+      appState.update((current) => {
+        const contextMenu = current.ui.contextMenu;
+        if (!contextMenu || contextMenu.target !== 'pane' || contextMenu.paneId !== paneId) {
+          return current;
+        }
+        return {
+          ...current,
+          ui: {
+            ...current.ui,
+            contextMenu: {
+              ...contextMenu,
+              claudeCommands: menu.commands,
+              claudeSkills: menu.skills,
+              loadingClaudeCommands: false,
+              claudeCommandsError: null,
+            },
+          },
+        };
+      });
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      appState.update((current) => {
+        const contextMenu = current.ui.contextMenu;
+        if (!contextMenu || contextMenu.target !== 'pane' || contextMenu.paneId !== paneId) {
+          return current;
+        }
+        return {
+          ...current,
+          ui: {
+            ...current.ui,
+            contextMenu: {
+              ...contextMenu,
+              claudeCommands: [],
+              claudeSkills: [],
+              loadingClaudeCommands: false,
+              claudeCommandsError: message,
+            },
+          },
+        };
+      });
+    });
+}
+
+export function dismissContextMenu() {
+  appState.update((state) => dismissContextMenuInState(state));
 }
 
 export function updateCanvasState(fn: (current: CanvasState) => CanvasState) {

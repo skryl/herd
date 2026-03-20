@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppStateTree, TmuxSnapshot } from '../types';
 
 const tauriMocks = vi.hoisted(() => ({
+  getClaudeMenuDataForPane: vi.fn(),
   getLayoutState: vi.fn(),
   getTmuxState: vi.fn(),
   killPane: vi.fn(),
@@ -25,17 +26,23 @@ vi.mock('../tauri', () => tauriMocks);
 import {
   __resetWindowResizeTrackingForTest,
   applyPaneReadOnlyToState,
+  applyPaneRoleToState,
   applyTmuxSnapshot,
   applyTmuxSnapshotToState,
   appState,
   autoArrange,
   beginSidebarRename,
+  buildContextMenuItems,
   buildCanvasConnections,
   buildSidebarItems,
   buildSidebarRenameCommand,
   calculateWindowSizeRequest,
+  dismissContextMenuInState,
   initialAppState,
+  openCanvasContextMenuInState,
+  openPaneContextMenuInState,
   parseCommandBarCommand,
+  reduceContextMenuSelection,
   reportPaneViewport,
   reduceIntent,
 } from './appState';
@@ -138,6 +145,7 @@ beforeEach(() => {
   appState.set(freshState());
   __resetWindowResizeTrackingForTest();
   Object.values(tauriMocks).forEach((mockFn) => mockFn.mockReset());
+  tauriMocks.getClaudeMenuDataForPane.mockResolvedValue({ commands: [], skills: [] });
   tauriMocks.resizeWindow.mockResolvedValue(undefined);
 });
 
@@ -501,6 +509,204 @@ describe('buildCanvasConnections', () => {
     expect(connections).toHaveLength(1);
     expect(connections[0].parentWindowId).toBe('@1');
     expect(connections[0].childWindowId).toBe('@2');
+  });
+});
+
+describe('context menu state', () => {
+  it('opens a canvas context menu with click-derived world coordinates and dismisses it locally', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.canvas = { panX: 100, panY: 50, zoom: 2 };
+
+    state = openCanvasContextMenuInState(state, 320, 250);
+    expect(state.ui.contextMenu).toEqual({
+      open: true,
+      target: 'canvas',
+      paneId: null,
+      clientX: 320,
+      clientY: 250,
+      worldX: 110,
+      worldY: 100,
+      claudeCommands: [],
+      claudeSkills: [],
+      loadingClaudeCommands: false,
+      claudeCommandsError: null,
+    });
+
+    state = dismissContextMenuInState(state);
+    expect(state.ui.contextMenu).toBeNull();
+  });
+
+  it('opens a pane context menu, selects the pane, and derives regular-tile actions', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = openPaneContextMenuInState(state, '%2', 640, 360);
+
+    expect(state.ui.selectedPaneId).toBe('%2');
+    expect(state.ui.contextMenu?.target).toBe('pane');
+    expect(state.ui.contextMenu?.paneId).toBe('%2');
+    expect(buildContextMenuItems(state)).toEqual([
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('maps canvas New Shell selection to tmux window creation and a pending click placement', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.canvas = { panX: 100, panY: 50, zoom: 2 };
+    state = openCanvasContextMenuInState(state, 320, 250);
+
+    const selected = reduceContextMenuSelection(state, 'new-shell');
+    expect(selected.effects).toEqual([{ type: 'new-window', sessionId: '$1' }]);
+    expect(selected.state.ui.contextMenu).toBeNull();
+    expect(selected.state.ui.pendingSpawnPlacement).toEqual({
+      sessionId: '$1',
+      worldX: 110,
+      worldY: 100,
+    });
+  });
+
+  it('applies the pending click placement to the next created window instead of default layout', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.canvas = { panX: 100, panY: 50, zoom: 2 };
+    state = openCanvasContextMenuInState(state, 320, 250);
+    state = reduceContextMenuSelection(state, 'new-shell').state;
+
+    const next = applyTmuxSnapshotToState(state, {
+      ...baseSnapshot(),
+      version: 2,
+      sessions: [
+        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1' },
+        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3' },
+      ],
+      windows: [
+        ...baseSnapshot().windows,
+        {
+          id: '@4',
+          session_id: '$1',
+          session_name: 'Main',
+          index: 2,
+          name: 'shell-3',
+          active: false,
+          cols: 80,
+          rows: 24,
+          pane_ids: ['%4'],
+        },
+      ],
+      panes: [
+        ...baseSnapshot().panes,
+        {
+          id: '%4',
+          session_id: '$1',
+          window_id: '@4',
+          window_index: 2,
+          pane_index: 0,
+          cols: 80,
+          rows: 24,
+          title: 'shell-3',
+          command: 'zsh',
+          active: false,
+          dead: false,
+        },
+      ],
+    });
+
+    expect(next.layout.entries['@4']).toMatchObject({
+      x: 120,
+      y: 100,
+    });
+    expect(next.ui.pendingSpawnPlacement).toBeNull();
+  });
+
+  it('maps regular Close Shell selection through the existing close path', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = openPaneContextMenuInState(state, '%2', 640, 360);
+
+    const selected = reduceContextMenuSelection(state, 'close-shell');
+    expect(selected.effects).toEqual([{ type: 'kill-window', windowId: '@2' }]);
+    expect(selected.state.ui.contextMenu).toBeNull();
+    expect(selected.state.ui.selectedPaneId).toBe('%2');
+  });
+
+  it('builds Claude-specific items for explicit Claude panes and excludes output panes', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%1', 'claude');
+    state = openPaneContextMenuInState(state, '%1', 600, 320);
+
+    expect(buildContextMenuItems(state)).toEqual([
+      { id: 'claude-skills', label: 'Skills', kind: 'submenu', disabled: false, children: [{ id: 'skills-loading', label: 'Loading…', kind: 'status', disabled: true }] },
+      { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
+      { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
+      { id: 'claude-loading', label: 'Loading…', kind: 'status', disabled: true },
+    ]);
+
+    state = {
+      ...state,
+      ui: {
+        ...state.ui,
+        contextMenu: state.ui.contextMenu && {
+          ...state.ui.contextMenu,
+          loadingClaudeCommands: false,
+          claudeCommands: [
+            { name: 'clear', execution: 'execute', source: 'builtin' },
+            { name: 'model', execution: 'insert', source: 'builtin' },
+            { name: 'codex', execution: 'execute', source: 'skill' },
+          ],
+          claudeSkills: [
+            { name: 'codex', execution: 'execute', source: 'skill' },
+          ],
+        },
+      },
+    };
+
+    expect(buildContextMenuItems(state)).toEqual([
+      {
+        id: 'claude-skills',
+        label: 'Skills',
+        kind: 'submenu',
+        disabled: false,
+        children: [{ id: 'claude-command:codex', label: '/codex', kind: 'action', disabled: false }],
+      },
+      { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
+      { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
+      { id: 'claude-command:clear', label: '/clear', kind: 'action', disabled: false },
+      { id: 'claude-command:model', label: '/model', kind: 'action', disabled: false },
+    ]);
+
+    state = applyPaneRoleToState(state, '%1', 'output');
+    expect(buildContextMenuItems(state)).toEqual([
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('routes Claude command items to execute-or-insert pane writes', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%1', 'claude');
+    state = openPaneContextMenuInState(state, '%1', 600, 320);
+    state = {
+      ...state,
+      ui: {
+        ...state.ui,
+        contextMenu: state.ui.contextMenu && {
+          ...state.ui.contextMenu,
+          loadingClaudeCommands: false,
+          claudeCommands: [
+            { name: 'clear', execution: 'execute', source: 'builtin' },
+            { name: 'model', execution: 'insert', source: 'builtin' },
+          ],
+          claudeSkills: [],
+        },
+      },
+    };
+
+    const executed = reduceContextMenuSelection(state, 'claude-command:clear');
+    expect(executed.state.ui.contextMenu).toBeNull();
+    expect(executed.state.ui.selectedPaneId).toBe('%1');
+    expect(executed.effects).toEqual([{ type: 'write-pane', paneId: '%1', data: '/clear\r' }]);
+
+    const inserted = reduceContextMenuSelection(state, 'claude-command:model');
+    expect(inserted.effects).toEqual([{ type: 'write-pane', paneId: '%1', data: '/model ' }]);
   });
 });
 

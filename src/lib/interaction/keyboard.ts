@@ -10,6 +10,8 @@ import {
   closeSidebar,
   closeTabConfirmation,
   commandBarOpen,
+  contextMenuState,
+  dismissContextMenu,
   dispatchIntent,
   fitCanvasToActiveTab,
   helpOpen,
@@ -86,6 +88,7 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
   const state = get(appState);
   const currentMode = get(mode);
   const pendingCloseTab = get(closeTabConfirmation);
+  const openContextMenu = get(contextMenuState);
 
   if (pendingCloseTab) {
     if (input.key === 'Escape' || input.key === 'n' || input.key === 'N') {
@@ -112,6 +115,11 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
   }
 
   if (input.key === 'Escape') {
+    if (openContextMenu) {
+      handled();
+      dismissContextMenu();
+      return true;
+    }
     if (currentMode === 'input') {
       if (input.shift_key) {
         handled();

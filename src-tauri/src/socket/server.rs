@@ -405,6 +405,15 @@ fn handle_command(
             SocketResponse::success(None)
         }
 
+        SocketCommand::SetTileRole { session_id, role } => {
+            let payload = serde_json::json!({
+                "session_id": session_id,
+                "role": role,
+            });
+            let _ = app.emit("shell-role", payload);
+            SocketResponse::success(None)
+        }
+
         SocketCommand::TestDriver { request } => {
             if !test_driver_enabled() {
                 return SocketResponse::error("test driver is not enabled".into());

@@ -1,7 +1,14 @@
 import net from 'node:net';
 import readline from 'node:readline';
 
-import type { AppStateTree, TestDriverKey, TestDriverProjection, TestDriverRequest, TestDriverStatus } from '../../src/lib/types';
+import type {
+  AppStateTree,
+  PaneKind,
+  TestDriverKey,
+  TestDriverProjection,
+  TestDriverRequest,
+  TestDriverStatus,
+} from '../../src/lib/types';
 
 interface SocketResponse<T = unknown> {
   ok: boolean;
@@ -170,6 +177,10 @@ export class HerdTestClient {
     await this.testDriver({ type: 'canvas_pan', dx, dy });
   }
 
+  async canvasContextMenu(clientX: number, clientY: number) {
+    await this.testDriver({ type: 'canvas_context_menu', client_x: clientX, client_y: clientY });
+  }
+
   async canvasZoomAt(x: number, y: number, zoomFactor: number) {
     await this.testDriver({ type: 'canvas_zoom_at', x, y, zoom_factor: zoomFactor });
   }
@@ -186,6 +197,18 @@ export class HerdTestClient {
     await this.testDriver({ type: 'canvas_reset' });
   }
 
+  async tileContextMenu(paneId: string, clientX: number, clientY: number) {
+    await this.testDriver({ type: 'tile_context_menu', pane_id: paneId, client_x: clientX, client_y: clientY });
+  }
+
+  async contextMenuSelect(itemId: string) {
+    await this.testDriver({ type: 'context_menu_select', item_id: itemId });
+  }
+
+  async contextMenuDismiss() {
+    await this.testDriver({ type: 'context_menu_dismiss' });
+  }
+
   async confirmCloseTab() {
     await this.testDriver({ type: 'confirm_close_tab' });
   }
@@ -200,6 +223,14 @@ export class HerdTestClient {
 
   async readOutput(sessionId: string): Promise<{ output: string }> {
     return this.sendCommand({ command: 'read_output', session_id: sessionId });
+  }
+
+  async execInShell(sessionId: string, shellCommand: string): Promise<void> {
+    await this.sendCommand({ command: 'exec_in_shell', session_id: sessionId, shell_command: shellCommand });
+  }
+
+  async setTileRole(sessionId: string, role: PaneKind): Promise<void> {
+    await this.sendCommand({ command: 'set_tile_role', session_id: sessionId, role });
   }
 
   async testDomQuery<T = unknown>(js: string): Promise<T> {

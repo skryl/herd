@@ -63,6 +63,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_tmux_state,
             commands::get_layout_state,
+            commands::get_claude_menu_data_for_pane,
             commands::save_layout_state,
             commands::new_session,
             commands::kill_session,

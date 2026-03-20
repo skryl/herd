@@ -11,6 +11,7 @@
   import Toolbar from './lib/Toolbar.svelte';
   import { handleGlobalKeyInput, keyboardEventToKeyInput } from './lib/interaction/keyboard';
   import {
+    applyPaneRole,
     applyPaneReadOnly,
     applyTmuxSnapshot,
     bootstrapAppState,
@@ -18,10 +19,11 @@
   } from './lib/stores/appState';
   import { setTestDriverState } from './lib/tauri';
   import { installTestDriver } from './lib/testDriver';
-  import type { TmuxSnapshot } from './lib/types';
+  import type { PaneKind, TmuxSnapshot } from './lib/types';
 
   let unlistenTmuxState: UnlistenFn | null = null;
   let unlistenReadOnly: UnlistenFn | null = null;
+  let unlistenRole: UnlistenFn | null = null;
   let disposeTestDriver: (() => void) | null = null;
 
   function handleSpawnShell() {
@@ -48,6 +50,12 @@
         applyPaneReadOnly(paneId, event.payload.read_only);
       }
     });
+    unlistenRole = await listen<{ session_id?: string; pane_id?: string; role: PaneKind }>('shell-role', (event) => {
+      const paneId = event.payload.pane_id ?? event.payload.session_id;
+      if (paneId) {
+        applyPaneRole(paneId, event.payload.role);
+      }
+    });
     await bootstrapAppState();
     await setTestDriverState({ bootstrapComplete: true });
   });
@@ -56,6 +64,7 @@
     window.removeEventListener('keydown', handleKeyDown, true);
     if (unlistenTmuxState) unlistenTmuxState();
     if (unlistenReadOnly) unlistenReadOnly();
+    if (unlistenRole) unlistenRole();
     if (disposeTestDriver) disposeTestDriver();
   });
 </script>

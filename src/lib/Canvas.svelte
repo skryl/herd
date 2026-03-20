@@ -1,11 +1,14 @@
 <script lang="ts">
+  import ContextMenu from './ContextMenu.svelte';
   import TerminalTile from './TerminalTile.svelte';
   import {
     activeTabConnections,
     activeTabTerminals,
     canvasState,
     debugPaneOpen,
+    dismissContextMenu,
     mode,
+    openCanvasContextMenu,
     panCanvasBy,
     sidebarOpen,
     wheelCanvas,
@@ -27,6 +30,9 @@
   }
 
   function handleMouseDown(e: MouseEvent) {
+    if (e.button === 0) {
+      dismissContextMenu();
+    }
     if (e.button === 0 || e.button === 1) {
       isPanning = true;
       lastX = e.clientX;
@@ -54,6 +60,12 @@
   function handleMouseUp() {
     isPanning = false;
   }
+
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    openCanvasContextMenu(e.clientX - rect.left, e.clientY - rect.top);
+  }
 </script>
 
 <svelte:window onmouseup={handleMouseUp} />
@@ -65,7 +77,7 @@
   onwheel={handleWheel}
   onmousedown={handleMouseDown}
   onmousemove={handleMouseMove}
-  oncontextmenu={(e) => e.preventDefault()}
+  oncontextmenu={handleContextMenu}
 >
   <div class="pcb-grid"></div>
 
@@ -96,6 +108,8 @@
       <TerminalTile info={term} />
     {/each}
   </div>
+
+  <ContextMenu />
 
   <div class="coord-readout">
     <span class="coord-label">POS</span>

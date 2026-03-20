@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { HerdTestClient } from './client';
-import { terminalById, waitFor } from './helpers';
+import { createIsolatedTab, terminalById, waitFor } from './helpers';
 import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime';
 
 const VIEWPORT_WIDTH = 1400;
@@ -39,6 +39,157 @@ describe.sequential('in-app test driver', () => {
     expect(projection.selected_pane_id).toBe(state.ui.selectedPaneId);
     expect(projection.sidebar.items.length).toBeGreaterThan(0);
     expect(projection.indicators.sock).toBe(true);
+    expect(projection.context_menu).toBeNull();
+  });
+
+  it('opens and dismisses typed context menus for the canvas and the selected tile', async () => {
+    let projection = await client.getProjection();
+    const selectedPaneId = projection.selected_pane_id;
+    expect(selectedPaneId).toBeTruthy();
+
+    await client.canvasContextMenu(240, 180);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.target).toBe('canvas');
+    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['New Shell']);
+
+    await client.contextMenuDismiss();
+    projection = await client.getProjection();
+    expect(projection.context_menu).toBeNull();
+
+    await client.tileContextMenu(selectedPaneId!, 480, 260);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.target).toBe('pane');
+    expect(projection.context_menu?.pane_id).toBe(selectedPaneId);
+    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close Shell']);
+  });
+
+  it('creates a shell at the clicked point and closes a regular shell through context-menu selection', async () => {
+    let projection = await client.getProjection();
+    const initialCount = projection.active_tab_terminals.length;
+    expect(initialCount).toBeGreaterThan(0);
+
+    await client.canvasContextMenu(260, 200);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.items.some((item) => item.id === 'new-shell')).toBe(true);
+
+    await client.contextMenuSelect('new-shell');
+    projection = await waitFor(
+      'context-menu shell creation',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_terminals.length === initialCount + 1,
+      30_000,
+      150,
+    );
+
+    const createdTile = [...projection.active_tab_terminals].sort((left, right) => right.x - left.x)[0];
+    expect(createdTile.x).toBeGreaterThanOrEqual(120);
+    expect(createdTile.y).toBeGreaterThanOrEqual(90);
+
+    await client.tileContextMenu(createdTile.id, 640, 320);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.items.some((item) => item.id === 'close-shell')).toBe(true);
+
+    await client.contextMenuSelect('close-shell');
+    projection = await waitFor(
+      'context-menu shell close',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_terminals.length === initialCount,
+      30_000,
+      150,
+    );
+    expect(projection.context_menu).toBeNull();
+  });
+
+  it('shows Claude commands only for Claude tiles and dispatches execute vs insert correctly', async () => {
+    let projection = await createIsolatedTab(client, 'claude-menu');
+    const paneId = projection.selected_pane_id;
+    expect(paneId).toBeTruthy();
+
+    await client.execInShell(paneId!, 'exec cat -vet');
+    await client.waitForIdle(30_000, 250);
+    await client.readOutput(paneId!);
+
+    await client.setTileRole(paneId!, 'claude');
+    await client.waitForIdle();
+
+    await client.tileContextMenu(paneId!, 420, 240);
+    projection = await waitFor(
+      'Claude context menu commands',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.context_menu?.pane_id === paneId
+        && nextProjection.context_menu.loading_claude_commands === false
+        && nextProjection.context_menu.items.some((item) => item.id === 'claude-skills')
+        && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear')
+        && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:model'),
+      30_000,
+      150,
+    );
+
+    expect(projection.context_menu?.items[0]?.label).toBe('Skills');
+    expect(projection.context_menu?.items[0]?.children?.map((item) => item.label)).toEqual(['/codex']);
+    expect(projection.context_menu?.items.map((item) => item.label)).toContain('Close Shell');
+    expect(projection.context_menu?.items.map((item) => item.label)).toContain('/clear');
+    expect(projection.context_menu?.items.map((item) => item.label)).toContain('/model');
+
+    await client.contextMenuSelect('claude-command:model');
+    let output = await waitFor(
+      'insert-only Claude command echo',
+      () => client.readOutput(paneId!),
+      (result) => result.output.includes('/model '),
+      20_000,
+      150,
+    );
+    expect(output.output).toContain('/model ');
+    expect(output.output).not.toContain('^M');
+
+    await client.tileContextMenu(paneId!, 420, 240);
+    await waitFor(
+      'Claude context menu commands reopen',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.context_menu?.pane_id === paneId
+        && nextProjection.context_menu.loading_claude_commands === false
+        && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear'),
+      30_000,
+      150,
+    );
+
+    await client.execInShell(paneId!, 'exec cat -vet');
+    await client.waitForIdle(30_000, 250);
+    await client.readOutput(paneId!);
+
+    await client.tileContextMenu(paneId!, 420, 240);
+    await waitFor(
+      'Claude context menu commands after reset',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.context_menu?.pane_id === paneId
+        && nextProjection.context_menu.loading_claude_commands === false
+        && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear'),
+      30_000,
+      150,
+    );
+
+    await client.contextMenuSelect('claude-command:clear');
+    output = await waitFor(
+      'execute Claude command echo',
+      () => client.readOutput(paneId!),
+      (result) => result.output.includes('/clear$'),
+      20_000,
+      150,
+    );
+    expect(output.output).toContain('/clear$');
+
+    await client.setTileRole(paneId!, 'output');
+    await client.waitForIdle();
+    await client.tileContextMenu(paneId!, 420, 240);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.items).toEqual([
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+    ]);
+
+    await client.contextMenuDismiss();
   });
 
   it('covers mode, help, sidebar, command bar, and tab creation through the typed driver', async () => {
