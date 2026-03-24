@@ -405,6 +405,7 @@ export class HerdTestClient {
       height?: number | null;
       parentSessionId?: string | null;
       parentTileId?: string | null;
+      browserIncognito?: boolean | null;
       senderTileId?: string | null;
       senderAgentId?: string | null;
     },
@@ -419,6 +420,7 @@ export class HerdTestClient {
       height: options?.height ?? null,
       parent_session_id: options?.parentSessionId ?? null,
       parent_tile_id: options?.parentTileId ?? null,
+      browser_incognito: options?.browserIncognito ?? null,
       sender_tile_id: options?.senderTileId ?? null,
       sender_agent_id: options?.senderAgentId ?? null,
     });

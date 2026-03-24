@@ -113,8 +113,14 @@ export async function spawnAgentWindow(targetSessionId?: string | null): Promise
   return invoke('spawn_agent_window', { targetSessionId: targetSessionId ?? null });
 }
 
-export async function spawnBrowserWindow(targetSessionId?: string | null): Promise<string> {
-  return invoke<string>('spawn_browser_window', { targetSessionId: targetSessionId ?? null });
+export async function spawnBrowserWindow(
+  targetSessionId?: string | null,
+  browserIncognito?: boolean | null,
+): Promise<string> {
+  return invoke<string>('spawn_browser_window', {
+    targetSessionId: targetSessionId ?? null,
+    browserIncognito: browserIncognito ?? null,
+  });
 }
 
 export async function syncBrowserWebview(

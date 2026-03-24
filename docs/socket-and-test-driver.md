@@ -1,6 +1,6 @@
 # Herd CLI, Socket API, And Test Driver
 
-This page documents Herd's supported local control surface.
+This page is the detailed mechanics/reference companion to the high-level README. It documents Herd's supported local control surface.
 
 Use the `herd` CLI for normal automation. The raw socket protocol is still available for low-level integration and for the MCP bridge.
 
@@ -23,16 +23,18 @@ Examples:
 ```bash
 herd network list
 herd network list shell
-herd session list
-herd session list agent
-herd session list work
-herd tile get %7
-herd tile move %7 1180 260
-herd tile resize %7 760 520
-herd topic list
+herd tile list
+herd tile list agent
+herd tile list work
+herd tile get AbCdEf
+herd tile move AbCdEf 1180 260
+herd tile resize AbCdEf 760 520
+herd message topic list
 ```
 
 Agent, topic, chatter, network, and work operations are session-private. They resolve against the caller's current tmux tab/session and do not expose cross-session registry data.
+
+Public control APIs use Herd `tile_id`, not tmux pane ids. Tmux-backed tiles get short Herd-owned IDs such as `AbCdEf`; work tiles use `work:<work_id>`.
 
 Send a direct message to another agent by `agent_id`:
 
@@ -69,27 +71,27 @@ Subscribe the current agent to a topic:
 
 ```bash
 export HERD_AGENT_ID=agent-1234
-herd --agent-pid "$PPID" topic subscribe '#prd-7'
+herd --agent-pid "$PPID" message topic subscribe '#prd-7'
 ```
 
 Shell operations:
 
 ```bash
-herd shell create --x 180 --y 140 --width 640 --height 400 --parent-pane-id %1
-herd shell send %2 "pwd\n"
-herd shell exec %2 "claude --help"
-herd shell read %2
-herd shell title %2 "Agent"
-herd shell role %2 claude
+herd tile create shell --x 180 --y 140 --width 640 --height 400 --parent-tile-id AbCdEf
+herd shell send GhIjKl "pwd\n"
+herd shell exec GhIjKl "claude --help"
+herd shell read GhIjKl
+herd shell role GhIjKl claude
 ```
 
 Browser operations:
 
 ```bash
-herd browser create --parent-pane-id %1
-herd browser navigate %9 https://example.com
-herd browser load %9 ./index.html
-herd browser destroy %9
+herd tile create browser --parent-tile-id AbCdEf
+herd tile create browser --browser-incognito true --parent-tile-id AbCdEf
+herd browser navigate MnOpQr https://example.com
+herd browser load MnOpQr ./index.html
+herd tile destroy MnOpQr
 ```
 
 Command-bar equivalents in the UI:
@@ -103,9 +105,9 @@ If a message arrives through the Claude channel and you want your reply to be vi
 Work operations:
 
 ```bash
-herd --agent-pid "$PPID" work create "Socket refactor follow-up"
-herd --agent-pid "$PPID" network connect %7 left work:work-s4-001 left
-herd --agent-pid "$PPID" network disconnect %7 left
+herd tile create work --title "Socket refactor follow-up"
+herd --agent-pid "$PPID" network connect AbCdEf left work:work-s4-001 left
+herd --agent-pid "$PPID" network disconnect AbCdEf left
 herd --agent-pid "$PPID" work stage start work-s4-001
 herd --agent-pid "$PPID" work stage complete work-s4-001
 ```
@@ -117,6 +119,8 @@ Worker MCP exposes the message tools plus `network_list`, `network_get`, and `ne
 Herd exposes a newline-delimited JSON protocol on `/tmp/herd.sock` by default. If `HERD_RUNTIME_ID` is set, the socket path becomes `/tmp/herd-<runtime_id>.sock`.
 
 Socket commands follow `category_command` naming.
+
+Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain internal backing metadata and are not part of the public control API.
 
 ### Session-level tile commands
 
@@ -132,7 +136,7 @@ Socket commands follow `category_command` naming.
 - `network_connect`
 - `network_disconnect`
 
-`tile_create` accepts `tile_type = shell | agent | browser | work`, plus optional `title`, `x`, `y`, `width`, `height`, `parent_session_id`, and `parent_tile_id`.
+`tile_create` accepts `tile_type = shell | agent | browser | work`, plus optional `title`, `x`, `y`, `width`, `height`, `parent_session_id`, and `parent_tile_id`. Browser creation also accepts optional `browser_incognito` / CLI `--browser-incognito true` to start the browser tile in incognito mode instead of the shared default profile.
 
 `tile_list` returns every tile in the current session. `network_list` returns the sender tile's connected component. Both accept optional `tile_type` filter `shell | agent | browser | work`.
 
@@ -367,6 +371,8 @@ Each work item auto-creates topic `#<work_id>` and SQLite-backed stage content f
 - `plan`
 - `prd`
 - `artifact`
+
+There is no separate persisted `work/` document tree anymore; stage content lives in SQLite with the rest of the session state.
 
 Only the owner may perform Herd-managed work updates. `work_review_approve` and `work_review_improve` are intended for the user-facing review flow.
 

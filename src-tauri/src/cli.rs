@@ -19,28 +19,15 @@ struct SocketResponse {
 }
 
 pub fn is_cli_invocation(args: &[String]) -> bool {
-    let mut index = 1usize;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--socket" | "--agent-pid" => index += 2,
-            "-h" | "--help" | "help" | "-V" | "--version" | "version" => return true,
-            value => {
-                return matches!(
-                    value,
-                    "sudo"
-                        | "network"
-                        | "tile"
-                        | "browser"
-                        | "message"
-                        | "agent"
-                        | "shell"
-                        | "work"
-                        | "raw"
-                );
-            }
-        }
-    }
-    false
+    !is_gui_launch_invocation(args)
+}
+
+fn is_gui_launch_invocation(args: &[String]) -> bool {
+    args.len() <= 1 || args[1..].iter().all(|arg| is_gui_launch_arg(arg))
+}
+
+fn is_gui_launch_arg(arg: &str) -> bool {
+    arg.starts_with("-psn_")
 }
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -192,6 +179,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
     let mut height = None;
     let mut parent_session_id = None;
     let mut parent_tile_id = None;
+    let mut browser_incognito = None;
     let mut index = 1usize;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -206,6 +194,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
             "--height" => height = value.parse::<f64>().ok(),
             "--parent-session-id" => parent_session_id = Some(value),
             "--parent-tile-id" => parent_tile_id = Some(value),
+            "--browser-incognito" => browser_incognito = value.parse::<bool>().ok(),
             _ => return Err(format!("unknown tile create flag: {flag}")),
         }
     }
@@ -222,6 +211,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
         "height": height,
         "parent_session_id": parent_session_id,
         "parent_tile_id": parent_tile_id,
+        "browser_incognito": browser_incognito,
         "sender_agent_id": env_agent_id(),
         "sender_tile_id": env_tile_id(),
     }))
@@ -611,7 +601,7 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{build_command_payload, CliContext};
+    use super::{build_command_payload, is_cli_invocation, is_gui_launch_arg, CliContext};
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
 
@@ -733,11 +723,32 @@ mod tests {
                     "height": null,
                     "parent_session_id": "$7",
                     "parent_tile_id": "tile7",
+                    "browser_incognito": null,
                     "sender_agent_id": null,
                     "sender_tile_id": null,
                 })
             );
         });
+    }
+
+    #[test]
+    fn treats_no_args_and_macos_process_serial_launches_as_gui() {
+        assert!(!is_cli_invocation(&["herd".into()]));
+        assert!(is_gui_launch_arg("-psn_0_12345"));
+        assert!(!is_cli_invocation(&["herd".into(), "-psn_0_12345".into()]));
+    }
+
+    #[test]
+    fn treats_legacy_and_unknown_argument_invocations_as_cli() {
+        assert!(is_cli_invocation(&["herd".into(), "list".into(), "agents".into()]));
+        assert!(is_cli_invocation(&[
+            "herd".into(),
+            "--agent-pid".into(),
+            "4242".into(),
+            "list".into(),
+            "agents".into(),
+        ]));
+        assert!(is_cli_invocation(&["herd".into(), "--socket".into(), "/tmp/herd.sock".into()]));
     }
 
     #[test]
@@ -1015,6 +1026,7 @@ mod tests {
                     "height": 400.0,
                     "parent_session_id": null,
                     "parent_tile_id": "tile1",
+                    "browser_incognito": null,
                     "sender_agent_id": null,
                     "sender_tile_id": null,
                 })
@@ -1048,6 +1060,36 @@ mod tests {
                     "height": null,
                     "parent_session_id": "$1",
                     "parent_tile_id": null,
+                    "browser_incognito": null,
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+
+            let incognito_create = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "create".into(),
+                    "browser".into(),
+                    "--browser-incognito".into(),
+                    "true".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                incognito_create,
+                json!({
+                    "command": "tile_create",
+                    "tile_type": "browser",
+                    "title": null,
+                    "x": null,
+                    "y": null,
+                    "width": null,
+                    "height": null,
+                    "parent_session_id": null,
+                    "parent_tile_id": null,
+                    "browser_incognito": true,
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                 })
@@ -1290,6 +1332,7 @@ mod tests {
                     "height": null,
                     "parent_session_id": null,
                     "parent_tile_id": null,
+                    "browser_incognito": null,
                     "sender_agent_id": "agent-1",
                     "sender_tile_id": "tile7",
                 })

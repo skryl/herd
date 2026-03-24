@@ -120,6 +120,16 @@ fn emit_browser_url_changed(
     );
 }
 
+fn browser_tile_incognito(app: &tauri::AppHandle, pane_id: &str) -> bool {
+    let state = app.state::<crate::state::AppState>();
+    state
+        .tile_record_by_pane(pane_id)
+        .ok()
+        .flatten()
+        .map(|record| record.browser_incognito)
+        .unwrap_or(false)
+}
+
 fn apply_browser_viewport(
     webview: &tauri::Webview,
     viewport: &BrowserViewport,
@@ -349,7 +359,7 @@ fn ensure_browser_webview(
         .ok_or_else(|| "main window is not available".to_string())?;
     let app_handle = app.clone();
     let pane_id_for_event = pane_id.to_string();
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(start_url.clone())).on_page_load(
+    let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(start_url.clone())).on_page_load(
         move |_webview, payload| {
             let loading = matches!(payload.event(), PageLoadEvent::Started);
             emit_browser_url_changed(
@@ -360,6 +370,9 @@ fn ensure_browser_webview(
             );
         },
     );
+    if browser_tile_incognito(app, pane_id) {
+        builder = builder.incognito(true);
+    }
 
     let webview = main_window
         .add_child(

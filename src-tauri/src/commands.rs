@@ -151,6 +151,11 @@ fn reconciled_tmux_tile_records(
             kind,
             window_id: window.id.clone(),
             pane_id: pane.id.clone(),
+            browser_incognito: if kind == TileRecordKind::Browser {
+                existing.as_ref().map(|record| record.browser_incognito).unwrap_or(false)
+            } else {
+                false
+            },
             created_at: existing.as_ref().map(|record| record.created_at).unwrap_or(now_ms),
             updated_at: now_ms,
         });
@@ -322,6 +327,7 @@ pub fn ensure_tmux_tile_record_for_backing(
     window_id: &str,
     pane_id: &str,
     kind: TileRecordKind,
+    browser_incognito: bool,
     preferred_tile_id: Option<String>,
 ) -> Result<TileRecord, String> {
     let now_ms = now_ms();
@@ -341,6 +347,11 @@ pub fn ensure_tmux_tile_record_for_backing(
         kind,
         window_id: window_id.to_string(),
         pane_id: pane_id.to_string(),
+        browser_incognito: if kind == TileRecordKind::Browser {
+            browser_incognito
+        } else {
+            false
+        },
         created_at: existing.as_ref().map(|record| record.created_at).unwrap_or(now_ms),
         updated_at: now_ms,
     })
@@ -641,6 +652,7 @@ fn launch_agent_in_pane(
         &window_id,
         &pane_id,
         TileRecordKind::Agent,
+        false,
         None,
     )?;
     let cwd = tmux_state::ensure_session_root_cwd(&session_id)?;
@@ -1476,6 +1488,7 @@ pub fn spawn_agent_window(
 fn spawn_browser_window_internal(
     app: tauri::AppHandle,
     target_session_id: Option<String>,
+    browser_incognito: bool,
 ) -> Result<BrowserWindowSpawn, String> {
     let state = app.state::<AppState>();
     let before = tmux_state::snapshot(state.inner())?;
@@ -1493,6 +1506,15 @@ fn spawn_browser_window_internal(
     tmux_state::respawn_pane_shell_command(&pane_id, &build_shell_launch_command(&cwd))?;
     let _ = tmux_state::rename_window(&window_id, "Browser");
     let _ = set_pane_title(app.clone(), pane_id.clone(), "Browser".to_string());
+    let tile = ensure_tmux_tile_record_for_backing(
+        state.inner(),
+        &session_id,
+        &window_id,
+        &pane_id,
+        TileRecordKind::Browser,
+        browser_incognito,
+        None,
+    )?;
     let _ = app.emit(
         "shell-role",
         serde_json::json!({
@@ -1501,14 +1523,6 @@ fn spawn_browser_window_internal(
         }),
     );
     let _ = tmux_state::emit_snapshot(&app);
-    let tile = ensure_tmux_tile_record_for_backing(
-        state.inner(),
-        &session_id,
-        &window_id,
-        &pane_id,
-        TileRecordKind::Browser,
-        None,
-    )?;
 
     Ok(BrowserWindowSpawn {
         tile_id: tile.tile_id,
@@ -1521,16 +1535,18 @@ fn spawn_browser_window_internal(
 pub fn spawn_browser_window_with_pane(
     app: tauri::AppHandle,
     target_session_id: Option<String>,
+    browser_incognito: bool,
 ) -> Result<BrowserWindowSpawn, String> {
-    spawn_browser_window_internal(app, target_session_id)
+    spawn_browser_window_internal(app, target_session_id, browser_incognito)
 }
 
 #[tauri::command]
 pub fn spawn_browser_window(
     app: tauri::AppHandle,
     target_session_id: Option<String>,
+    browser_incognito: Option<bool>,
 ) -> Result<String, String> {
-    Ok(spawn_browser_window_internal(app, target_session_id)?.window_id)
+    Ok(spawn_browser_window_internal(app, target_session_id, browser_incognito.unwrap_or(false))?.window_id)
 }
 
 #[tauri::command]
@@ -2237,5 +2253,32 @@ mod tests {
         assert!(command.contains("send-keys -t '%21' Enter"));
         assert!(command.contains("--dangerously-load-development-channels server:herd"));
         assert!(!command.contains("--dangerously-load-development-channels server:herd-root"));
+    }
+
+    #[test]
+    fn role_prompts_reference_role_specific_herd_skills() {
+        let project_root = crate::runtime::project_root_dir();
+        let root_prompt = fs::read_to_string(project_root.join(".claude/roles/root/CLAUDE.md")).unwrap();
+        let worker_prompt = fs::read_to_string(project_root.join(".claude/roles/worker/CLAUDE.md")).unwrap();
+
+        assert!(root_prompt.contains("/herd-root"));
+        assert!(!root_prompt.contains("/herd-worker"));
+        assert!(worker_prompt.contains("/herd-worker"));
+        assert!(!worker_prompt.contains("/herd-root"));
+    }
+
+    #[test]
+    fn role_specific_herd_skills_describe_their_mcp_surfaces() {
+        let project_root = crate::runtime::project_root_dir();
+        let root_skill = fs::read_to_string(project_root.join(".claude/skills/herd-root/SKILL.md")).unwrap();
+        let worker_skill = fs::read_to_string(project_root.join(".claude/skills/herd-worker/SKILL.md")).unwrap();
+
+        assert!(root_skill.contains("tile_create"));
+        assert!(root_skill.contains("browser_drive"));
+        assert!(root_skill.contains("network_connect"));
+        assert!(worker_skill.contains("network_call"));
+        assert!(worker_skill.contains("message_root"));
+        assert!(worker_skill.contains("Do not use `tile_call`"));
+        assert!(worker_skill.contains("Do not use `browser_drive`"));
     }
 }

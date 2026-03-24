@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tile_registry (
   kind TEXT NOT NULL,
   window_id TEXT NOT NULL,
   pane_id TEXT NOT NULL,
+  browser_incognito INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -194,6 +195,7 @@ pub fn open_at(path: &Path) -> Result<Connection, String> {
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|error| format!("failed to initialize sqlite schema {}: {error}", path.display()))?;
     ensure_optional_work_item_tile_id_column(&conn)?;
+    ensure_tile_registry_browser_incognito_column(&conn)?;
     ensure_work_stage_content_storage(&mut conn)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_tile_id ON work_item(tile_id)",
@@ -224,6 +226,18 @@ fn ensure_optional_work_item_tile_id_column(conn: &Connection) -> Result<(), Str
     }
     conn.execute("ALTER TABLE work_item ADD COLUMN tile_id TEXT", [])
         .map_err(|error| format!("failed to add work_item.tile_id column: {error}"))?;
+    Ok(())
+}
+
+fn ensure_tile_registry_browser_incognito_column(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "tile_registry", "browser_incognito")? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE tile_registry ADD COLUMN browser_incognito INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|error| format!("failed to add tile_registry.browser_incognito column: {error}"))?;
     Ok(())
 }
 

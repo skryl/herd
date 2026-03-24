@@ -269,6 +269,8 @@ pub enum SocketCommand {
         #[serde(default)]
         parent_tile_id: Option<String>,
         #[serde(default)]
+        browser_incognito: Option<bool>,
+        #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
         sender_tile_id: Option<String>,

@@ -1,6 +1,6 @@
 # Herd Architecture
 
-This document describes the current runtime architecture of Herd as implemented today.
+Herd is an experiment platform for agent collaboration: explicit message channels, visible local-network discovery, and a Root agent that can coordinate a shared canvas. This document describes the current runtime architecture that makes that model work.
 
 It focuses on the concepts that matter when you are changing behavior or debugging the system:
 
@@ -75,12 +75,15 @@ Important identity fields:
 
 - `tile_id`
   - canonical tile identity used in the network graph
-  - pane-backed tiles use pane ids such as `%7`
+  - assigned by Herd, not by tmux
+  - tmux-backed tiles use short mixed-case Herd ids such as `AbCdEf`
   - work tiles use synthetic ids such as `work:work-s4-001`
 - `window_id`
   - tmux window id when applicable
 - `session_id`
   - the containing tmux session/tab
+
+Herd keeps the backing `tile_id -> tmux window/pane` mapping internally. Public control APIs target `tile_id`; tmux pane ids are implementation detail used for reconciliation and runtime operations.
 
 ## Lineage vs Networks
 
@@ -207,7 +210,9 @@ Properties:
 
 - worker-safe local-network MCP surface
 - browser tile automation through `network_call` with browser action `drive`
-- direct access only to visible local-network `shell` and `browser` tiles
+- visible local-network tiles may be inspected through `network_list` / `network_get`
+- direct control is limited to worker-safe `shell` and `browser` actions
+- `agent` and `root_agent` tiles stay read-only on the network, even when directly connected
 - no direct access to privileged Herd actions through MCP
 - expected to ask Root for privileged actions
 
@@ -243,7 +248,6 @@ Root gets the worker tools plus the full session control surface:
 - topic listing and session-scoped tile discovery
 - session and network mutation tools
 - work inspection and work-stage tools
-- work inspection and work-stage tools
 
 ### Backend permission boundary
 
@@ -252,7 +256,9 @@ The MCP tool restriction is not the only guardrail. The Rust socket backend also
 Meaning:
 
 - workers should not be able to gain privileged behavior by bypassing MCP and talking to the socket directly as agents
-- workers may directly inspect visible local-network `shell` and `browser` tiles and use only the worker-safe generic tile-message subset on them
+- workers may inspect visible local-network tiles, but the callable network surface is filtered by tile kind and network access
+- workers may control `shell` and eligible `browser` tiles through the worker-safe generic tile-message subset
+- `agent` and `root_agent` tiles remain observational only on the network
 - privileged session mutations still require Root or user-originated paths
 
 ## Messaging Model
@@ -438,12 +444,15 @@ Herd persists runtime state in SQLite under the repo `tmp/` directory:
 SQLite stores:
 
 - tile/layout state
+- stable tile registry and tmux backing metadata
 - agent registry
 - topics
 - chatter
 - agent logs
 - work metadata and stage content
 - network connections
+
+There is no separate persisted `work/` content directory in the current runtime model; work stage documents live in SQLite.
 
 ## UI Surfaces
 

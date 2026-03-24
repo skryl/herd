@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -5,6 +9,8 @@ import {
   SHARED_TOOL_NAMES,
   ROOT_ONLY_TOOL_NAMES,
   ROOT_TOOL_NAMES,
+  resolveAgentRole,
+  resolveMcpMode,
   WORKER_TOOL_NAMES,
 } from "./index.js";
 
@@ -70,5 +76,21 @@ describe("mcp tool surface parity", () => {
     for (const name of ROOT_TOOL_NAMES) {
       expect(disallowed.has(name)).toBe(false);
     }
+  });
+});
+
+describe("mcp role and launcher resolution", () => {
+  it("prefers the explicit herd agent role when resolving root mode", () => {
+    expect(resolveAgentRole({ HERD_AGENT_ROLE: "root", HERD_MCP_MODE: "worker" })).toBe("root");
+    expect(resolveMcpMode({ HERD_AGENT_ROLE: "root", HERD_MCP_MODE: "worker" })).toBe("root");
+    expect(resolveMcpMode({ HERD_AGENT_ID: "root:$1" })).toBe("root");
+    expect(resolveMcpMode({})).toBe("worker");
+  });
+
+  it("keeps the checked-in launcher wrapper neutral", () => {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const wrapper = readFileSync(resolve(repoRoot, "bin/herd-mcp-server"), "utf8");
+    expect(wrapper).not.toContain("HERD_MCP_MODE=worker");
+    expect(wrapper).not.toContain("HERD_MCP_MODE=root");
   });
 });

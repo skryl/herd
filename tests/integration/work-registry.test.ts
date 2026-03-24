@@ -16,7 +16,7 @@ import { createIsolatedTab, waitFor } from './helpers';
 import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime';
 
 const HERD_WELCOME_MESSAGE =
-  'Welcome to Herd. Review the /herd skill, inspect the recent public activity in your session, and coordinate through public, network, direct, or root messages. The root agent manages the full Herd tool surface for this session.';
+  'Welcome to Herd. Review the /herd-worker skill, inspect the recent public activity in your session, and coordinate through public, network, direct, or root messages. Root manages the full session-wide MCP surface.';
 
 interface SocketResponse<T = unknown> {
   ok: boolean;

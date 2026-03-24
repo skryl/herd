@@ -27,8 +27,8 @@ use super::protocol::{SocketCommand, SocketResponse, TestDriverRequest};
 const AGENT_PING_INTERVAL: Duration = Duration::from_secs(15);
 const AGENT_PING_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_REPLAY_WINDOW_MS: i64 = 60 * 60 * 1000;
-const HERD_WORKER_WELCOME_MESSAGE: &str = "Welcome to Herd. Review the /herd skill, inspect the recent public activity in your session, and coordinate through public, network, direct, or root messages. The root agent manages the full Herd tool surface for this session.";
-const HERD_ROOT_WELCOME_MESSAGE: &str = "You are the Root agent for this session. You are responsible for handling messages sent to Root, coordinating session work, and using the full Herd MCP surface on behalf of this session.";
+const HERD_WORKER_WELCOME_MESSAGE: &str = "Welcome to Herd. Review the /herd-worker skill, inspect the recent public activity in your session, and coordinate through public, network, direct, or root messages. Root manages the full session-wide MCP surface.";
+const HERD_ROOT_WELCOME_MESSAGE: &str = "You are the Root agent for this session. Review the /herd-root skill, handle messages sent to Root, coordinate session work, and use the full Herd MCP surface on behalf of this session.";
 const GRID_SNAP: f64 = 20.0;
 const GAP: f64 = 30.0;
 const DEFAULT_TILE_WIDTH: f64 = 640.0;
@@ -1611,6 +1611,7 @@ fn create_session_tile(
         width,
         height,
         parent_window_id,
+        browser_incognito,
     } = args;
 
     match tile_type {
@@ -1637,6 +1638,7 @@ fn create_session_tile(
                 &window_id,
                 &pane_id,
                 crate::tile_registry::TileRecordKind::Shell,
+                false,
                 None,
             )
             .map_err(DispatchError::from)?;
@@ -1649,7 +1651,11 @@ fn create_session_tile(
             apply_create_layout(app, state, &tile, x, y, width, height)
         }
         network::TileTypeFilter::Browser => {
-            let created = crate::commands::spawn_browser_window_with_pane(app.clone(), Some(session_id.to_string()))
+            let created = crate::commands::spawn_browser_window_with_pane(
+                app.clone(),
+                Some(session_id.to_string()),
+                browser_incognito.unwrap_or(false),
+            )
                 .map_err(DispatchError::error)?;
             if let Some(parent_window_id) = parent_window_id {
                 state.set_window_parent(&created.window_id, Some(parent_window_id));
@@ -1763,6 +1769,8 @@ struct SessionTileCreateMessageArgs {
     height: Option<f64>,
     #[serde(default)]
     parent_window_id: Option<String>,
+    #[serde(default)]
+    browser_incognito: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -3506,6 +3514,7 @@ fn handle_command(
             height,
             parent_session_id,
             parent_tile_id,
+            browser_incognito,
             sender_agent_id,
             sender_tile_id,
         } => {
@@ -3540,6 +3549,7 @@ fn handle_command(
                 "width": width,
                 "height": height,
                 "parent_window_id": parent_window_id,
+                "browser_incognito": browser_incognito,
             });
             let receiver = SessionMessageReceiver::new(target_session_id, sender.clone());
             dispatch_session_message(
@@ -4516,5 +4526,21 @@ pub fn cleanup() {
     let path = Path::new(runtime::socket_path());
     if path.exists() {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HERD_ROOT_WELCOME_MESSAGE, HERD_WORKER_WELCOME_MESSAGE};
+
+    #[test]
+    fn welcome_messages_reference_role_specific_skills() {
+        assert!(HERD_ROOT_WELCOME_MESSAGE.contains("/herd-root"));
+        assert!(!HERD_ROOT_WELCOME_MESSAGE.contains("/herd-worker"));
+        assert!(HERD_ROOT_WELCOME_MESSAGE.contains("full Herd MCP surface"));
+
+        assert!(HERD_WORKER_WELCOME_MESSAGE.contains("/herd-worker"));
+        assert!(!HERD_WORKER_WELCOME_MESSAGE.contains("/herd-root"));
+        assert!(HERD_WORKER_WELCOME_MESSAGE.contains("Root manages the full session-wide MCP surface"));
     }
 }

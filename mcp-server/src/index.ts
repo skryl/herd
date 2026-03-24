@@ -5,14 +5,40 @@ import * as net from "node:net";
 import * as readline from "node:readline";
 import { z } from "zod";
 
+type HerdMode = "root" | "worker";
+type HerdEnv = Partial<Record<"HERD_AGENT_ID" | "HERD_AGENT_ROLE" | "HERD_MCP_MODE", string | undefined>>;
+
+function normalizeHerdMode(value: string | undefined): HerdMode | null {
+  if (value === "root" || value === "worker") {
+    return value;
+  }
+  return null;
+}
+
+export function resolveAgentRole(env: HerdEnv): HerdMode {
+  const explicitRole = normalizeHerdMode(env.HERD_AGENT_ROLE);
+  if (explicitRole) {
+    return explicitRole;
+  }
+  if ((env.HERD_AGENT_ID || "").startsWith("root:")) {
+    return "root";
+  }
+  return normalizeHerdMode(env.HERD_MCP_MODE) || "worker";
+}
+
+export function resolveMcpMode(env: HerdEnv): HerdMode {
+  const resolvedRole = resolveAgentRole(env);
+  if (resolvedRole === "root") {
+    return "root";
+  }
+  return normalizeHerdMode(env.HERD_MCP_MODE) || resolvedRole;
+}
+
 const HERD_AGENT_ID = process.env.HERD_AGENT_ID || "";
 const HERD_TILE_ID = process.env.HERD_TILE_ID || "";
 const HERD_SESSION_ID = process.env.HERD_SESSION_ID || "";
-const HERD_AGENT_ROLE =
-  process.env.HERD_AGENT_ROLE
-  || (HERD_AGENT_ID.startsWith("root:") ? "root" : "")
-  || (process.env.HERD_MCP_MODE === "root" ? "root" : "worker");
-const HERD_MCP_MODE = process.env.HERD_MCP_MODE || (HERD_AGENT_ROLE === "root" ? "root" : "worker");
+const HERD_AGENT_ROLE = resolveAgentRole(process.env);
+const HERD_MCP_MODE = resolveMcpMode(process.env);
 const IS_ROOT_MODE = HERD_MCP_MODE === "root";
 
 const MESSAGE_TOOLS = {
@@ -586,6 +612,7 @@ function registerRootTools() {
       height: z.number().optional(),
       parent_session_id: z.string().optional(),
       parent_tile_id: z.string().optional(),
+      browser_incognito: z.boolean().optional(),
     },
     async (params) => {
       if (params.tile_type === "work" && !params.title?.trim()) {
@@ -607,6 +634,7 @@ function registerRootTools() {
             height: params.height,
             parent_session_id: parentSessionId,
             parent_tile_id: parentTileId,
+            browser_incognito: params.browser_incognito,
             ...senderContext(),
           },
         );

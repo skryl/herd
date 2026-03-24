@@ -42,6 +42,8 @@ pub struct TileRecord {
     pub kind: TileRecordKind,
     pub window_id: String,
     pub pane_id: String,
+    #[serde(default)]
+    pub browser_incognito: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -62,7 +64,7 @@ pub fn load_at(path: &Path) -> Result<Vec<TileRecord>, String> {
 pub fn load_with_conn(conn: &Connection) -> Result<Vec<TileRecord>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT tile_id, session_id, kind, window_id, pane_id, created_at, updated_at
+            "SELECT tile_id, session_id, kind, window_id, pane_id, browser_incognito, created_at, updated_at
              FROM tile_registry
              ORDER BY session_id ASC, tile_id ASC",
         )
@@ -80,8 +82,9 @@ pub fn load_with_conn(conn: &Connection) -> Result<Vec<TileRecord>, String> {
                 kind,
                 window_id: row.get(3)?,
                 pane_id: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                browser_incognito: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })
         .map_err(|error| format!("failed to query tile registry: {error}"))?;
@@ -109,14 +112,15 @@ pub fn replace_with_conn(conn: &Connection, records: &[TileRecord]) -> Result<()
         .map_err(|error| format!("failed to clear tile registry rows: {error}"))?;
     for record in records {
         conn.execute(
-            "INSERT INTO tile_registry (tile_id, session_id, kind, window_id, pane_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO tile_registry (tile_id, session_id, kind, window_id, pane_id, browser_incognito, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.tile_id,
                 record.session_id,
                 record.kind.as_str(),
                 record.window_id,
                 record.pane_id,
+                if record.browser_incognito { 1 } else { 0 },
                 record.created_at,
                 record.updated_at,
             ],
@@ -209,6 +213,7 @@ mod tests {
                 kind: TileRecordKind::Shell,
                 window_id: "@1".to_string(),
                 pane_id: "%1".to_string(),
+                browser_incognito: false,
                 created_at: 1,
                 updated_at: 1,
             }],

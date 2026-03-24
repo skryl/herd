@@ -171,12 +171,16 @@ async function spawnWorkerShellInActiveTab(client: HerdTestClient): Promise<stri
   return created.id;
 }
 
-async function spawnBrowserInActiveTab(client: HerdTestClient): Promise<string> {
+async function spawnBrowserInActiveTab(
+  client: HerdTestClient,
+  options?: { browserIncognito?: boolean },
+): Promise<string> {
   const before = await client.getProjection();
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
   await client.tileCreate('browser', {
     parentSessionId: before.active_tab_id,
     parentTileId: before.selected_tile_id,
+    browserIncognito: options?.browserIncognito ?? false,
   });
   const projection = await waitFor(
     'browser create in active tab',
@@ -1476,6 +1480,70 @@ return document.body.dataset.driven;
       worker.agentId,
     );
     expect(evalResult.result).toBe('yes');
+  });
+
+  it('creates browser tiles with optional incognito storage isolation', async () => {
+    const projection = await createIsolatedTab(client, 'browser-incognito');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-incognito tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const defaultBrowserPaneId = await spawnBrowserInActiveTab(client);
+    const incognitoBrowserPaneId = await spawnBrowserInActiveTab(client, { browserIncognito: true });
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: defaultBrowserPaneId,
+      path: 'tests/fixtures/browser-drive.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: incognitoBrowserPaneId,
+      path: 'tests/fixtures/browser-drive.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    const storageKey = 'herd-incognito-check';
+    const defaultStored = await waitFor(
+      'default browser stores localStorage value',
+      () => client.browserDrive<string>(
+        defaultBrowserPaneId,
+        'eval',
+        {
+          js: `
+localStorage.setItem('${storageKey}', 'default-profile');
+return localStorage.getItem('${storageKey}');
+`,
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result === 'default-profile',
+      30_000,
+      150,
+    );
+    expect(defaultStored.result).toBe('default-profile');
+
+    const incognitoStored = await client.browserDrive<string | null>(
+      incognitoBrowserPaneId,
+      'eval',
+      {
+        js: `
+return localStorage.getItem('${storageKey}');
+`,
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(incognitoStored.result).toBe(null);
   });
 
   it('routes command-bar sudo, dm, and cm messages from User', async () => {
