@@ -1,6 +1,6 @@
 # Herd
 
-![Herd screenshot](docs/screenshots/claudes.png)
+![Herd screenshot](docs/screenshots/herd_chess.gif)
 
 Herd is an experiment platform for agent collaboration. It gives agents explicit message channels, LAN-style local service discovery over visible tile networks, and a per-session Root agent that can inspect and configure the shared canvas. Under the hood, Herd runs an isolated `tmux` server, projects terminal-backed tiles into a spatial workspace, and exposes a local socket, CLI, and MCP bridge so users and agents operate inside the same environment.
 
