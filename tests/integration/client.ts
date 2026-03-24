@@ -163,26 +163,26 @@ export class HerdTestClient {
     await this.testDriver({ type: 'sidebar_begin_rename' });
   }
 
-  async tileSelect(paneId: string) {
-    await this.testDriver({ type: 'tile_select', pane_id: paneId });
+  async driverTileSelect(tileId: string) {
+    await this.testDriver({ type: 'tile_select', tile_id: tileId });
   }
 
-  async tileClose(paneId: string) {
-    await this.testDriver({ type: 'tile_close', pane_id: paneId });
+  async driverTileClose(tileId: string) {
+    await this.testDriver({ type: 'tile_close', tile_id: tileId });
   }
 
-  async tileDrag(paneId: string, dx: number, dy: number) {
-    await this.testDriver({ type: 'tile_drag', pane_id: paneId, dx, dy });
+  async driverTileDrag(tileId: string, dx: number, dy: number) {
+    await this.testDriver({ type: 'tile_drag', tile_id: tileId, dx, dy });
   }
 
-  async tileResize(paneId: string, width: number, height: number) {
-    await this.testDriver({ type: 'tile_resize', pane_id: paneId, width, height });
+  async driverTileResize(tileId: string, width: number, height: number) {
+    await this.testDriver({ type: 'tile_resize', tile_id: tileId, width, height });
   }
 
-  async tileTitleDoubleClick(paneId: string, viewportWidth?: number, viewportHeight?: number) {
+  async driverTileTitleDoubleClick(tileId: string, viewportWidth?: number, viewportHeight?: number) {
     await this.testDriver({
       type: 'tile_title_double_click',
-      pane_id: paneId,
+      tile_id: tileId,
       viewport_width: viewportWidth,
       viewport_height: viewportHeight,
     });
@@ -212,8 +212,8 @@ export class HerdTestClient {
     await this.testDriver({ type: 'canvas_reset' });
   }
 
-  async tileContextMenu(paneId: string, clientX: number, clientY: number) {
-    await this.testDriver({ type: 'tile_context_menu', pane_id: paneId, client_x: clientX, client_y: clientY });
+  async driverTileContextMenu(tileId: string, clientX: number, clientY: number) {
+    await this.testDriver({ type: 'tile_context_menu', tile_id: tileId, client_x: clientX, client_y: clientY });
   }
 
   async contextMenuSelect(itemId: string) {
@@ -232,39 +232,44 @@ export class HerdTestClient {
     await this.testDriver({ type: 'cancel_close_tab' });
   }
 
-  async listShells(): Promise<Array<Record<string, unknown>>> {
-    return this.sendCommand({ command: 'shell_list' });
+  async readOutput(tileId: string): Promise<{ output: string }> {
+    return this.sendCommand({ command: 'shell_output_read', tile_id: tileId });
   }
 
-  async readOutput(sessionId: string): Promise<{ output: string }> {
-    return this.sendCommand({ command: 'shell_output_read', session_id: sessionId });
+  async execInShell(tileId: string, shellCommand: string): Promise<void> {
+    await this.sendCommand({ command: 'shell_exec', tile_id: tileId, shell_command: shellCommand });
   }
 
-  async execInShell(sessionId: string, shellCommand: string): Promise<void> {
-    await this.sendCommand({ command: 'shell_exec', session_id: sessionId, shell_command: shellCommand });
+  async setTileRole(tileId: string, role: PaneKind): Promise<void> {
+    await this.sendCommand({ command: 'shell_role_set', tile_id: tileId, role });
   }
 
-  async setTileRole(sessionId: string, role: PaneKind): Promise<void> {
-    await this.sendCommand({ command: 'shell_role_set', session_id: sessionId, role });
-  }
-
-  async listAgents(senderPaneId?: string | null): Promise<AgentInfo[]> {
+  async messageTopicList(senderTileId?: string | null): Promise<TopicInfo[]> {
     return this.sendCommand({
-      command: 'agent_list',
-      sender_pane_id: senderPaneId ?? null,
+      command: 'message_topic_list',
+      sender_tile_id: senderTileId ?? null,
     });
   }
 
-  async listTopics(senderPaneId?: string | null): Promise<TopicInfo[]> {
+  async messageTopicSubscribe(topic: string, agentId?: string | null): Promise<TopicInfo> {
     return this.sendCommand({
-      command: 'topics_list',
-      sender_pane_id: senderPaneId ?? null,
+      command: 'message_topic_subscribe',
+      topic,
+      agent_id: agentId ?? null,
+    });
+  }
+
+  async messageTopicUnsubscribe(topic: string, agentId?: string | null): Promise<TopicInfo> {
+    return this.sendCommand({
+      command: 'message_topic_unsubscribe',
+      topic,
+      agent_id: agentId ?? null,
     });
   }
 
   async agentRegister(
     agentId: string,
-    paneId: string,
+    tileId: string,
     title = 'Agent',
     agentRole: 'worker' | 'root' = 'worker',
   ): Promise<{ agent: AgentInfo }> {
@@ -273,7 +278,7 @@ export class HerdTestClient {
       agent_id: agentId,
       agent_type: 'claude',
       agent_role: agentRole,
-      pane_id: paneId,
+      tile_id: tileId,
       title,
     });
   }
@@ -285,95 +290,190 @@ export class HerdTestClient {
     });
   }
 
-  async messageDirect(toAgentId: string, message: string, senderPaneId?: string | null): Promise<void> {
+  async messageDirect(toAgentId: string, message: string, senderTileId?: string | null): Promise<void> {
     await this.sendCommand({
       command: 'message_direct',
       to_agent_id: toAgentId,
       message,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
     });
   }
 
-  async messagePublic(message: string, senderPaneId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
+  async messagePublic(message: string, senderTileId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
     await this.sendCommand({
       command: 'message_public',
       message,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       topics: topics ?? [],
       mentions: mentions ?? [],
     });
   }
 
-  async messageChatter(message: string, senderPaneId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
-    await this.messagePublic(message, senderPaneId, topics, mentions);
+  async messageChatter(message: string, senderTileId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
+    await this.messagePublic(message, senderTileId, topics, mentions);
   }
 
-  async messageNetwork(message: string, senderPaneId?: string | null, senderAgentId?: string | null): Promise<void> {
+  async messageNetwork(message: string, senderTileId?: string | null, senderAgentId?: string | null): Promise<void> {
     await this.sendCommand({
       command: 'message_network',
       message,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
 
-  async messageRoot(message: string, senderPaneId?: string | null, senderAgentId?: string | null): Promise<void> {
+  async messageRoot(message: string, senderTileId?: string | null, senderAgentId?: string | null): Promise<void> {
     await this.sendCommand({
       command: 'message_root',
       message,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
 
   async listNetwork(
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
     tileType?: TileTypeFilter | null,
   ): Promise<TileGraph> {
     return this.sendCommand({
       command: 'network_list',
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
       tile_type: tileType ?? null,
     });
   }
 
-  async sessionList(
-    senderPaneId?: string | null,
+  async networkGet(
+    tileId: string,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
-    tileType?: TileTypeFilter | null,
-  ): Promise<TileGraph> {
+  ): Promise<SessionTileInfo> {
     return this.sendCommand({
-      command: 'session_list',
-      sender_pane_id: senderPaneId ?? null,
+      command: 'network_get',
+      tile_id: tileId,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
-      tile_type: tileType ?? null,
+    });
+  }
+
+  async networkCall<T = unknown>(
+    tileId: string,
+    action: string,
+    args?: Record<string, unknown>,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<{ tile_id: string; action: string; result: T }> {
+    return this.sendCommand({
+      command: 'network_call',
+      tile_id: tileId,
+      action,
+      args: args ?? {},
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async browserDrive<T = unknown>(
+    tileId: string,
+    action: 'click' | 'type' | 'dom_query' | 'eval',
+    args?: Record<string, unknown>,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+    timeoutMs?: number,
+  ): Promise<{ tile_id: string; action: string; result: T }> {
+    return this.sendCommand(
+      {
+        command: 'browser_drive',
+        tile_id: tileId,
+        action,
+        args: args ?? {},
+        sender_tile_id: senderTileId ?? null,
+        sender_agent_id: senderAgentId ?? null,
+      },
+      timeoutMs,
+    );
+  }
+
+  async tileCreate(
+    tileType: TileTypeFilter,
+    options?: {
+      title?: string | null;
+      x?: number | null;
+      y?: number | null;
+      width?: number | null;
+      height?: number | null;
+      parentSessionId?: string | null;
+      parentTileId?: string | null;
+      senderTileId?: string | null;
+      senderAgentId?: string | null;
+    },
+  ): Promise<SessionTileInfo> {
+    return this.sendCommand({
+      command: 'tile_create',
+      tile_type: tileType,
+      title: options?.title ?? null,
+      x: options?.x ?? null,
+      y: options?.y ?? null,
+      width: options?.width ?? null,
+      height: options?.height ?? null,
+      parent_session_id: options?.parentSessionId ?? null,
+      parent_tile_id: options?.parentTileId ?? null,
+      sender_tile_id: options?.senderTileId ?? null,
+      sender_agent_id: options?.senderAgentId ?? null,
     });
   }
 
   async tileList(
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
     tileType?: TileTypeFilter | null,
-  ): Promise<SessionTileInfo[]> {
+  ): Promise<TileGraph> {
     return this.sendCommand({
       command: 'tile_list',
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
       tile_type: tileType ?? null,
+    });
+  }
+
+  async tileDestroy(
+    tileId: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<void> {
+    await this.sendCommand({
+      command: 'tile_destroy',
+      tile_id: tileId,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
     });
   }
 
   async tileGet(
     tileId: string,
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
   ): Promise<SessionTileInfo> {
     return this.sendCommand({
       command: 'tile_get',
       tile_id: tileId,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async tileRename(
+    tileId: string,
+    title: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<SessionTileInfo> {
+    return this.sendCommand({
+      command: 'tile_rename',
+      tile_id: tileId,
+      title,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
@@ -382,7 +482,7 @@ export class HerdTestClient {
     tileId: string,
     x: number,
     y: number,
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
   ): Promise<SessionTileInfo> {
     return this.sendCommand({
@@ -390,7 +490,7 @@ export class HerdTestClient {
       tile_id: tileId,
       x,
       y,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
@@ -399,7 +499,7 @@ export class HerdTestClient {
     tileId: string,
     width: number,
     height: number,
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
   ): Promise<SessionTileInfo> {
     return this.sendCommand({
@@ -407,25 +507,34 @@ export class HerdTestClient {
       tile_id: tileId,
       width,
       height,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
 
-  async workList(senderPaneId?: string | null): Promise<WorkItem[]> {
+  async tileCall<T = unknown>(
+    tileId: string,
+    action: string,
+    args?: Record<string, unknown>,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<{ tile_id: string; action: string; result: T }> {
     return this.sendCommand({
-      command: 'work_list',
-      scope: 'current_session',
-      sender_pane_id: senderPaneId ?? null,
+      command: 'tile_call',
+      tile_id: tileId,
+      action,
+      args: args ?? {},
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
     });
   }
 
-  async workGet(workId: string, senderPaneId?: string | null): Promise<WorkItem> {
-    return this.sendCommand({
-      command: 'work_get',
-      work_id: workId,
-      sender_pane_id: senderPaneId ?? null,
-    });
+  async getWorkTile(
+    workId: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<SessionTileInfo> {
+    return this.tileGet(`work:${workId}`, senderTileId, senderAgentId);
   }
 
   async networkConnect(
@@ -433,7 +542,7 @@ export class HerdTestClient {
     fromPort: string,
     toTileId: string,
     toPort: string,
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
   ): Promise<NetworkConnection> {
     return this.sendCommand({
@@ -442,7 +551,7 @@ export class HerdTestClient {
       from_port: fromPort,
       to_tile_id: toTileId,
       to_port: toPort,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });
   }
@@ -450,24 +559,15 @@ export class HerdTestClient {
   async networkDisconnect(
     tileId: string,
     port: string,
-    senderPaneId?: string | null,
+    senderTileId?: string | null,
     senderAgentId?: string | null,
   ): Promise<NetworkConnection | null> {
     return this.sendCommand({
       command: 'network_disconnect',
       tile_id: tileId,
       port,
-      sender_pane_id: senderPaneId ?? null,
+      sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
-    });
-  }
-
-  async workCreate(title: string, senderPaneId?: string | null, sessionId?: string | null): Promise<WorkItem> {
-    return this.sendCommand({
-      command: 'work_create',
-      title,
-      sender_pane_id: senderPaneId ?? null,
-      session_id: sessionId ?? null,
     });
   }
 

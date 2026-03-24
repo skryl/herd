@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -12,6 +12,8 @@ use crate::agent::{AgentChannelEvent, AgentDebugState, AgentInfo, AgentLogEntry,
 use crate::db::{self, PersistedTopicRecord};
 use crate::network;
 use crate::persist::{self, HerdState, TileState};
+use crate::tile_registry::{self, TileRecord};
+use crate::tile_message::TileMessageLogEntry;
 use crate::tmux_control::{TmuxControl, TmuxWriter, OutputBuffers};
 
 type PendingTestDriverRequests = HashMap<String, Sender<Result<Value, String>>>;
@@ -36,6 +38,7 @@ struct AgentRecord {
     agent_type: AgentType,
     agent_role: AgentRole,
     tile_id: String,
+    pane_id: String,
     window_id: String,
     session_id: String,
     title: String,
@@ -60,6 +63,7 @@ impl AgentRecord {
             agent_type: self.agent_type,
             agent_role: self.agent_role,
             tile_id: self.tile_id.clone(),
+            pane_id: self.pane_id.clone(),
             window_id: self.window_id.clone(),
             session_id: self.session_id.clone(),
             title: self.title.clone(),
@@ -97,7 +101,9 @@ pub struct AppState {
     pub tmux_control: Arc<Mutex<Option<Arc<Mutex<TmuxControl>>>>>,
     pub tmux_writer: Arc<Mutex<Option<Arc<TmuxWriter>>>>,
     pub output_buffers: Arc<Mutex<Option<OutputBuffers>>>,
+    shutting_down: Arc<AtomicBool>,
     pub tile_states: Arc<Mutex<HerdState>>,
+    tile_records: Arc<Mutex<HashMap<String, TileRecord>>>,
     pub snapshot_version: Arc<AtomicU64>,
     pub last_active_session: Arc<Mutex<Option<String>>>,
     window_parents: Arc<Mutex<HashMap<String, WindowParentLink>>>,
@@ -110,6 +116,7 @@ pub struct AppState {
     topic_records: Arc<Mutex<HashMap<String, TopicRecord>>>,
     chatter_entries: Arc<Mutex<Vec<ChatterEntry>>>,
     agent_log_entries: Arc<Mutex<Vec<AgentLogEntry>>>,
+    tile_message_log_entries: Arc<Mutex<Vec<TileMessageLogEntry>>>,
     agent_display_counter: Arc<AtomicU64>,
     agent_subscriber_counter: Arc<AtomicU64>,
     agent_ping_counter: Arc<AtomicU64>,
@@ -120,10 +127,23 @@ impl AppState {
         if let Err(error) = db::reset_runtime_presence_state() {
             log::warn!("Failed to reset runtime presence state in sqlite: {error}");
         }
-        let persisted_agents = db::load_agents().unwrap_or_default();
+        if let Err(error) = crate::work::ensure_tile_ids_at(std::path::Path::new(crate::runtime::database_path())) {
+            log::warn!("Failed to ensure work tile ids in sqlite: {error}");
+        }
+        if let Err(error) = crate::work::remove_legacy_work_directory(&crate::runtime::project_root_dir()) {
+            log::warn!("Failed to remove legacy work directory: {error}");
+        }
+        let mut persisted_agents = db::load_agents().unwrap_or_default();
+        for agent in &mut persisted_agents {
+            if agent.pane_id.trim().is_empty() && agent.tile_id.starts_with('%') {
+                agent.pane_id = agent.tile_id.clone();
+            }
+        }
         let persisted_topics = db::load_topics().unwrap_or_default();
+        let persisted_tiles = tile_registry::load();
         let chatter_entries = persist::load_chatter_entries();
         let agent_log_entries = persist::load_agent_log_entries();
+        let tile_message_log_entries = persist::load_tile_message_log_entries();
         let agent_display_counter = persisted_agents
             .iter()
             .filter_map(|agent| parse_agent_display_index(&agent.display_name))
@@ -133,7 +153,9 @@ impl AppState {
             tmux_control: Arc::new(Mutex::new(None)),
             tmux_writer: Arc::new(Mutex::new(None)),
             output_buffers: Arc::new(Mutex::new(None)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
             tile_states: Arc::new(Mutex::new(persist::load())),
+            tile_records: Arc::new(Mutex::new(build_tile_record_map(persisted_tiles))),
             snapshot_version: Arc::new(AtomicU64::new(0)),
             last_active_session: Arc::new(Mutex::new(None)),
             window_parents: Arc::new(Mutex::new(HashMap::new())),
@@ -146,6 +168,7 @@ impl AppState {
             topic_records: Arc::new(Mutex::new(build_topic_record_map(persisted_topics))),
             chatter_entries: Arc::new(Mutex::new(chatter_entries)),
             agent_log_entries: Arc::new(Mutex::new(agent_log_entries)),
+            tile_message_log_entries: Arc::new(Mutex::new(tile_message_log_entries)),
             agent_display_counter: Arc::new(AtomicU64::new(agent_display_counter)),
             agent_subscriber_counter: Arc::new(AtomicU64::new(0)),
             agent_ping_counter: Arc::new(AtomicU64::new(0)),
@@ -187,6 +210,14 @@ impl AppState {
         let control = guard.as_ref()?;
         let ctrl = control.lock().ok()?;
         Some(ctrl.child_pid())
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     pub fn read_output(&self, session_id: &str) -> Result<String, String> {
@@ -384,7 +415,6 @@ impl AppState {
 
         Ok(false)
     }
-
     pub fn cached_claude_commands(
         &self,
         cwd: &str,
@@ -444,10 +474,23 @@ impl AppState {
         Ok(())
     }
 
+    fn persist_tile_registry_state(&self) -> Result<(), String> {
+        let tiles = self
+            .tile_records
+            .lock()
+            .map_err(|e| e.to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        tile_registry::replace(&tiles)?;
+        Ok(())
+    }
+
     pub fn upsert_agent(
         &self,
         agent_id: String,
         tile_id: String,
+        pane_id: String,
         window_id: String,
         session_id: String,
         title: String,
@@ -462,6 +505,7 @@ impl AppState {
             agent_type,
             agent_role,
             tile_id: tile_id.clone(),
+            pane_id: pane_id.clone(),
             window_id: window_id.clone(),
             session_id: session_id.clone(),
             title: title.clone(),
@@ -483,6 +527,7 @@ impl AppState {
             subscribers: HashMap::new(),
         });
         record.tile_id = tile_id;
+        record.pane_id = pane_id;
         record.window_id = window_id;
         record.session_id = session_id;
         record.title = title;
@@ -501,6 +546,13 @@ impl AppState {
         Ok(info)
     }
 
+    pub fn replace_agents_snapshot(&self, agents: Vec<AgentInfo>) -> Result<(), String> {
+        let mut records = self.agent_records.lock().map_err(|e| e.to_string())?;
+        *records = build_agent_record_map(agents);
+        drop(records);
+        self.persist_agent_and_topic_state()
+    }
+
     pub fn unregister_agent(&self, agent_id: &str) -> Result<Option<AgentInfo>, String> {
         let mut agents = self.agent_records.lock().map_err(|e| e.to_string())?;
         let removed = agents.remove(agent_id).map(|record| record.to_info());
@@ -516,18 +568,104 @@ impl AppState {
 
     pub fn root_agent_in_session(&self, session_id: &str) -> Result<Option<AgentInfo>, String> {
         let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
-        Ok(agents
-            .values()
-            .find(|record| record.session_id == session_id && record.agent_role == AgentRole::Root)
-            .map(AgentRecord::to_info))
+        Ok(preferred_agent_record(
+            agents
+                .values()
+                .filter(|record| record.session_id == session_id && record.agent_role == AgentRole::Root),
+        )
+        .map(AgentRecord::to_info))
     }
 
     pub fn agent_info_by_tile(&self, tile_id: &str) -> Result<Option<AgentInfo>, String> {
         let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
-        Ok(agents
-            .values()
-            .find(|record| record.tile_id == tile_id)
+        Ok(preferred_agent_record(agents.values().filter(|record| record.tile_id == tile_id))
             .map(AgentRecord::to_info))
+    }
+
+    pub fn agent_info_by_tile_role(&self, tile_id: &str, agent_role: AgentRole) -> Result<Option<AgentInfo>, String> {
+        let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
+        Ok(preferred_agent_record(
+            agents
+                .values()
+                .filter(|record| record.tile_id == tile_id && record.agent_role == agent_role),
+        )
+        .map(AgentRecord::to_info))
+    }
+
+    pub fn agent_info_by_pane(&self, pane_id: &str) -> Result<Option<AgentInfo>, String> {
+        let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
+        Ok(preferred_agent_record(agents.values().filter(|record| record.pane_id == pane_id))
+            .map(AgentRecord::to_info))
+    }
+
+    pub fn agent_info_by_pane_role(&self, pane_id: &str, agent_role: AgentRole) -> Result<Option<AgentInfo>, String> {
+        let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
+        Ok(preferred_agent_record(
+            agents
+                .values()
+                .filter(|record| record.pane_id == pane_id && record.agent_role == agent_role),
+        )
+        .map(AgentRecord::to_info))
+    }
+
+    pub fn tile_record(&self, tile_id: &str) -> Result<Option<TileRecord>, String> {
+        let tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        Ok(tiles.get(tile_id).cloned())
+    }
+
+    pub fn tile_record_by_pane(&self, pane_id: &str) -> Result<Option<TileRecord>, String> {
+        let tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        Ok(tiles.values().find(|record| record.pane_id == pane_id).cloned())
+    }
+
+    pub fn tile_record_by_window(&self, window_id: &str) -> Result<Option<TileRecord>, String> {
+        let tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        Ok(tiles.values().find(|record| record.window_id == window_id).cloned())
+    }
+
+    pub fn list_tile_records_in_session(&self, session_id: &str) -> Result<Vec<TileRecord>, String> {
+        let tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        let mut list = tiles
+            .values()
+            .filter(|record| record.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| left.tile_id.cmp(&right.tile_id));
+        Ok(list)
+    }
+
+    pub fn tile_records_snapshot(&self) -> Result<Vec<TileRecord>, String> {
+        let tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        let mut list = tiles.values().cloned().collect::<Vec<_>>();
+        list.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.tile_id.cmp(&right.tile_id))
+        });
+        Ok(list)
+    }
+
+    pub fn replace_tile_records(&self, records: Vec<TileRecord>) -> Result<(), String> {
+        let mut tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        *tiles = build_tile_record_map(records);
+        drop(tiles);
+        self.persist_tile_registry_state()
+    }
+
+    pub fn upsert_tile_record(&self, record: TileRecord) -> Result<TileRecord, String> {
+        let mut tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        tiles.insert(record.tile_id.clone(), record.clone());
+        drop(tiles);
+        self.persist_tile_registry_state()?;
+        Ok(record)
+    }
+
+    pub fn remove_tile_record(&self, tile_id: &str) -> Result<Option<TileRecord>, String> {
+        let mut tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
+        let removed = tiles.remove(tile_id);
+        drop(tiles);
+        self.persist_tile_registry_state()?;
+        Ok(removed)
     }
 
     pub fn list_agents_in_session(&self, session_id: &str) -> Result<Vec<AgentInfo>, String> {
@@ -538,6 +676,17 @@ impl AppState {
             .map(AgentRecord::to_info)
             .collect::<Vec<_>>();
         list.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        Ok(list)
+    }
+
+    pub fn agent_infos_snapshot(&self) -> Result<Vec<AgentInfo>, String> {
+        let agents = self.agent_records.lock().map_err(|e| e.to_string())?;
+        let mut list = agents.values().map(AgentRecord::to_info).collect::<Vec<_>>();
+        list.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.display_name.cmp(&right.display_name))
+        });
         Ok(list)
     }
 
@@ -582,6 +731,15 @@ impl AppState {
             .collect())
     }
 
+    pub fn tile_message_log_entries_in_session(&self, session_id: &str) -> Result<Vec<TileMessageLogEntry>, String> {
+        let entries = self.tile_message_log_entries.lock().map_err(|e| e.to_string())?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.session_id == session_id)
+            .cloned()
+            .collect())
+    }
+
     pub fn public_chatter_since_in_session(
         &self,
         session_id: &str,
@@ -613,12 +771,39 @@ impl AppState {
         Ok(())
     }
 
+    pub fn append_tile_message_log_entry(&self, entry: TileMessageLogEntry) -> Result<(), String> {
+        persist::append_tile_message_log_entry(&entry)?;
+        self.tile_message_log_entries
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(entry);
+        Ok(())
+    }
+
+    pub fn clear_debug_logs(&self) -> Result<(), String> {
+        persist::clear_log_entries()?;
+        self.chatter_entries
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clear();
+        self.agent_log_entries
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clear();
+        self.tile_message_log_entries
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clear();
+        Ok(())
+    }
+
     pub fn snapshot_agent_debug_state_for_session(&self, session_id: &str) -> Result<AgentDebugState, String> {
         Ok(AgentDebugState {
             agents: self.list_agents_in_session(session_id)?,
             topics: self.list_topics_in_session(session_id)?,
             chatter: self.chatter_entries_in_session(session_id)?,
             agent_logs: self.agent_log_entries_in_session(session_id)?,
+            tile_message_logs: self.tile_message_log_entries_in_session(session_id)?,
             connections: network::list_connections_at(std::path::Path::new(crate::runtime::database_path()), session_id)?,
         })
     }
@@ -893,6 +1078,11 @@ fn build_agent_record_map(agents: Vec<AgentInfo>) -> HashMap<String, AgentRecord
                 agent_type: agent.agent_type,
                 agent_role: agent.agent_role,
                 tile_id: agent.tile_id.clone(),
+                pane_id: if agent.pane_id.trim().is_empty() {
+                    agent.tile_id.clone()
+                } else {
+                    agent.pane_id.clone()
+                },
                 window_id: agent.window_id.clone(),
                 session_id: agent.session_id.clone(),
                 title: agent.title.clone(),
@@ -914,6 +1104,19 @@ fn build_agent_record_map(agents: Vec<AgentInfo>) -> HashMap<String, AgentRecord
         .collect()
 }
 
+fn preferred_agent_record<'a, I>(records: I) -> Option<&'a AgentRecord>
+where
+    I: IntoIterator<Item = &'a AgentRecord>,
+{
+    records.into_iter().max_by(|left, right| {
+        left.alive
+            .cmp(&right.alive)
+            .then_with(|| left.last_seen_ts_ms.cmp(&right.last_seen_ts_ms))
+            .then_with(|| left.registration_ts_ms.cmp(&right.registration_ts_ms))
+            .then_with(|| left.agent_id.cmp(&right.agent_id))
+    })
+}
+
 fn build_topic_record_map(topics: Vec<PersistedTopicRecord>) -> HashMap<String, TopicRecord> {
     topics
         .into_iter()
@@ -926,6 +1129,13 @@ fn build_topic_record_map(topics: Vec<PersistedTopicRecord>) -> HashMap<String, 
             };
             (topic_key(&record.session_id, &record.name), record)
         })
+        .collect()
+}
+
+fn build_tile_record_map(records: Vec<TileRecord>) -> HashMap<String, TileRecord> {
+    records
+        .into_iter()
+        .map(|record| (record.tile_id.clone(), record))
         .collect()
 }
 
@@ -954,5 +1164,53 @@ fn resolve_root_parent_from_map(
           Some(next) => current = next.parent_window_id.clone(),
           None => return Some(current),
       }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{preferred_agent_record, AgentRecord};
+    use crate::agent::{AgentRole, AgentType};
+    use std::collections::{BTreeSet, HashMap};
+
+    fn record(agent_id: &str, tile_id: &str, alive: bool, last_seen_ts_ms: i64) -> AgentRecord {
+        AgentRecord {
+            agent_id: agent_id.to_string(),
+            agent_type: AgentType::Claude,
+            agent_role: AgentRole::Worker,
+            tile_id: tile_id.to_string(),
+            pane_id: tile_id.to_string(),
+            window_id: "@1".to_string(),
+            session_id: "$1".to_string(),
+            title: "Agent".to_string(),
+            display_name: agent_id.to_string(),
+            chatter_subscribed: true,
+            topics: BTreeSet::new(),
+            alive,
+            welcomed: true,
+            registration_ts_ms: last_seen_ts_ms,
+            last_seen_ts_ms,
+            last_ping_sent_at: None,
+            last_ping_ack_at: None,
+            ping_deadline: None,
+            agent_pid: None,
+            subscribers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn prefers_live_agents_for_a_tile_over_dead_ones() {
+        let dead = record("agent-dead", "%7", false, 10);
+        let live = record("agent-live", "%7", true, 5);
+        let selected = preferred_agent_record([&dead, &live]).unwrap();
+        assert_eq!(selected.agent_id, "agent-live");
+    }
+
+    #[test]
+    fn prefers_most_recent_dead_agent_when_no_live_agent_exists() {
+        let older = record("agent-older", "%7", false, 10);
+        let newer = record("agent-newer", "%7", false, 20);
+        let selected = preferred_agent_record([&older, &newer]).unwrap();
+        assert_eq!(selected.agent_id, "agent-newer");
     }
 }

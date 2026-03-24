@@ -6,7 +6,7 @@ import * as readline from "node:readline";
 import { z } from "zod";
 
 const HERD_AGENT_ID = process.env.HERD_AGENT_ID || "";
-const HERD_PANE_ID = process.env.TMUX_PANE || process.env.HERD_PANE_ID || "";
+const HERD_TILE_ID = process.env.HERD_TILE_ID || "";
 const HERD_SESSION_ID = process.env.HERD_SESSION_ID || "";
 const HERD_AGENT_ROLE =
   process.env.HERD_AGENT_ROLE
@@ -20,42 +20,35 @@ const MESSAGE_TOOLS = {
   public: "message_public",
   network: "message_network",
   root: "message_root",
-  sudo: "sudo",
 } as const;
 
 const SHARED_TOOLS = {
   networkList: "network_list",
+  networkGet: "network_get",
+  networkCall: "network_call",
 } as const;
 
 const ROOT_TOOLS = {
-  agentCreate: "agent_create",
-  shellCreate: "shell_create",
-  shellsList: "shells_list",
-  shellDestroy: "shell_destroy",
+  tileCreate: "tile_create",
+  tileDestroy: "tile_destroy",
+  tileList: "tile_list",
+  tileRename: "tile_rename",
+  tileCall: "tile_call",
   shellInputSend: "shell_input_send",
   shellExec: "shell_exec",
   shellOutputRead: "shell_output_read",
-  shellTitleSet: "shell_title_set",
-  shellReadOnlySet: "shell_read_only_set",
   shellRoleSet: "shell_role_set",
-  browserCreate: "browser_create",
-  browserDestroy: "browser_destroy",
   browserNavigate: "browser_navigate",
   browserLoad: "browser_load",
-  agentsList: "agents_list",
-  topicsList: "topics_list",
-  topicSubscribe: "topic_subscribe",
-  topicUnsubscribe: "topic_unsubscribe",
-  sessionList: "session_list",
-  tileList: "tile_list",
+  browserDrive: "browser_drive",
+  messageTopicList: "message_topic_list",
+  messageTopicSubscribe: "message_topic_subscribe",
+  messageTopicUnsubscribe: "message_topic_unsubscribe",
   tileGet: "tile_get",
   tileMove: "tile_move",
   tileResize: "tile_resize",
   networkConnect: "network_connect",
   networkDisconnect: "network_disconnect",
-  workList: "work_list",
-  workGet: "work_get",
-  workCreate: "work_create",
   workStageStart: "work_stage_start",
   workStageComplete: "work_stage_complete",
   workReviewApprove: "work_review_approve",
@@ -69,7 +62,6 @@ export const ROOT_ONLY_TOOL_NAMES = Object.freeze([...Object.values(ROOT_TOOLS)]
 export const ROOT_TOOL_NAMES = Object.freeze([...WORKER_TOOL_NAMES, ...ROOT_ONLY_TOOL_NAMES]);
 
 type SocketResponse = { ok: boolean; data?: unknown; error?: string };
-type AgentLogAppendKind = "incoming_hook" | "outgoing_call";
 type HerdToolSchema = Record<string, z.ZodTypeAny>;
 const TILE_TYPE_SCHEMA = z.enum(["shell", "agent", "browser", "work"]).optional();
 type AgentStreamEnvelope = {
@@ -124,15 +116,45 @@ function resolveSocketPath() {
 }
 
 const SOCKET_PATH = resolveSocketPath();
+const INITIAL_PARENT_PID = process.ppid;
+let exitWatchInstalled = false;
+let exitingForParentLoss = false;
+
+function exitWhenParentDisappears(reason: string) {
+  if (exitingForParentLoss) {
+    return;
+  }
+  exitingForParentLoss = true;
+  console.error(`Herd MCP server exiting: ${reason}`);
+  process.exit(0);
+}
+
+function installParentExitWatch() {
+  if (exitWatchInstalled) {
+    return;
+  }
+  exitWatchInstalled = true;
+
+  process.stdin.on("end", () => exitWhenParentDisappears("stdin ended"));
+  process.stdin.on("close", () => exitWhenParentDisappears("stdin closed"));
+
+  const interval = setInterval(() => {
+    if (process.ppid !== INITIAL_PARENT_PID) {
+      exitWhenParentDisappears(`parent pid changed from ${INITIAL_PARENT_PID} to ${process.ppid}`);
+    }
+  }, 1000);
+  interval.unref();
+}
 
 async function sendCommand(command: Record<string, unknown>): Promise<SocketResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(SOCKET_PATH);
     const rl = readline.createInterface({ input: socket });
     let responded = false;
+    const payload = { channel: "mcp", ...command };
 
     socket.on("connect", () => {
-      socket.write(JSON.stringify(command) + "\n");
+      socket.write(JSON.stringify(payload) + "\n");
     });
 
     rl.on("line", (line) => {
@@ -163,36 +185,8 @@ async function sendCommand(command: Record<string, unknown>): Promise<SocketResp
   });
 }
 
-function summarizeLogPayload(payload: Record<string, unknown>) {
-  const json = JSON.stringify(payload);
-  if (!json) {
-    return "{}";
-  }
-  return json.length > 400 ? `${json.slice(0, 397)}...` : json;
-}
-
 function jsonText(value: unknown) {
   return value === undefined ? "{}" : JSON.stringify(value, null, 2);
-}
-
-async function appendAgentLog(kind: AgentLogAppendKind, text: string) {
-  if (!HERD_AGENT_ID) {
-    return;
-  }
-  try {
-    const response = await sendCommand({
-      command: "agent_log_append",
-      agent_id: HERD_AGENT_ID,
-      kind,
-      text,
-      timestamp_ms: Date.now(),
-    });
-    if (!response.ok) {
-      console.error("Failed to append Herd agent log:", response.error);
-    }
-  } catch (error) {
-    console.error("Failed to append Herd agent log:", error);
-  }
 }
 
 async function sendToolCommand(
@@ -200,7 +194,8 @@ async function sendToolCommand(
   toolArgs: Record<string, unknown>,
   command: Record<string, unknown>,
 ) {
-  await appendAgentLog("outgoing_call", `MCP call ${toolName} ${summarizeLogPayload(toolArgs)}`);
+  void toolName;
+  void toolArgs;
   return sendCommand(command);
 }
 
@@ -251,7 +246,6 @@ async function pushChannelEvent(server: McpServer, event: AgentStreamEnvelope["e
       meta: buildChannelMeta(event),
     },
   });
-  await appendAgentLog("incoming_hook", `MCP hook [${event.kind}] ${event.message}`);
 }
 
 function subscribeAgentEvents(server: McpServer, agentId: string) {
@@ -310,14 +304,16 @@ const server = new McpServer(
       },
     },
     instructions:
-      'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, topics, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels.',
+      (IS_ROOT_MODE
+        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, topics, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, type, dom_query, or eval on browser tiles in the current session.'
+        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, topics, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
   },
 );
 
 function senderContext() {
   return {
     sender_agent_id: HERD_AGENT_ID || undefined,
-    sender_pane_id: HERD_PANE_ID || undefined,
+    sender_tile_id: HERD_TILE_ID || undefined,
   };
 }
 
@@ -437,30 +433,6 @@ function registerMessageTools() {
     },
   );
 
-  registerTool(
-    MESSAGE_TOOLS.sudo,
-    "Send a privileged request to the current session root agent.",
-    {
-      message: z.string(),
-    },
-    async ({ message }) => {
-      try {
-        const resp = await sendToolCommand(
-          MESSAGE_TOOLS.sudo,
-          { message },
-          {
-            command: "message_root",
-            message,
-            ...senderContext(),
-          },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Root message sent" }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
 }
 
 function registerSharedTools() {
@@ -486,22 +458,83 @@ function registerSharedTools() {
       }
     },
   );
+
+  registerTool(
+    SHARED_TOOLS.networkGet,
+    "Get one tile from the sender's current session network component, including its responds_to list and structured message_api metadata.",
+    {
+      tile_id: z.string(),
+    },
+    async ({ tile_id }) => {
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.networkGet,
+          { tile_id },
+          {
+            command: "network_get",
+            tile_id,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    SHARED_TOOLS.networkCall,
+    "Call a tile message on a tile in the sender's current session network component. Use network_list or network_get first, pass one of the tile-specific message names exposed in responds_to, and inspect message_api for required args or browser drive subcommands.",
+    {
+      tile_id: z.string(),
+      action: z.string(),
+      args: z.record(z.unknown()).optional(),
+    },
+    async ({ tile_id, action, args }) => {
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.networkCall,
+          { tile_id, action, args: args ?? {} },
+          {
+            command: "network_call",
+            tile_id,
+            action,
+            args: args ?? {},
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
 }
 
 function registerRootTools() {
   registerTool(
-    ROOT_TOOLS.agentCreate,
-    "Create a new worker agent on the Herd canvas.",
-    {},
-    async () => {
+    ROOT_TOOLS.browserDrive,
+    "Drive a browser tile in the current session. Supported actions: click, type, dom_query, eval.",
+    {
+      tile_id: z.string(),
+      action: z.enum(["click", "type", "dom_query", "eval"]),
+      args: z.record(z.unknown()).optional(),
+    },
+    async ({ tile_id, action, args }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.agentCreate,
-          {},
+          ROOT_TOOLS.browserDrive,
+          { tile_id, action, args: args ?? {} },
           {
-            command: "agent_create",
-            parent_session_id: HERD_SESSION_ID || undefined,
-            parent_pane_id: HERD_PANE_ID || undefined,
+            command: "browser_drive",
+            tile_id,
+            action,
+            args: args ?? {},
+            ...senderContext(),
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
@@ -513,42 +546,71 @@ function registerRootTools() {
   );
 
   registerTool(
-    ROOT_TOOLS.shellCreate,
-    "Create a new terminal shell on the Herd canvas.",
+    ROOT_TOOLS.tileCall,
+    "Call a tile message on any tile in the current session. Pass one of the tile-specific message names exposed in responds_to and inspect message_api for required args or browser drive subcommands.",
     {
+      tile_id: z.string(),
+      action: z.string(),
+      args: z.record(z.unknown()).optional(),
+    },
+    async ({ tile_id, action, args }) => {
+      try {
+        const resp = await sendToolCommand(
+          ROOT_TOOLS.tileCall,
+          { tile_id, action, args: args ?? {} },
+          {
+            command: "tile_call",
+            tile_id,
+            action,
+            args: args ?? {},
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    ROOT_TOOLS.tileCreate,
+    "Create a new tile on the Herd canvas in the current session.",
+    {
+      tile_type: z.enum(["shell", "agent", "browser", "work"]),
+      title: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
       width: z.number().optional(),
       height: z.number().optional(),
-      title: z.string().optional(),
+      parent_session_id: z.string().optional(),
+      parent_tile_id: z.string().optional(),
     },
     async (params) => {
+      if (params.tile_type === "work" && !params.title?.trim()) {
+        return errorResult("tile_create for work requires title");
+      }
+      const parentSessionId = params.parent_session_id ?? (HERD_SESSION_ID || undefined);
+      const parentTileId = params.parent_tile_id ?? (HERD_TILE_ID || undefined);
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.shellCreate,
+          ROOT_TOOLS.tileCreate,
           params,
           {
-            command: "shell_create",
+            command: "tile_create",
+            tile_type: params.tile_type,
+            title: params.title,
             x: params.x,
             y: params.y,
             width: params.width,
             height: params.height,
-            parent_session_id: HERD_SESSION_ID || undefined,
-            parent_pane_id: HERD_PANE_ID || undefined,
+            parent_session_id: parentSessionId,
+            parent_tile_id: parentTileId,
+            ...senderContext(),
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
-
-        const data = resp.data as { pane_id?: string } | undefined;
-        if (params.title && data?.pane_id) {
-          await sendCommand({
-            command: "shell_title_set",
-            session_id: data.pane_id,
-            title: params.title,
-            ...senderContext(),
-          });
-        }
-
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
       } catch (err) {
         return errorResult(String(err));
@@ -556,29 +618,19 @@ function registerRootTools() {
     },
   );
 
-  registerTool(ROOT_TOOLS.shellsList, "List all active Herd shells.", {}, async () => {
-    try {
-      const resp = await sendToolCommand(ROOT_TOOLS.shellsList, {}, { command: "shell_list", ...senderContext() });
-      if (!resp.ok) return errorResult(resp.error || "Unknown error");
-      return { content: [{ type: "text", text: jsonText(resp.data) }] };
-    } catch (err) {
-      return errorResult(String(err));
-    }
-  });
-
   registerTool(
-    ROOT_TOOLS.shellDestroy,
-    "Destroy a shell by pane id.",
-    { pane_id: z.string() },
-    async ({ pane_id }) => {
+    ROOT_TOOLS.tileDestroy,
+    "Destroy a tile in the current session by tile id.",
+    { tile_id: z.string() },
+    async ({ tile_id }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.shellDestroy,
-          { pane_id },
-          { command: "shell_destroy", session_id: pane_id, ...senderContext() },
+          ROOT_TOOLS.tileDestroy,
+          { tile_id },
+          { command: "tile_destroy", tile_id, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Shell destroyed" }] };
+        return { content: [{ type: "text", text: "Tile destroyed" }] };
       } catch (err) {
         return errorResult(String(err));
       }
@@ -588,13 +640,13 @@ function registerRootTools() {
   registerTool(
     ROOT_TOOLS.shellInputSend,
     "Send text input to a shell.",
-    { pane_id: z.string(), input: z.string() },
-    async ({ pane_id, input }) => {
+    { tile_id: z.string(), input: z.string() },
+    async ({ tile_id, input }) => {
       try {
         const resp = await sendToolCommand(
           ROOT_TOOLS.shellInputSend,
-          { pane_id, input },
-          { command: "shell_input_send", session_id: pane_id, input, ...senderContext() },
+          { tile_id, input },
+          { command: "shell_input_send", tile_id, input, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: "Input sent" }] };
@@ -606,16 +658,16 @@ function registerRootTools() {
 
   registerTool(
     ROOT_TOOLS.shellExec,
-    "Execute a shell command inside a Herd tile.",
-    { pane_id: z.string(), command: z.string() },
-    async ({ pane_id, command }) => {
+    "Execute a shell command in an existing Herd shell without replacing the pane process.",
+    { tile_id: z.string(), command: z.string() },
+    async ({ tile_id, command }) => {
       try {
         const resp = await sendToolCommand(
           ROOT_TOOLS.shellExec,
-          { pane_id, command },
+          { tile_id, command },
           {
             command: "shell_exec",
-            session_id: pane_id,
+            tile_id,
             shell_command: command,
             ...senderContext(),
           },
@@ -631,13 +683,13 @@ function registerRootTools() {
   registerTool(
     ROOT_TOOLS.shellOutputRead,
     "Read recent terminal output from a shell.",
-    { pane_id: z.string() },
-    async ({ pane_id }) => {
+    { tile_id: z.string() },
+    async ({ tile_id }) => {
       try {
         const resp = await sendToolCommand(
           ROOT_TOOLS.shellOutputRead,
-          { pane_id },
-          { command: "shell_output_read", session_id: pane_id, ...senderContext() },
+          { tile_id },
+          { command: "shell_output_read", tile_id, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         const output = (resp.data as { output?: string } | undefined)?.output ?? "";
@@ -649,81 +701,15 @@ function registerRootTools() {
   );
 
   registerTool(
-    ROOT_TOOLS.shellTitleSet,
-    "Set the display title of a Herd tile.",
-    { pane_id: z.string(), title: z.string() },
-    async ({ pane_id, title }) => {
+    ROOT_TOOLS.tileRename,
+    "Rename a tile in the current session.",
+    { tile_id: z.string(), title: z.string() },
+    async ({ tile_id, title }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.shellTitleSet,
-          { pane_id, title },
-          { command: "shell_title_set", session_id: pane_id, title, ...senderContext() },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Title updated" }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
-  registerTool(
-    ROOT_TOOLS.shellReadOnlySet,
-    "Set whether a Herd tile is read-only.",
-    { pane_id: z.string(), read_only: z.boolean() },
-    async ({ pane_id, read_only }) => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.shellReadOnlySet,
-          { pane_id, read_only },
-          {
-            command: "shell_read_only_set",
-            session_id: pane_id,
-            read_only,
-            ...senderContext(),
-          },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Read-only state updated" }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
-  registerTool(
-    ROOT_TOOLS.shellRoleSet,
-    "Set the logical role of a Herd tile.",
-    { pane_id: z.string(), role: z.string() },
-    async ({ pane_id, role }) => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.shellRoleSet,
-          { pane_id, role },
-          { command: "shell_role_set", session_id: pane_id, role, ...senderContext() },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Role updated" }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
-  registerTool(
-    ROOT_TOOLS.browserCreate,
-    "Create a new browser tile on the Herd canvas.",
-    {},
-    async () => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.browserCreate,
-          {},
-          {
-            command: "browser_create",
-            parent_session_id: HERD_SESSION_ID || undefined,
-            parent_pane_id: HERD_PANE_ID || undefined,
-          },
+          ROOT_TOOLS.tileRename,
+          { tile_id, title },
+          { command: "tile_rename", tile_id, title, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -734,18 +720,18 @@ function registerRootTools() {
   );
 
   registerTool(
-    ROOT_TOOLS.browserDestroy,
-    "Destroy a browser tile by pane id.",
-    { pane_id: z.string() },
-    async ({ pane_id }) => {
+    ROOT_TOOLS.shellRoleSet,
+    "Set the logical role of a Herd tile.",
+    { tile_id: z.string(), role: z.string() },
+    async ({ tile_id, role }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.browserDestroy,
-          { pane_id },
-          { command: "browser_destroy", pane_id, ...senderContext() },
+          ROOT_TOOLS.shellRoleSet,
+          { tile_id, role },
+          { command: "shell_role_set", tile_id, role, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: "Browser destroyed" }] };
+        return { content: [{ type: "text", text: "Role updated" }] };
       } catch (err) {
         return errorResult(String(err));
       }
@@ -755,13 +741,13 @@ function registerRootTools() {
   registerTool(
     ROOT_TOOLS.browserNavigate,
     "Navigate an existing browser tile to a URL.",
-    { pane_id: z.string(), url: z.string() },
-    async ({ pane_id, url }) => {
+    { tile_id: z.string(), url: z.string() },
+    async ({ tile_id, url }) => {
       try {
         const resp = await sendToolCommand(
           ROOT_TOOLS.browserNavigate,
-          { pane_id, url },
-          { command: "browser_navigate", pane_id, url, ...senderContext() },
+          { tile_id, url },
+          { command: "browser_navigate", tile_id, url, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -774,13 +760,13 @@ function registerRootTools() {
   registerTool(
     ROOT_TOOLS.browserLoad,
     "Load a local file into an existing browser tile.",
-    { pane_id: z.string(), path: z.string() },
-    async ({ pane_id, path }) => {
+    { tile_id: z.string(), path: z.string() },
+    async ({ tile_id, path }) => {
       try {
         const resp = await sendToolCommand(
           ROOT_TOOLS.browserLoad,
-          { pane_id, path },
-          { command: "browser_load", pane_id, path, ...senderContext() },
+          { tile_id, path },
+          { command: "browser_load", tile_id, path, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -790,19 +776,13 @@ function registerRootTools() {
     },
   );
 
-  registerTool(ROOT_TOOLS.agentsList, "List agents in the current session.", {}, async () => {
+  registerTool(ROOT_TOOLS.messageTopicList, "List topics in the current session.", {}, async () => {
     try {
-      const resp = await sendToolCommand(ROOT_TOOLS.agentsList, {}, { command: "agent_list", ...senderContext() });
-      if (!resp.ok) return errorResult(resp.error || "Unknown error");
-      return { content: [{ type: "text", text: jsonText(resp.data) }] };
-    } catch (err) {
-      return errorResult(String(err));
-    }
-  });
-
-  registerTool(ROOT_TOOLS.topicsList, "List topics in the current session.", {}, async () => {
-    try {
-      const resp = await sendToolCommand(ROOT_TOOLS.topicsList, {}, { command: "topics_list", ...senderContext() });
+      const resp = await sendToolCommand(
+        ROOT_TOOLS.messageTopicList,
+        {},
+        { command: "message_topic_list", ...senderContext() },
+      );
       if (!resp.ok) return errorResult(resp.error || "Unknown error");
       return { content: [{ type: "text", text: jsonText(resp.data) }] };
     } catch (err) {
@@ -811,15 +791,15 @@ function registerRootTools() {
   });
 
   registerTool(
-    ROOT_TOOLS.topicSubscribe,
+    ROOT_TOOLS.messageTopicSubscribe,
     "Subscribe an agent to a topic in the current session.",
     { agent_id: z.string(), topic: z.string() },
     async ({ agent_id, topic }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.topicSubscribe,
+          ROOT_TOOLS.messageTopicSubscribe,
           { agent_id, topic },
-          { command: "topic_subscribe", agent_id, topic },
+          { command: "message_topic_subscribe", agent_id, topic },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -830,38 +810,15 @@ function registerRootTools() {
   );
 
   registerTool(
-    ROOT_TOOLS.topicUnsubscribe,
+    ROOT_TOOLS.messageTopicUnsubscribe,
     "Unsubscribe an agent from a topic in the current session.",
     { agent_id: z.string(), topic: z.string() },
     async ({ agent_id, topic }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.topicUnsubscribe,
+          ROOT_TOOLS.messageTopicUnsubscribe,
           { agent_id, topic },
-          { command: "topic_unsubscribe", agent_id, topic },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: jsonText(resp.data) }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
-  registerTool(
-    ROOT_TOOLS.sessionList,
-    "List all tiles in the current session, optionally filtered by tile type.",
-    { tile_type: TILE_TYPE_SCHEMA },
-    async ({ tile_type }) => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.sessionList,
-          tile_type ? { tile_type } : {},
-          {
-            command: "session_list",
-            tile_type,
-            ...senderContext(),
-          },
+          { command: "message_topic_unsubscribe", agent_id, topic },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -873,7 +830,7 @@ function registerRootTools() {
 
   registerTool(
     ROOT_TOOLS.tileList,
-    "List tiles in the current session, optionally filtered by tile type.",
+    "List current-session tiles and connections. Use tile_type to narrow to shell, agent, browser, or work tiles.",
     { tile_type: TILE_TYPE_SCHEMA },
     async ({ tile_type }) => {
       try {
@@ -1025,75 +982,6 @@ function registerRootTools() {
     },
   );
 
-  registerTool(ROOT_TOOLS.workList, "List work items in the current session.", {}, async () => {
-    try {
-      const resp = await sendToolCommand(
-        ROOT_TOOLS.workList,
-        {},
-        {
-          command: "work_list",
-          scope: "current_session",
-          agent_id: HERD_AGENT_ID || undefined,
-          session_id: HERD_SESSION_ID || undefined,
-          sender_pane_id: HERD_PANE_ID || undefined,
-        },
-      );
-      if (!resp.ok) return errorResult(resp.error || "Unknown error");
-      return { content: [{ type: "text", text: jsonText(resp.data) }] };
-    } catch (err) {
-      return errorResult(String(err));
-    }
-  });
-
-  registerTool(
-    ROOT_TOOLS.workGet,
-    "Get a work item from the current session.",
-    { work_id: z.string() },
-    async ({ work_id }) => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.workGet,
-          { work_id },
-          {
-            command: "work_get",
-            work_id,
-            agent_id: HERD_AGENT_ID || undefined,
-            session_id: HERD_SESSION_ID || undefined,
-            sender_pane_id: HERD_PANE_ID || undefined,
-          },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: jsonText(resp.data) }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
-  registerTool(
-    ROOT_TOOLS.workCreate,
-    "Create a new work item in the current session.",
-    { title: z.string() },
-    async ({ title }) => {
-      try {
-        const resp = await sendToolCommand(
-          ROOT_TOOLS.workCreate,
-          { title },
-          {
-            command: "work_create",
-            title,
-            session_id: HERD_SESSION_ID || undefined,
-            ...senderContext(),
-          },
-        );
-        if (!resp.ok) return errorResult(resp.error || "Unknown error");
-        return { content: [{ type: "text", text: jsonText(resp.data) }] };
-      } catch (err) {
-        return errorResult(String(err));
-      }
-    },
-  );
-
   registerTool(
     ROOT_TOOLS.workStageStart,
     "Mark a work item's current stage as in progress for the given owner agent.",
@@ -1178,17 +1066,18 @@ if (IS_ROOT_MODE) {
 }
 
 export async function main() {
+  installParentExitWatch();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`Herd MCP server running (socket: ${SOCKET_PATH})`);
 
-  if (HERD_AGENT_ID && HERD_PANE_ID) {
+  if (HERD_AGENT_ID && HERD_TILE_ID) {
     const registration = await sendCommand({
       command: "agent_register",
       agent_id: HERD_AGENT_ID,
       agent_type: "claude",
       agent_role: HERD_AGENT_ROLE,
-      pane_id: HERD_PANE_ID,
+      tile_id: HERD_TILE_ID,
       agent_pid: Number(process.ppid) || undefined,
       title: HERD_AGENT_ROLE === "root" ? "Root" : "Agent",
     });

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>browser-drive-fixture</title>
+    <style>
+      body {
+        font-family: monospace;
+        padding: 24px;
+      }
+      label,
+      button,
+      output,
+      p {
+        display: block;
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="title">Browser Drive Fixture</h1>
+    <label for="name">Name</label>
+    <input id="name" type="text" value="" />
+    <button id="apply" type="button">Apply</button>
+    <output id="result">pending</output>
+    <p id="counter">0</p>
+    <script>
+      const input = document.querySelector('#name');
+      const result = document.querySelector('#result');
+      const counter = document.querySelector('#counter');
+      let clicks = 0;
+      document.querySelector('#apply')?.addEventListener('click', () => {
+        clicks += 1;
+        result.textContent = `hello ${input?.value ?? ''}`.trim();
+        counter.textContent = String(clicks);
+      });
+    </script>
+  </body>
+</html>

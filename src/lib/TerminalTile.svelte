@@ -3,11 +3,11 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { FitAddon } from '@xterm/addon-fit';
   import { Terminal } from '@xterm/xterm';
+  import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import { readPaneOutput } from './tauri';
   import type { TerminalInfo, PtyOutputEvent } from './types';
   import {
-    agentActivityByPaneId,
     canvasState,
     clientDeltaToWorldDelta,
     mode,
@@ -18,6 +18,7 @@
     removeTerminal,
     selectTile,
     selectedTerminalId,
+    tileActivityById,
     updateTerminal,
     zoomCanvasToTile,
   } from './stores/appState';
@@ -37,21 +38,20 @@
   let syncFrame: number | null = null;
   let lastViewportKey = '';
   let unregisterDriverHandle: (() => void) | null = null;
-  let activityBodyRef = $state<HTMLDivElement>();
 
   let isSelected = $derived($selectedTerminalId === info.id);
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
-  let activityEntries = $derived($agentActivityByPaneId[info.paneId] ?? []);
+  let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
   let isRootAgentTile = $derived(info.kind === 'root_agent');
-  let isAgentTile = $derived(isRootAgentTile || info.kind === 'claude' || activityEntries.length > 0);
+  let isAgentTile = $derived(isRootAgentTile || info.kind === 'claude');
   let isBrowserTile = $derived(info.kind === 'browser');
   let canClose = $derived(true);
   let closeLabel = $derived(isRootAgentTile ? 'Close Root Agent' : 'Close Shell');
   let componentTypeLabel = $derived(
     isRootAgentTile ? 'ROOT' : info.readOnly ? 'VIEW' : info.kind === 'browser' ? 'WEB' : 'TTY',
   );
-  let activityCollapsed = $state(false);
+  let activityOpen = $state(false);
 
   let isDragging = false;
   let dragStartX = 0;
@@ -70,12 +70,6 @@
     const normalized = nextTextarea instanceof HTMLTextAreaElement ? nextTextarea : null;
     if (normalized === helperTextarea) return;
     helperTextarea = normalized;
-  }
-
-  function scrollActivityToBottom() {
-    requestAnimationFrame(() => {
-      if (activityBodyRef) activityBodyRef.scrollTop = activityBodyRef.scrollHeight;
-    });
   }
 
   onMount(async () => {
@@ -214,16 +208,6 @@
     }
   });
 
-  $effect(() => {
-    activityCollapsed;
-    activityEntries.length;
-    info.width;
-    info.height;
-    if (isAgentTile && !activityCollapsed) {
-      scrollActivityToBottom();
-    }
-  });
-
   function handleTitleDblClick(e: MouseEvent) {
     zoomCanvasToTile(info.paneId, window.innerWidth, window.innerHeight - 32);
     e.stopPropagation();
@@ -313,6 +297,7 @@
   class:kind-agent={isAgentTile}
   class:kind-root-agent={isRootAgentTile}
   class:kind-browser={isBrowserTile}
+  data-tile-id={info.tileId}
   style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
   onmousedown={(e) => {
     selectTile(info.id);
@@ -323,7 +308,7 @@
   }}
   oncontextmenu={handleContextMenu}
 >
-  <TilePorts tileId={info.paneId} />
+  <TilePorts tileId={info.tileId} />
   <div class="component-body">
     <div class="ic-notch"></div>
 
@@ -358,45 +343,38 @@
       <div class="input-shield" class:pass-through={$mode === 'input'}></div>
     </div>
 
-    {#if isAgentTile}
-      <div class="agent-activity" class:collapsed={activityCollapsed}>
-        <div class="activity-header">
-          <span>Activity</span>
-          <button
-            class="activity-toggle"
-            type="button"
-            title={activityCollapsed ? 'Expand activity' : 'Collapse activity'}
-            aria-label={activityCollapsed ? 'Expand activity' : 'Collapse activity'}
-            onclick={(event) => {
-              event.stopPropagation();
-              activityCollapsed = !activityCollapsed;
-            }}
-          >
-            {activityCollapsed ? '+' : '−'}
-          </button>
-        </div>
-        {#if !activityCollapsed}
-          <div class="activity-body" bind:this={activityBodyRef}>
-            {#if activityEntries.length === 0}
-              <div class="activity-line empty">No agent traffic yet</div>
-            {:else}
-              {#each activityEntries as entry, index (`${entry.timestamp_ms}:${index}`)}
-                <div class="activity-line">{entry.text}</div>
-              {/each}
-            {/if}
-          </div>
-        {/if}
-      </div>
+    {#if activityOpen}
+      <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
     {/if}
 
     <div class="info-strip">
-      <span class="info-item">
-        <span class="status-dot active"></span>
-        <span class="info-label">PID:{info.paneId.slice(0, 8)}</span>
-      </span>
-      <span class="info-item">
-        <span class="info-label">{info.width}×{info.height}</span>
-      </span>
+      <div class="info-cluster info-cluster-left">
+        <span class="info-item">
+          <span class="status-dot active"></span>
+          <span class="info-label">PID:{info.paneId.slice(0, 8)}</span>
+        </span>
+        <span class="info-item">
+          <span class="info-label">TILE:{info.tileId}</span>
+        </span>
+      </div>
+      <div class="info-cluster info-cluster-right">
+        <span class="info-item">
+          <span class="info-label">{info.width}×{info.height}</span>
+        </span>
+        <button
+          class="activity-toggle-btn"
+          class:active={activityOpen}
+          type="button"
+          title={activityOpen ? 'Hide activity log' : 'Show activity log'}
+          aria-label={activityOpen ? 'Hide activity log' : 'Show activity log'}
+          onclick={(event) => {
+            event.stopPropagation();
+            activityOpen = !activityOpen;
+          }}
+        >
+          ACT {activityEntries.length}
+        </button>
+      </div>
     </div>
   </div>
 
@@ -475,14 +453,28 @@
     border: 1px solid var(--component-border);
     position: relative;
     min-width: 0;
+    --activity-border: rgba(51, 255, 51, 0.22);
+    --activity-border-soft: rgba(51, 255, 51, 0.14);
+    --activity-accent: var(--phosphor-green);
+    --activity-text: var(--silk-dim);
+    --activity-empty: rgba(51, 255, 51, 0.54);
+    --activity-bg: rgba(8, 14, 8, 0.95);
   }
 
   .pcb-component.kind-agent .component-body {
     border-color: rgba(242, 176, 90, 0.34);
+    --activity-border: rgba(242, 176, 90, 0.22);
+    --activity-border-soft: rgba(242, 176, 90, 0.18);
+    --activity-accent: var(--copper);
+    --activity-empty: var(--copper-dim);
   }
 
   .pcb-component.kind-root-agent .component-body {
     border-color: rgba(255, 92, 92, 0.4);
+    --activity-border: rgba(255, 92, 92, 0.26);
+    --activity-border-soft: rgba(255, 92, 92, 0.18);
+    --activity-accent: #ff7b7b;
+    --activity-empty: rgba(255, 123, 123, 0.68);
   }
 
   .pcb-component.kind-browser .component-body {
@@ -668,78 +660,50 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     flex-shrink: 0;
     background: rgba(0, 0, 0, 0.2);
   }
 
-  .agent-activity {
-    flex: 0 0 96px;
-    min-height: 0;
-    margin: 0 8px 6px;
-    border: 1px solid rgba(242, 176, 90, 0.22);
-    background: rgba(8, 14, 8, 0.95);
-    display: flex;
-    flex-direction: column;
-  }
-
-  .agent-activity.collapsed {
-    flex: 0 0 auto;
-  }
-
-  .activity-header {
+  .info-cluster {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 4px 6px;
-    color: var(--copper);
-    font-family: var(--font-mono);
-    font-size: 9px;
-    letter-spacing: 0.7px;
-    text-transform: uppercase;
-    border-bottom: 1px solid rgba(242, 176, 90, 0.18);
+    gap: 8px;
+    min-width: 0;
   }
 
-  .activity-toggle {
-    width: 16px;
-    height: 16px;
-    border: 1px solid rgba(242, 176, 90, 0.22);
-    background: rgba(0, 0, 0, 0.18);
-    color: var(--copper);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0;
-  }
-
-  .activity-toggle:hover {
-    border-color: var(--copper);
-    background: rgba(242, 176, 90, 0.08);
-  }
-
-  .activity-body {
+  .info-cluster-left {
     flex: 1;
-    overflow-y: auto;
-    padding: 4px 6px 6px;
-    font-family: var(--font-mono);
-    font-size: 9px;
-    line-height: 1.45;
   }
 
-  .activity-line {
-    color: var(--silk-dim);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .activity-line.empty {
-    color: var(--copper-dim);
+  .info-cluster-right {
+    justify-content: flex-end;
+    flex-shrink: 0;
   }
 
   .info-item {
     display: flex;
     align-items: center;
     gap: 5px;
+    min-width: 0;
+  }
+
+  .activity-toggle-btn {
+    height: 16px;
+    padding: 0 6px;
+    border: 1px solid var(--activity-border);
+    background: rgba(0, 0, 0, 0.18);
+    color: var(--activity-accent);
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.6px;
+    cursor: pointer;
+  }
+
+  .activity-toggle-btn.active,
+  .activity-toggle-btn:hover {
+    border-color: var(--activity-accent);
+    background: color-mix(in srgb, var(--activity-accent) 10%, rgba(0, 0, 0, 0.18));
   }
 
   .info-label {

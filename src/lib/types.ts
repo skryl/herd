@@ -1,5 +1,6 @@
 export interface TerminalInfo {
   id: string;
+  tileId: string;
   paneId: string;
   windowId: string;
   parentWindowId?: string | null;
@@ -30,7 +31,7 @@ export type AgentRole = 'root' | 'worker';
 export type SidebarSection = 'settings' | 'work' | 'agents' | 'tmux';
 export type TilePort = 'left' | 'top' | 'right' | 'bottom';
 export type PortMode = 'read' | 'read_write';
-export type NetworkTileKind = 'agent' | 'root_agent' | 'shell' | 'output' | 'work' | 'browser';
+export type NetworkTileKind = 'agent' | 'root_agent' | 'shell' | 'work' | 'browser';
 export type WindowParentSource = 'hook' | 'manual';
 
 export interface AgentInfo {
@@ -66,6 +67,29 @@ export interface AgentLogEntry {
   timestamp_ms: number;
 }
 
+export type TileMessageChannel = 'cli' | 'socket' | 'mcp' | 'internal';
+export type TileMessageLogLayer = 'socket' | 'message' | 'network';
+export type TileMessageOutcome = 'ok' | 'not_found' | 'error';
+
+export interface TileMessageLogEntry {
+  session_id: string;
+  layer: TileMessageLogLayer;
+  channel: TileMessageChannel;
+  target_id: string;
+  target_kind: string;
+  wrapper_command: string;
+  message_name: string;
+  caller_agent_id?: string | null;
+  caller_tile_id?: string | null;
+  caller_window_id?: string | null;
+  args: unknown;
+  related_tile_ids: string[];
+  outcome: TileMessageOutcome;
+  error?: string | null;
+  duration_ms: number;
+  timestamp_ms: number;
+}
+
 export type WorkStage = 'plan' | 'prd' | 'artifact';
 export type WorkStageStatus = 'ready' | 'in_progress' | 'completed' | 'approved';
 export type WorkReviewDecision = 'approve' | 'improve';
@@ -73,7 +97,6 @@ export type WorkReviewDecision = 'approve' | 'improve';
 export interface WorkStageState {
   stage: WorkStage;
   status: WorkStageStatus;
-  file_path: string;
 }
 
 export interface WorkReviewEntry {
@@ -85,6 +108,7 @@ export interface WorkReviewEntry {
 
 export interface WorkItem {
   work_id: string;
+  tile_id: string;
   session_id: string;
   title: string;
   topic: string;
@@ -144,6 +168,27 @@ export interface WorkTileDetails {
 
 export type TileDetails = AgentTileDetails | PaneTileDetails | BrowserTileDetails | WorkTileDetails;
 
+export interface TileMessageArgSpec {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string | null;
+  enum_values?: string[];
+}
+
+export interface TileMessageSubcommandSpec {
+  name: string;
+  description?: string | null;
+  args?: TileMessageArgSpec[];
+}
+
+export interface TileMessageSpec {
+  name: string;
+  description?: string | null;
+  args?: TileMessageArgSpec[];
+  subcommands?: TileMessageSubcommandSpec[];
+}
+
 export interface SessionTileInfo {
   tile_id: string;
   session_id: string;
@@ -153,16 +198,70 @@ export interface SessionTileInfo {
   y: number;
   width: number;
   height: number;
-  pane_id?: string | null;
   window_id?: string | null;
   parent_window_id?: string | null;
   parent_window_source?: WindowParentSource | null;
   command?: string | null;
+  responds_to: string[];
+  message_api: TileMessageSpec[];
   details: TileDetails;
+}
+
+export interface ProjectedTerminalInfo {
+  id: string;
+  windowId: string;
+  parentWindowId?: string | null;
+  parentWindowSource?: WindowParentSource | null;
+  sessionId: string;
+  tabId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  title: string;
+  command: string;
+  readOnly?: boolean;
+  kind?: PaneKind;
+  agentId?: string | null;
+}
+
+export interface ProjectionSidebarTreeItem {
+  type: 'session' | 'window' | 'tile';
+  label: string;
+  indent: number;
+  sessionId?: string;
+  windowId?: string;
+  tileId?: string;
+  command?: string;
+  dead?: boolean;
+}
+
+export interface ProjectionCloseTileConfirmation {
+  tileId: string;
+  title: string;
+  message: string;
+  confirmLabel: string;
+}
+
+export type ProjectionContextMenuTarget = 'canvas' | 'tile';
+
+export interface ProjectionContextMenu {
+  target: ProjectionContextMenuTarget;
+  tile_id: string | null;
+  client_x: number;
+  client_y: number;
+  world_x: number | null;
+  world_y: number | null;
+  claude_commands: ClaudeCommandDescriptor[];
+  claude_skills: ClaudeCommandDescriptor[];
+  loading_claude_commands: boolean;
+  claude_commands_error: string | null;
+  items: ContextMenuItem[];
 }
 
 export interface TileGraph {
   session_id: string;
+  sender_tile_id?: string | null;
   tiles: SessionTileInfo[];
   connections: NetworkConnection[];
 }
@@ -184,14 +283,25 @@ export interface ChatterEntry {
   display_text: string;
 }
 
-export interface AgentActivityEntry {
-  kind: 'incoming_dm' | 'outgoing_dm' | 'outgoing_chatter' | 'mention' | 'topic' | 'incoming_hook' | 'outgoing_call';
+export interface TileActivityEntry {
+  kind:
+    | 'incoming_dm'
+    | 'outgoing_dm'
+    | 'outgoing_chatter'
+    | 'mention'
+    | 'topic'
+    | 'incoming_hook'
+    | 'outgoing_call'
+    | 'socket_log'
+    | 'message_log'
+    | 'network_log';
   text: string;
   timestamp_ms: number;
 }
 
 export interface WorkCanvasCard {
   workId: string;
+  tileId: string;
   x: number;
   y: number;
   width: number;
@@ -203,6 +313,7 @@ export interface AgentDebugState {
   topics: TopicInfo[];
   chatter: ChatterEntry[];
   agent_logs: AgentLogEntry[];
+  tile_message_logs: TileMessageLogEntry[];
   connections: NetworkConnection[];
 }
 
@@ -299,6 +410,7 @@ export interface TmuxSession {
 
 export interface TmuxWindow {
   id: string;
+  tile_id?: string | null;
   session_id: string;
   session_name: string;
   index: number;
@@ -313,6 +425,8 @@ export interface TmuxWindow {
 
 export interface TmuxPane {
   id: string;
+  tile_id?: string | null;
+  role?: PaneKind | null;
   session_id: string;
   window_id: string;
   window_index: number;
@@ -399,6 +513,7 @@ export interface AppStateTree {
   topics: Record<string, TopicInfo>;
   chatter: ChatterEntry[];
   agentLogs: AgentLogEntry[];
+  tileMessageLogs: TileMessageLogEntry[];
   network: {
     connections: NetworkConnection[];
   };
@@ -449,18 +564,18 @@ export type TestDriverRequest =
   | { type: 'sidebar_select_item'; index: number }
   | { type: 'sidebar_move_selection'; delta: number }
   | { type: 'sidebar_begin_rename' }
-  | { type: 'tile_select'; pane_id: string }
-  | { type: 'tile_close'; pane_id: string }
-  | { type: 'tile_drag'; pane_id: string; dx: number; dy: number }
-  | { type: 'tile_resize'; pane_id: string; width: number; height: number }
-  | { type: 'tile_title_double_click'; pane_id: string; viewport_width?: number; viewport_height?: number }
+  | { type: 'tile_select'; tile_id: string }
+  | { type: 'tile_close'; tile_id: string }
+  | { type: 'tile_drag'; tile_id: string; dx: number; dy: number }
+  | { type: 'tile_resize'; tile_id: string; width: number; height: number }
+  | { type: 'tile_title_double_click'; tile_id: string; viewport_width?: number; viewport_height?: number }
   | { type: 'canvas_pan'; dx: number; dy: number }
   | { type: 'canvas_context_menu'; client_x: number; client_y: number }
   | { type: 'canvas_zoom_at'; x: number; y: number; zoom_factor: number }
   | { type: 'canvas_wheel'; delta_y: number; client_x: number; client_y: number }
   | { type: 'canvas_fit_all'; viewport_width?: number; viewport_height?: number }
   | { type: 'canvas_reset' }
-  | { type: 'tile_context_menu'; pane_id: string; client_x: number; client_y: number }
+  | { type: 'tile_context_menu'; tile_id: string; client_x: number; client_y: number }
   | { type: 'context_menu_select'; item_id: string }
   | { type: 'context_menu_dismiss' }
   | { type: 'confirm_close_tab' }
@@ -488,36 +603,25 @@ export interface TestDriverProjection {
     open: boolean;
     section: SidebarSection;
     selected_index: number;
-    items: SidebarTreeItem[];
+    items: ProjectionSidebarTreeItem[];
   };
   close_tab_confirmation: CloseTabConfirmation | null;
-  close_pane_confirmation: ClosePaneConfirmation | null;
-  context_menu: {
-    target: ContextMenuTarget;
-    pane_id: string | null;
-    client_x: number;
-    client_y: number;
-    world_x: number | null;
-    world_y: number | null;
-    claude_commands: ClaudeCommandDescriptor[];
-    claude_skills: ClaudeCommandDescriptor[];
-    loading_claude_commands: boolean;
-    claude_commands_error: string | null;
-    items: ContextMenuItem[];
-  } | null;
-  selected_pane_id: string | null;
+  close_pane_confirmation: ProjectionCloseTileConfirmation | null;
+  context_menu: ProjectionContextMenu | null;
+  selected_tile_id: string | null;
   selected_work_id: string | null;
   debug_tab: DebugTab;
   agents: AgentInfo[];
   topics: TopicInfo[];
   chatter: ChatterEntry[];
   agent_logs: AgentLogEntry[];
-  agent_activity_by_pane: Record<string, AgentActivityEntry[]>;
+  tile_message_logs: TileMessageLogEntry[];
+  tile_activity_by_id: Record<string, TileActivityEntry[]>;
   work_items: WorkItem[];
   canvas: CanvasState;
   tabs: Tab[];
   active_tab_id: string | null;
-  active_tab_terminals: TerminalInfo[];
+  active_tab_terminals: ProjectedTerminalInfo[];
   active_tab_connections: Array<{
     child_window_id: string;
     parent_window_id: string;

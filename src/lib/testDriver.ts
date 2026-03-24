@@ -19,6 +19,7 @@ import {
   panCanvasBy,
   openCanvasContextMenu,
   openPaneContextMenu,
+  paneIdForTileId,
   refreshWorkItems,
   removeTerminal,
   resizeTileTo,
@@ -82,6 +83,14 @@ async function waitForIdle(timeoutMs = 10_000, settleMs = 150): Promise<void> {
 }
 
 async function executeRequest(request: TestDriverRequest): Promise<unknown> {
+  const resolvePaneId = (tileId: string) => {
+    const paneId = paneIdForTileId(get(appState), tileId);
+    if (!paneId) {
+      throw new Error(`no backing pane found for tile ${tileId}`);
+    }
+    return paneId;
+  };
+
   switch (request.type) {
     case 'ping':
       return { pong: true };
@@ -152,19 +161,19 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
       beginSidebarRename();
       return null;
     case 'tile_select':
-      selectTile(request.pane_id);
+      selectTile(resolvePaneId(request.tile_id));
       return null;
     case 'tile_close':
-      removeTerminal(request.pane_id);
+      removeTerminal(resolvePaneId(request.tile_id));
       return null;
     case 'tile_drag':
-      await dragTileBy(request.pane_id, request.dx, request.dy);
+      await dragTileBy(resolvePaneId(request.tile_id), request.dx, request.dy);
       return null;
     case 'tile_resize':
-      await resizeTileTo(request.pane_id, request.width, request.height);
+      await resizeTileTo(resolvePaneId(request.tile_id), request.width, request.height);
       return null;
     case 'tile_title_double_click':
-      zoomCanvasToTile(request.pane_id, request.viewport_width, request.viewport_height);
+      zoomCanvasToTile(resolvePaneId(request.tile_id), request.viewport_width, request.viewport_height);
       return null;
     case 'canvas_pan':
       panCanvasBy(request.dx, request.dy);
@@ -188,7 +197,7 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
       await dispatchIntent({ type: 'reset-canvas' });
       return null;
     case 'tile_context_menu':
-      openPaneContextMenu(request.pane_id, request.client_x, request.client_y);
+      openPaneContextMenu(resolvePaneId(request.tile_id), request.client_x, request.client_y);
       return null;
     case 'context_menu_select':
       await selectContextMenuItem(request.item_id);

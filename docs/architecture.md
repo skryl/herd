@@ -68,7 +68,6 @@ Herd currently renders these tile kinds:
 - Root Agent
 - Browser
 - Work
-- Output
 
 Terminal-backed tiles map to a tmux window and primary pane. Work tiles are registry-backed and do not map to tmux panes.
 
@@ -140,7 +139,7 @@ Each port has a mode:
 
 Current port rules:
 
-- Agent, Root Agent, Shell, Output
+- Agent, Root Agent, Shell
   - all 4 ports are `read_write`
 - Work, Browser
   - `left = read_write`
@@ -206,7 +205,9 @@ Workers are normal session agents.
 
 Properties:
 
-- message-oriented MCP surface
+- worker-safe local-network MCP surface
+- browser tile automation through `network_call` with browser action `drive`
+- direct access only to visible local-network `shell` and `browser` tiles
 - no direct access to privileged Herd actions through MCP
 - expected to ask Root for privileged actions
 
@@ -229,8 +230,9 @@ Workers get:
 - `message_public`
 - `message_network`
 - `message_root`
-- `sudo`
 - `network_list`
+- `network_get`
+- `network_call`
 
 ### Root MCP surface
 
@@ -238,8 +240,9 @@ Root gets the worker tools plus the full session control surface:
 
 - shell tools
 - browser tools
-- agent and topic listing
+- topic listing and session-scoped tile discovery
 - session and network mutation tools
+- work inspection and work-stage tools
 - work inspection and work-stage tools
 
 ### Backend permission boundary
@@ -249,6 +252,7 @@ The MCP tool restriction is not the only guardrail. The Rust socket backend also
 Meaning:
 
 - workers should not be able to gain privileged behavior by bypassing MCP and talking to the socket directly as agents
+- workers may directly inspect visible local-network `shell` and `browser` tiles and use only the worker-safe generic tile-message subset on them
 - privileged session mutations still require Root or user-originated paths
 
 ## Messaging Model
@@ -306,7 +310,7 @@ Root messages go only to the current session Root agent.
 - socket command: `message_root`
 - CLI: `herd message root ...`
 - MCP: `message_root`
-- alias: `sudo`
+- CLI alias: `sudo`
 - chatter display: `Sender -> Root: message`
 
 ### Sender identities
@@ -394,11 +398,7 @@ Stages are ordered:
 - `prd`
 - `artifact`
 
-Each stage has a markdown workspace file:
-
-- `work/session-<n>/<work-id>/plan.md`
-- `work/session-<n>/<work-id>/prd.md`
-- `work/session-<n>/<work-id>/artifact.md`
+Each stage has SQLite-backed markdown content stored alongside its workflow state.
 
 ### Statuses
 
@@ -442,10 +442,8 @@ SQLite stores:
 - topics
 - chatter
 - agent logs
-- work metadata
+- work metadata and stage content
 - network connections
-
-On-disk markdown files under `work/` store the editable work-stage content, but SQLite remains the source of truth for registry metadata and workflow status.
 
 ## UI Surfaces
 
@@ -482,7 +480,7 @@ The sidebar is compact and selection-oriented. The canvas is the detailed spatia
 1. Worker receives a message over the Claude channel.
 2. Worker interprets the message kind and `replay` flag.
 3. Worker replies with Herd message tools, not plain assistant text, if the reply should be visible.
-4. If the task requires privileged Herd operations, the worker escalates to Root with `message_root` or `sudo`.
+4. If the task requires privileged Herd operations, the worker escalates to Root with `message_root`.
 
 ### Work ownership
 

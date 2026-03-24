@@ -195,9 +195,25 @@
           <path
             d={`M ${conn.x1} ${conn.y1} C ${conn.cx1} ${conn.cy1}, ${conn.cx2} ${conn.cy2}, ${conn.x2} ${conn.y2}`}
             class="network-line"
+            class:network-line-read-only={conn.wireMode === 'read_only'}
+            class:network-line-full-duplex={conn.wireMode === 'full_duplex'}
           />
-          <circle cx={conn.x1} cy={conn.y1} r="4" class="network-dot" />
-          <circle cx={conn.x2} cy={conn.y2} r="4" class="network-dot" />
+          <circle
+            cx={conn.x1}
+            cy={conn.y1}
+            r="4"
+            class="network-dot"
+            class:network-dot-read-only={conn.wireMode === 'read_only'}
+            class:network-dot-full-duplex={conn.wireMode === 'full_duplex'}
+          />
+          <circle
+            cx={conn.x2}
+            cy={conn.y2}
+            r="4"
+            class="network-dot"
+            class:network-dot-read-only={conn.wireMode === 'read_only'}
+            class:network-dot-full-duplex={conn.wireMode === 'full_duplex'}
+          />
         {/each}
       </svg>
     {/if}
@@ -363,13 +379,25 @@
 
   .network-line {
     fill: none;
-    stroke: rgba(92, 200, 255, 0.78);
     stroke-width: 2.5;
+  }
+
+  .network-line-read-only {
+    stroke: rgba(92, 200, 255, 0.8);
     filter: drop-shadow(0 0 6px rgba(92, 200, 255, 0.28));
   }
 
-  .network-dot {
+  .network-dot-read-only {
     fill: rgba(92, 200, 255, 0.96);
+  }
+
+  .network-line-full-duplex {
+    stroke: rgba(240, 184, 92, 0.82);
+    filter: drop-shadow(0 0 6px rgba(240, 184, 92, 0.28));
+  }
+
+  .network-dot-full-duplex {
+    fill: rgba(247, 203, 136, 0.96);
   }
 
   .network-draft-svg {

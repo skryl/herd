@@ -10,9 +10,8 @@ const VIEWPORT_HEIGHT = 846;
 async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
   const before = await client.getProjection();
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
-  await client.sendCommand({
-    command: 'shell_create',
-    parent_session_id: before.active_tab_id,
+  await client.tileCreate('shell', {
+    parentSessionId: before.active_tab_id,
   });
   const projection = await waitFor(
     'shell create in active tab',
@@ -55,12 +54,58 @@ describe.sequential('in-app test driver', () => {
 
     const projection = await client.getProjection();
     const state = await client.getStateTree();
+    const selectedPane = state.ui.selectedPaneId ? state.tmux.panes[state.ui.selectedPaneId] : null;
+    const selectedTileId = selectedPane
+      ? (selectedPane.tile_id ?? state.tmux.windows[selectedPane.window_id]?.tile_id ?? null)
+      : null;
     expect(projection.active_tab_id).toBe(state.tmux.activeSessionId);
     expect(projection.active_tab_terminals.length).toBeGreaterThan(0);
-    expect(projection.selected_pane_id).toBe(state.ui.selectedPaneId);
+    expect(projection.selected_tile_id).toBe(selectedTileId);
     expect(projection.sidebar.items.length).toBeGreaterThan(0);
     expect(projection.indicators.sock).toBe(true);
     expect(projection.context_menu).toBeNull();
+  });
+
+  it('routes test socket commands through the herd receiver', async () => {
+    const ping = await client.ping();
+    expect(ping.pong).toBe(true);
+
+    const domQuery = await client.testDomQuery<{ ok: boolean }>(`return { ok: true };`);
+    expect(domQuery.ok).toBe(true);
+
+    await client.testDomKeys('F13');
+
+    const projection = await waitFor(
+      'herd receiver logs for test socket commands',
+      () => client.getProjection(),
+      (nextProjection) =>
+        ['test_driver', 'test_dom_query', 'test_dom_keys'].every((wrapperCommand) =>
+          nextProjection.tile_message_logs.some(
+            (entry) =>
+              entry.channel === 'socket'
+              && entry.layer === 'socket'
+              && entry.target_kind === 'herd'
+              && entry.target_id === runtime.runtimeId
+              && entry.wrapper_command === wrapperCommand,
+          )
+          && nextProjection.tile_message_logs.some(
+            (entry) =>
+              entry.channel === 'socket'
+              && entry.layer === 'message'
+              && entry.target_kind === 'herd'
+              && entry.target_id === runtime.runtimeId
+              && entry.wrapper_command === wrapperCommand,
+          ),
+        ),
+      30_000,
+      150,
+    );
+
+    expect(
+      projection.tile_message_logs
+        .filter((entry) => entry.target_kind === 'herd' && entry.target_id === runtime.runtimeId)
+        .map((entry) => entry.wrapper_command),
+    ).toEqual(expect.arrayContaining(['test_driver', 'test_dom_query', 'test_dom_keys']));
   });
 
   it('renders canvas tiles for the active tab and opens the debug pane', async () => {
@@ -103,9 +148,8 @@ describe.sequential('in-app test driver', () => {
     expect(debug.tabs).toEqual(['Info', 'Logs', 'Chatter']);
   });
 
-  it('surfaces agent log entries in the per-pane activity projection', async () => {
-    const initial = await client.getProjection();
-    const paneId = initial.selected_pane_id ?? initial.active_tab_terminals[0]?.id;
+  it('surfaces agent messaging activity in the per-pane activity projection', async () => {
+    const paneId = await spawnShellInActiveTab(client);
     expect(paneId).toBeTruthy();
 
     await client.agentRegister('agent-log-test', paneId!, 'Activity Agent');
@@ -121,44 +165,106 @@ describe.sequential('in-app test driver', () => {
     expect(agent).toBeTruthy();
     await client.agentPingAck('agent-log-test');
 
-    await client.sendCommand({
-      command: 'agent_log_append',
-      agent_id: 'agent-log-test',
-      kind: 'incoming_hook',
-      text: `MCP hook [system] Port connected: ${paneId}:left <-> work:work-s1-001:left`,
-    });
-    await client.sendCommand({
-      command: 'agent_log_append',
-      agent_id: 'agent-log-test',
-      kind: 'outgoing_call',
-      text: 'MCP call message_direct {"to_agent_id":"agent-2","message":"hello"}',
-    });
+    await client.messagePublic('activity projection topic', paneId!, ['#activity']);
 
     const projection = await waitFor(
-      'agent log activity projection',
+      'agent activity projection',
       () => client.getProjection(),
       (nextProjection) =>
-        nextProjection.agent_logs.some(
-          (entry) => entry.agent_id === 'agent-log-test' && entry.kind === 'incoming_hook',
-        )
-        && (nextProjection.agent_activity_by_pane[paneId!] ?? []).some(
-          (entry) => entry.kind === 'incoming_hook',
-        )
-        && (nextProjection.agent_activity_by_pane[paneId!] ?? []).some(
-          (entry) => entry.kind === 'outgoing_call',
+        (nextProjection.tile_activity_by_id[paneId!] ?? []).some(
+          (entry) => entry.kind === 'outgoing_chatter',
         ),
       30_000,
       150,
     );
 
-    expect(projection.agent_activity_by_pane[paneId!]?.map((entry) => entry.kind)).toContain('incoming_hook');
-    expect(projection.agent_activity_by_pane[paneId!]?.map((entry) => entry.kind)).toContain('outgoing_call');
+    expect(projection.tile_activity_by_id[paneId!]?.map((entry) => entry.kind)).toContain('outgoing_chatter');
+
+    await client.testDomQuery(`
+      document
+        .querySelector('[data-tile-id="${paneId!}"] .activity-toggle-btn')
+        ?.click();
+      return true;
+    `);
+
+    const drawerVisible = await waitFor(
+      'tile activity drawer visible',
+      () => client.testDomQuery<boolean>(`
+        return Boolean(
+          document.querySelector('[data-tile-id="${paneId!}"] .tile-activity .activity-line')
+        );
+      `),
+      Boolean,
+      30_000,
+      150,
+    );
+    expect(drawerVisible).toBe(true);
+  });
+
+  it('clears persisted logs from the debug pane', async () => {
+    const probeMessage = `debug clear log probe ${Date.now()}`;
+    await client.messagePublic(probeMessage);
+
+    await client.pressKeys([{ key: 'd' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+
+    await waitFor(
+      'logs appear before clear',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.chatter.some((entry) => entry.message === probeMessage)
+        && nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.wrapper_command === 'message_public'
+            && (entry.args as { message?: string } | undefined)?.message === probeMessage,
+        ),
+      30_000,
+      150,
+    );
+
+    const clearBoundaryMs = Date.now() - 100;
+    await client.testDomQuery(`
+      document.querySelector('[data-debug-action="clear-logs"]')?.click();
+      return true;
+    `);
+
+    const projection = await waitFor(
+      'pre-clear logs removed from projection',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.chatter.every((entry) => entry.timestamp_ms >= clearBoundaryMs)
+        && nextProjection.agent_logs.every((entry) => entry.timestamp_ms >= clearBoundaryMs)
+        && nextProjection.tile_message_logs.every((entry) => entry.timestamp_ms >= clearBoundaryMs)
+        && !nextProjection.chatter.some(
+          (entry) => entry.message === probeMessage || entry.display_text.includes(probeMessage),
+        )
+        && !nextProjection.tile_message_logs.some(
+          (entry) =>
+            (entry.args as { message?: string } | undefined)?.message === probeMessage
+            || JSON.stringify(entry.args).includes(probeMessage)
+            || entry.error?.includes(probeMessage),
+        ),
+      30_000,
+      150,
+    );
+
+    expect(projection.chatter.every((entry) => entry.timestamp_ms >= clearBoundaryMs)).toBe(true);
+    expect(projection.agent_logs.every((entry) => entry.timestamp_ms >= clearBoundaryMs)).toBe(true);
+    expect(projection.tile_message_logs.every((entry) => entry.timestamp_ms >= clearBoundaryMs)).toBe(true);
+    expect(projection.chatter.some((entry) => entry.message === probeMessage)).toBe(false);
+    expect(
+      projection.tile_message_logs.some(
+        (entry) =>
+          (entry.args as { message?: string } | undefined)?.message === probeMessage
+          || JSON.stringify(entry.args).includes(probeMessage)
+          || entry.error?.includes(probeMessage),
+      ),
+    ).toBe(false);
   });
 
   it('opens and dismisses typed context menus for the canvas and the selected tile', async () => {
     let projection = await client.getProjection();
-    const selectedPaneId = projection.selected_pane_id;
-    expect(selectedPaneId).toBeTruthy();
+    const selectedTileId = projection.selected_tile_id;
+    expect(selectedTileId).toBeTruthy();
 
     await client.canvasContextMenu(240, 180);
     projection = await client.getProjection();
@@ -174,10 +280,10 @@ describe.sequential('in-app test driver', () => {
     projection = await client.getProjection();
     expect(projection.context_menu).toBeNull();
 
-    await client.tileContextMenu(selectedPaneId!, 480, 260);
+    await client.driverTileContextMenu(selectedTileId!, 480, 260);
     projection = await client.getProjection();
-    expect(projection.context_menu?.target).toBe('pane');
-    expect(projection.context_menu?.pane_id).toBe(selectedPaneId);
+    expect(projection.context_menu?.target).toBe('tile');
+    expect(projection.context_menu?.tile_id).toBe(selectedTileId);
     expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close Shell']);
   });
 
@@ -203,7 +309,7 @@ describe.sequential('in-app test driver', () => {
     expect(createdTile.x).toBeGreaterThanOrEqual(120);
     expect(createdTile.y).toBeGreaterThanOrEqual(90);
 
-    await client.tileContextMenu(createdTile.id, 640, 320);
+    await client.driverTileContextMenu(createdTile.id, 640, 320);
     projection = await client.getProjection();
     expect(projection.context_menu?.items.some((item) => item.id === 'close-shell')).toBe(true);
 
@@ -220,7 +326,7 @@ describe.sequential('in-app test driver', () => {
 
   it('shows Claude commands only for Agent tiles and dispatches execute vs insert correctly', async () => {
     let projection = await createIsolatedTab(client, 'claude-menu');
-    const paneId = projection.selected_pane_id;
+    const paneId = await spawnShellInActiveTab(client);
     expect(paneId).toBeTruthy();
 
     await client.execInShell(paneId!, 'exec cat -vet');
@@ -230,12 +336,12 @@ describe.sequential('in-app test driver', () => {
     await client.setTileRole(paneId!, 'claude');
     await client.waitForIdle();
 
-    await client.tileContextMenu(paneId!, 420, 240);
+    await client.driverTileContextMenu(paneId!, 420, 240);
     projection = await waitFor(
       'Agent tile Claude commands',
       () => client.getProjection(),
       (nextProjection) =>
-        nextProjection.context_menu?.pane_id === paneId
+        nextProjection.context_menu?.tile_id === paneId
         && nextProjection.context_menu.loading_claude_commands === false
         && nextProjection.context_menu.items.some((item) => item.id === 'claude-skills')
         && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear')
@@ -261,12 +367,12 @@ describe.sequential('in-app test driver', () => {
     expect(output.output).toContain('/model ');
     expect(output.output).not.toContain('^M');
 
-    await client.tileContextMenu(paneId!, 420, 240);
+    await client.driverTileContextMenu(paneId!, 420, 240);
     await waitFor(
       'Agent tile Claude commands reopen',
       () => client.getProjection(),
       (nextProjection) =>
-        nextProjection.context_menu?.pane_id === paneId
+        nextProjection.context_menu?.tile_id === paneId
         && nextProjection.context_menu.loading_claude_commands === false
         && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear'),
       30_000,
@@ -277,12 +383,12 @@ describe.sequential('in-app test driver', () => {
     await client.waitForIdle(30_000, 250);
     await client.readOutput(paneId!);
 
-    await client.tileContextMenu(paneId!, 420, 240);
+    await client.driverTileContextMenu(paneId!, 420, 240);
     await waitFor(
       'Agent tile Claude commands after reset',
       () => client.getProjection(),
       (nextProjection) =>
-        nextProjection.context_menu?.pane_id === paneId
+        nextProjection.context_menu?.tile_id === paneId
         && nextProjection.context_menu.loading_claude_commands === false
         && nextProjection.context_menu.items.some((item) => item.id === 'claude-command:clear'),
       30_000,
@@ -301,7 +407,7 @@ describe.sequential('in-app test driver', () => {
 
     await client.setTileRole(paneId!, 'output');
     await client.waitForIdle();
-    await client.tileContextMenu(paneId!, 420, 240);
+    await client.driverTileContextMenu(paneId!, 420, 240);
     projection = await client.getProjection();
     expect(projection.context_menu?.items).toEqual([
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
@@ -312,7 +418,7 @@ describe.sequential('in-app test driver', () => {
 
   it('covers mode, help, sidebar, command bar, and tab creation through the typed driver', async () => {
     let projection = await client.getProjection();
-    const paneId = projection.selected_pane_id;
+    const paneId = projection.selected_tile_id;
     expect(paneId).toBeTruthy();
 
     await client.pressKeys([{ key: '?' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
@@ -711,7 +817,7 @@ describe.sequential('in-app test driver', () => {
 
   it('uses Shift+J/K to focus sidebar sections and j/k to select work and agent items on the canvas', async () => {
     let projection = await createIsolatedTab(client, 'sidebar-focus');
-    const paneId = projection.selected_pane_id!;
+    const paneId = projection.selected_tile_id!;
 
     const firstWork = await client.toolbarSpawnWork('Focus Work A');
     const secondWork = await client.toolbarSpawnWork('Focus Work B');
@@ -732,7 +838,7 @@ describe.sequential('in-app test driver', () => {
     projection = await waitFor(
       'agents sidebar section focus',
       () => client.getProjection(),
-      (nextProjection) => nextProjection.sidebar.section === 'agents' && nextProjection.selected_pane_id === paneId,
+      (nextProjection) => nextProjection.sidebar.section === 'agents' && nextProjection.selected_tile_id === paneId,
       30_000,
       150,
     );
@@ -774,7 +880,7 @@ describe.sequential('in-app test driver', () => {
     projection = await waitFor(
       'return to agents sidebar section',
       () => client.getProjection(),
-      (nextProjection) => nextProjection.sidebar.section === 'agents' && nextProjection.selected_pane_id === paneId,
+      (nextProjection) => nextProjection.sidebar.section === 'agents' && nextProjection.selected_tile_id === paneId,
       30_000,
       150,
     );
@@ -790,7 +896,7 @@ describe.sequential('in-app test driver', () => {
     expect(projection.active_tab_id).toBe(createdSessionId);
     expect(projection.active_tab_terminals).toHaveLength(1);
 
-    const firstPaneId = projection.selected_pane_id;
+    const firstPaneId = projection.selected_tile_id;
     expect(firstPaneId).toBeTruthy();
 
     await client.pressKeys([{ key: 's' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
@@ -808,9 +914,9 @@ describe.sequential('in-app test driver', () => {
 
     await client.pressKeys([{ key: 'n' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     projection = await client.getProjection();
-    expect(projection.selected_pane_id).not.toBe(firstPaneId);
+    expect(projection.selected_tile_id).not.toBe(firstPaneId);
 
-    const cycledPaneId = projection.selected_pane_id;
+    const cycledPaneId = projection.selected_tile_id;
     expect(cycledPaneId).toBeTruthy();
     const beforeTile = terminalById(projection.active_tab_terminals, cycledPaneId!);
 
@@ -830,14 +936,14 @@ describe.sequential('in-app test driver', () => {
     expect(projection.command_bar.text.length).toBeGreaterThan(0);
     await client.commandBarCancel();
 
-    await client.tileDrag(cycledPaneId!, 80, 40);
+    await client.driverTileDrag(cycledPaneId!, 80, 40);
     await client.waitForIdle();
     projection = await client.getProjection();
     const draggedTile = terminalById(projection.active_tab_terminals, cycledPaneId!);
     expect(draggedTile.x).toBe(beforeTile.x + 80);
     expect(draggedTile.y).toBe(beforeTile.y + 40);
 
-    await client.tileResize(cycledPaneId!, beforeTile.width + 120, beforeTile.height + 80);
+    await client.driverTileResize(cycledPaneId!, beforeTile.width + 120, beforeTile.height + 80);
     await client.waitForIdle(30_000, 250);
     projection = await client.getProjection();
     const resizedTile = terminalById(projection.active_tab_terminals, cycledPaneId!);
@@ -853,7 +959,7 @@ describe.sequential('in-app test driver', () => {
     projection = await client.getProjection();
     expect(projection.canvas.zoom).toBeGreaterThan(beforeCanvas.zoom);
 
-    await client.tileTitleDoubleClick(cycledPaneId!, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    await client.driverTileTitleDoubleClick(cycledPaneId!, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     projection = await client.getProjection();
     expect(projection.canvas.zoom).toBeGreaterThan(1);
 
@@ -914,5 +1020,40 @@ describe.sequential('in-app test driver', () => {
     expect(projection.tabs.some((tab) => tab.id === activeSessionId)).toBe(false);
     expect(projection.indicators.tmux).toBe(true);
     expect(projection.indicators.cc).toBe(true);
+  });
+
+  it('replaces the last closed session with a root-agent session', async () => {
+    const isolatedRuntime = await startIntegrationRuntime();
+    const isolatedClient = isolatedRuntime.client;
+
+    try {
+      let projection = await isolatedClient.getProjection();
+      const initialSessionId = projection.active_tab_id;
+      expect(initialSessionId).toBeTruthy();
+      expect(projection.tabs).toHaveLength(1);
+      expect(projection.active_tab_terminals).toHaveLength(1);
+      expect(projection.active_tab_terminals[0]?.kind).toBe('root_agent');
+
+      await isolatedClient.commandBarOpen();
+      await isolatedClient.commandBarSetText('tc');
+      await isolatedClient.commandBarSubmit();
+      await isolatedClient.waitForIdle(60_000, 250);
+
+      projection = await waitFor(
+        'replacement session after last tab close',
+        () => isolatedClient.getProjection(),
+        (nextProjection) =>
+          nextProjection.tabs.length === 1
+          && nextProjection.active_tab_id !== initialSessionId
+          && nextProjection.active_tab_terminals.length === 1
+          && nextProjection.active_tab_terminals[0]?.kind === 'root_agent',
+        60_000,
+        250,
+      );
+
+      expect(projection.active_tab_terminals[0]?.kind).toBe('root_agent');
+    } finally {
+      await isolatedRuntime.stop();
+    }
   });
 });

@@ -1,6 +1,6 @@
 ---
 name: herd
-description: Control the local Herd runtime through the supported herd CLI. Worker agents are message-only; the session Root agent can use the full surface.
+description: Control the local Herd runtime through the supported herd CLI. Workers can message plus inspect and operate visible local-network shell/browser tiles; Root can use the full surface.
 ---
 
 # Herd
@@ -32,7 +32,7 @@ Inside Herd-managed Agent tiles, `HERD_AGENT_ID`, `HERD_AGENT_ROLE`, and `HERD_S
 Every session has one Root agent and zero or more worker agents.
 
 - Root agents can use the full Herd CLI and MCP surface.
-- Worker agents are message-only.
+- Worker agents can message plus inspect and operate visible local-network `shell` and `browser` tiles.
 - If you are not Root, ask Root to do privileged Herd operations for you.
 
 Check your role with:
@@ -43,7 +43,7 @@ printf 'agent=%s role=%s\n' "${HERD_AGENT_ID:-unknown}" "${HERD_AGENT_ROLE:-work
 
 ## Worker Commands
 
-If `HERD_AGENT_ROLE` is not `root`, use only these commands:
+If `HERD_AGENT_ROLE` is not `root`, use these commands:
 
 ```bash
 "$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
@@ -60,6 +60,21 @@ If `HERD_AGENT_ROLE` is not `root`, use only these commands:
 
 "$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
   sudo "Please list local work items and assign me something useful."
+
+"$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
+  network list
+
+"$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
+  network get %12
+
+"$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
+  browser drive %12 dom_query '{"js":"document.title"}'
+
+"$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
+  tile call %12 output_read
+
+"$HERD_BIN" --agent-pid "${CLAUDE_AGENT_PID:-${CLAUDE_PID:-$PPID}}" \
+  tile call %12 input_send '{"input":"pwd\n"}'
 ```
 
 Notes:
@@ -68,6 +83,10 @@ Notes:
 - `message network` sends to the other agents on your current local network.
 - `message root` sends only to the Root agent for your current session.
 - `sudo` is a shortcut for `message root`.
+- `network list` and `network get` are the discoverability path for worker-safe local-network tools.
+- `browser drive` is the supported way to click, type, query, or evaluate inside a visible local-network browser tile.
+- `tile call` is only for the actions listed in a tile's `allowed_actions`.
+- In v1, worker `tile call` is limited to visible local-network `shell` and `browser` tiles.
 - Use `@agent_id` mentions and `#topic` tags in public messages when useful.
 
 ## Message Channel Model
@@ -112,6 +131,9 @@ Operational rules:
 - Prefer `message direct` for one-to-one requests, reviews, and handoffs.
 - Prefer `message public` for session-visible status and coordination.
 - Prefer `message network` for agents on your current connected tile graph.
+- Use `network list` or `network get` before calling a local-network tool.
+- Use `browser drive` for browser-page DOM interaction.
+- Use `tile call` only for actions explicitly advertised by that tile.
 - Prefer `message root` or `sudo` when you need Root to inspect or act.
 - If an incoming message is ambiguous, inspect the sender, channel kind, and `replay` flag before acting.
 
@@ -165,7 +187,7 @@ When Herd signs you on, it sends:
 Expected workflow:
 
 1. Review the `/herd` skill.
-2. If you are a worker, inspect recent public activity and ask Root for local work or state as needed.
+2. If you are a worker, inspect recent public activity, inspect your local network, and use `tile call` for visible local-network shell/browser tools when useful.
 3. If you are Root, inspect the local session directly with `list ...` and `work ...`.
 4. Coordinate through direct, public, network, and root messages.
 
@@ -173,5 +195,5 @@ Expected workflow:
 
 - Do not use raw `socat` socket calls when the `herd` CLI can do the job.
 - Do not target DMs by tile ID; direct messages target `agent_id`.
-- Do not assume a worker agent can call `list`, `shell`, `topic`, or `work` commands directly.
+- Do not assume a worker agent can call `list`, `shell`, `topic`, or `work` commands directly outside the worker-safe `network list`, `network get`, and `tile call` path.
 - Do not assume you are alone in the current session; coordinate through messages or Root.

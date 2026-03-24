@@ -202,6 +202,10 @@ export async function tmuxStatus(): Promise<{ server: boolean; cc: boolean }> {
   return invoke<{ server: boolean; cc: boolean }>('tmux_status');
 }
 
+export async function clearDebugLogs(): Promise<void> {
+  return invoke('clear_debug_logs');
+}
+
 export async function setTestDriverState(options: {
   frontendReady?: boolean;
   bootstrapComplete?: boolean;

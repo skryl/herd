@@ -70,23 +70,23 @@ pub enum TestDriverRequest {
     },
     SidebarBeginRename,
     TileSelect {
-        pane_id: String,
+        tile_id: String,
     },
     TileClose {
-        pane_id: String,
+        tile_id: String,
     },
     TileDrag {
-        pane_id: String,
+        tile_id: String,
         dx: f64,
         dy: f64,
     },
     TileResize {
-        pane_id: String,
+        tile_id: String,
         width: f64,
         height: f64,
     },
     TileTitleDoubleClick {
-        pane_id: String,
+        tile_id: String,
         #[serde(default)]
         viewport_width: Option<f64>,
         #[serde(default)]
@@ -118,7 +118,7 @@ pub enum TestDriverRequest {
     },
     CanvasReset,
     TileContextMenu {
-        pane_id: String,
+        tile_id: String,
         client_x: f64,
         client_y: f64,
     },
@@ -133,128 +133,69 @@ pub enum TestDriverRequest {
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum SocketCommand {
-    #[serde(rename = "shell_create")]
-    ShellCreate {
-        #[serde(default = "default_coord")]
-        x: f64,
-        #[serde(default = "default_coord")]
-        y: f64,
-        #[serde(default)]
-        width: Option<f64>,
-        #[serde(default)]
-        height: Option<f64>,
-        #[serde(default)]
-        parent_session_id: Option<String>,
-        #[serde(default)]
-        parent_pane_id: Option<String>,
-    },
-    #[serde(rename = "shell_destroy")]
-    ShellDestroy {
-        session_id: String,
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "shell_list")]
-    ShellList {
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
     #[serde(rename = "shell_input_send")]
     ShellInputSend {
-        session_id: String,
+        tile_id: String,
         input: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "shell_exec")]
     ShellExec {
-        session_id: String,
+        tile_id: String,
         shell_command: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "shell_output_read")]
     ShellOutputRead {
-        session_id: String,
+        tile_id: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "shell_title_set")]
-    ShellTitleSet {
-        session_id: String,
-        title: String,
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "shell_read_only_set")]
-    ShellReadOnlySet {
-        session_id: String,
-        read_only: bool,
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "shell_role_set")]
     ShellRoleSet {
-        session_id: String,
+        tile_id: String,
         role: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "browser_create")]
-    BrowserCreate {
-        #[serde(default)]
-        parent_session_id: Option<String>,
-        #[serde(default)]
-        parent_pane_id: Option<String>,
-    },
-    #[serde(rename = "browser_destroy")]
-    BrowserDestroy {
-        pane_id: String,
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "browser_navigate")]
     BrowserNavigate {
-        pane_id: String,
+        tile_id: String,
         url: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "browser_load")]
     BrowserLoad {
-        pane_id: String,
+        tile_id: String,
         path: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
-    #[serde(rename = "agent_create")]
-    AgentCreate {
+    #[serde(rename = "browser_drive")]
+    BrowserDrive {
+        tile_id: String,
+        action: String,
         #[serde(default)]
-        parent_session_id: Option<String>,
+        args: Option<serde_json::Value>,
         #[serde(default)]
-        parent_pane_id: Option<String>,
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "agent_register")]
     AgentRegister {
@@ -263,7 +204,7 @@ pub enum SocketCommand {
         agent_type: Option<String>,
         #[serde(default)]
         agent_role: Option<String>,
-        pane_id: String,
+        tile_id: String,
         #[serde(default)]
         agent_pid: Option<u32>,
         #[serde(default)]
@@ -275,54 +216,79 @@ pub enum SocketCommand {
     AgentEventsSubscribe { agent_id: String },
     #[serde(rename = "agent_ping_ack")]
     AgentPingAck { agent_id: String },
-    #[serde(rename = "agent_log_append")]
-    AgentLogAppend {
-        agent_id: String,
-        kind: String,
-        text: String,
-        #[serde(default)]
-        timestamp_ms: Option<i64>,
-    },
-    #[serde(rename = "agent_list")]
-    ListAgents {
+    #[serde(rename = "message_topic_list")]
+    MessageTopicList {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "topics_list")]
-    ListTopics {
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "network_list")]
     ListNetwork {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
         #[serde(default)]
         tile_type: Option<TileTypeFilter>,
     },
-    #[serde(rename = "session_list")]
-    SessionList {
+    #[serde(rename = "network_get")]
+    NetworkGet {
+        tile_id: String,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "network_call")]
+    NetworkCall {
+        tile_id: String,
+        action: String,
         #[serde(default)]
-        tile_type: Option<TileTypeFilter>,
+        args: Option<serde_json::Value>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_create")]
+    TileCreate {
+        tile_type: TileTypeFilter,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
+        #[serde(default)]
+        width: Option<f64>,
+        #[serde(default)]
+        height: Option<f64>,
+        #[serde(default)]
+        parent_session_id: Option<String>,
+        #[serde(default)]
+        parent_tile_id: Option<String>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "tile_list")]
     TileList {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
         #[serde(default)]
         tile_type: Option<TileTypeFilter>,
+    },
+    #[serde(rename = "tile_destroy")]
+    TileDestroy {
+        tile_id: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "tile_get")]
     TileGet {
@@ -330,7 +296,27 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_rename")]
+    TileRename {
+        tile_id: String,
+        title: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_call")]
+    TileCall {
+        tile_id: String,
+        action: String,
+        #[serde(default)]
+        args: Option<serde_json::Value>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "tile_move")]
     TileMove {
@@ -340,7 +326,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "tile_resize")]
     TileResize {
@@ -350,7 +336,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "network_connect")]
     NetworkConnect {
@@ -361,7 +347,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "network_disconnect")]
     NetworkDisconnect {
@@ -370,7 +356,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "message_direct")]
     MessageDirect {
@@ -379,7 +365,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "message_public")]
     MessagePublic {
@@ -391,7 +377,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "message_network")]
     MessageNetwork {
@@ -399,7 +385,7 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "message_root")]
     MessageRoot {
@@ -407,50 +393,19 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
-        sender_pane_id: Option<String>,
+        sender_tile_id: Option<String>,
     },
-    #[serde(rename = "topic_subscribe")]
-    TopicSubscribe {
+    #[serde(rename = "message_topic_subscribe")]
+    MessageTopicSubscribe {
         topic: String,
         #[serde(default)]
         agent_id: Option<String>,
     },
-    #[serde(rename = "topic_unsubscribe")]
-    TopicUnsubscribe {
+    #[serde(rename = "message_topic_unsubscribe")]
+    MessageTopicUnsubscribe {
         topic: String,
         #[serde(default)]
         agent_id: Option<String>,
-    },
-    #[serde(rename = "work_list")]
-    WorkList {
-        #[serde(default)]
-        scope: Option<String>,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "work_get")]
-    WorkGet {
-        work_id: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
-    },
-    #[serde(rename = "work_create")]
-    WorkCreate {
-        title: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        sender_agent_id: Option<String>,
-        #[serde(default)]
-        sender_pane_id: Option<String>,
     },
     #[serde(rename = "work_stage_start")]
     WorkStageStart { work_id: String, agent_id: String },
@@ -466,10 +421,6 @@ pub enum SocketCommand {
     TestDomQuery { js: String },
     #[serde(rename = "test_dom_keys")]
     TestDomKeys { keys: String },
-}
-
-fn default_coord() -> f64 {
-    100.0
 }
 
 #[derive(Serialize)]

@@ -11,7 +11,8 @@ Shenzhen-IO vibe:
 Role:
 - You own session-level coordination.
 - You can use the full Herd MCP surface.
-- Worker agents cannot. They should come to you through `message_root`.
+- Worker agents can message plus inspect and operate visible local-network `shell` and `browser` tiles.
+- They should come to you through `message_root` for privileged Herd actions outside that worker-safe surface.
 
 Message channel:
 - Incoming Herd traffic arrives through the Claude channel hook.

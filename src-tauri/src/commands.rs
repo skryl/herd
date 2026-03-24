@@ -5,6 +5,7 @@ use crate::{
     persist::TileState,
     runtime,
     state::AppState,
+    tile_registry::{self, TileRecord, TileRecordKind},
     tmux,
     tmux_state,
     work,
@@ -31,6 +32,7 @@ pub struct ClaudeMenuData {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserWindowSpawn {
+    pub tile_id: String,
     pub pane_id: String,
     pub window_id: String,
     pub session_id: String,
@@ -64,13 +66,9 @@ fn pane_network_tile_kind(
     snapshot: &tmux_state::TmuxSnapshot,
     pane_id: &str,
 ) -> Result<NetworkTileKind, String> {
-    if let Some(agent) = state.agent_info_by_tile(pane_id)? {
-        return Ok(match agent.agent_role {
-            AgentRole::Root => NetworkTileKind::RootAgent,
-            AgentRole::Worker => NetworkTileKind::Agent,
-        });
-    }
-
+    let record = state
+        .tile_record_by_pane(pane_id)?
+        .ok_or_else(|| format!("unknown tile record for tmux pane: {pane_id}"))?;
     let pane = snapshot
         .panes
         .iter()
@@ -82,10 +80,270 @@ fn pane_network_tile_kind(
         .find(|window| window.id == pane.window_id)
         .map(|window| window.name.as_str())
         .unwrap_or("");
-    if pane.title.eq_ignore_ascii_case("Browser") || window_name.eq_ignore_ascii_case("Browser") {
-        return Ok(NetworkTileKind::Browser);
+    let agent_role = if state.agent_info_by_tile_role(&record.tile_id, AgentRole::Root)?.is_some()
+        || state.agent_info_by_pane_role(pane_id, AgentRole::Root)?.is_some()
+    {
+        Some(AgentRole::Root)
+    } else {
+        None
+    };
+    Ok(crate::network::network_tile_kind_from_record_kind(
+        record.kind,
+        agent_role,
+        window_name,
+        &pane.title,
+    ))
+}
+
+fn reconciled_tmux_tile_records(
+    state: &AppState,
+    snapshot: &tmux_state::TmuxSnapshot,
+) -> Result<
+    (
+        Vec<TileRecord>,
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    ),
+    String,
+> {
+    let existing = state.tile_records_snapshot()?;
+    let mut existing_by_window = existing
+        .iter()
+        .cloned()
+        .map(|record| (record.window_id.clone(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut existing_by_pane = existing
+        .into_iter()
+        .map(|record| (record.pane_id.clone(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut records = Vec::new();
+    let mut pane_to_tile = std::collections::HashMap::new();
+    let mut window_to_tile = std::collections::HashMap::new();
+    let db_path = Path::new(runtime::database_path());
+
+    for window in &snapshot.windows {
+        let Some(pane_id) = window.pane_ids.first() else {
+            continue;
+        };
+        let pane = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.id == *pane_id)
+            .ok_or_else(|| format!("missing pane {pane_id} for tmux window {}", window.id))?;
+        let now_ms = now_ms();
+        let existing = existing_by_window
+            .remove(&window.id)
+            .or_else(|| existing_by_pane.remove(pane_id));
+        let tile_id = match existing.as_ref() {
+            Some(record) => record.tile_id.clone(),
+            None => tile_registry::generate_unique_tile_id_at(db_path)?,
+        };
+        let kind = crate::network::reconciled_tmux_tile_record_kind(
+            existing.as_ref().map(|record| record.kind),
+            &window.name,
+            &pane.title,
+        );
+        pane_to_tile.insert(pane.id.clone(), tile_id.clone());
+        window_to_tile.insert(window.id.clone(), tile_id.clone());
+        records.push(TileRecord {
+            tile_id,
+            session_id: window.session_id.clone(),
+            kind,
+            window_id: window.id.clone(),
+            pane_id: pane.id.clone(),
+            created_at: existing.as_ref().map(|record| record.created_at).unwrap_or(now_ms),
+            updated_at: now_ms,
+        });
     }
-    Ok(NetworkTileKind::Shell)
+
+    records.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then_with(|| left.tile_id.cmp(&right.tile_id))
+    });
+    Ok((records, pane_to_tile, window_to_tile))
+}
+
+fn migrate_layout_entries_to_tile_ids(
+    state: &AppState,
+    pane_to_tile: &std::collections::HashMap<String, String>,
+    window_to_tile: &std::collections::HashMap<String, String>,
+    work_tile_map: &std::collections::HashMap<String, String>,
+) {
+    let existing = state
+        .tile_states
+        .lock()
+        .map(|entries| entries.clone())
+        .unwrap_or_default();
+    let mut next = std::collections::HashMap::new();
+
+    for (entry_id, layout) in existing {
+        let resolved_id = if pane_to_tile.values().any(|tile_id| tile_id == &entry_id)
+            || work_tile_map.values().any(|tile_id| tile_id == &entry_id)
+        {
+            Some(entry_id.clone())
+        } else if let Some(tile_id) = window_to_tile.get(&entry_id) {
+            Some(tile_id.clone())
+        } else if let Some(tile_id) = pane_to_tile.get(&entry_id) {
+            Some(tile_id.clone())
+        } else {
+            work_tile_map.get(&entry_id).cloned()
+        };
+        if let Some(tile_id) = resolved_id {
+            next.entry(tile_id).or_insert(layout);
+        }
+    }
+
+    if let Ok(mut entries) = state.tile_states.lock() {
+        *entries = next;
+    }
+    state.save();
+}
+
+fn migrate_network_connections_to_tile_ids(
+    pane_to_tile: &std::collections::HashMap<String, String>,
+    work_tile_map: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let db_path = Path::new(runtime::database_path());
+    let connections = network::list_all_connections_at(db_path)?;
+    let mut next = Vec::new();
+
+    for mut connection in connections {
+        if let Some(tile_id) = pane_to_tile.get(&connection.from_tile_id) {
+            connection.from_tile_id = tile_id.clone();
+        } else if let Some(tile_id) = work_tile_map.get(&connection.from_tile_id) {
+            connection.from_tile_id = tile_id.clone();
+        }
+        if let Some(tile_id) = pane_to_tile.get(&connection.to_tile_id) {
+            connection.to_tile_id = tile_id.clone();
+        } else if let Some(tile_id) = work_tile_map.get(&connection.to_tile_id) {
+            connection.to_tile_id = tile_id.clone();
+        }
+        if connection.from_tile_id == connection.to_tile_id {
+            continue;
+        }
+        next.push(connection);
+    }
+
+    next.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then_with(|| left.from_tile_id.cmp(&right.from_tile_id))
+            .then_with(|| left.from_port.as_str().cmp(right.from_port.as_str()))
+            .then_with(|| left.to_tile_id.cmp(&right.to_tile_id))
+            .then_with(|| left.to_port.as_str().cmp(right.to_port.as_str()))
+    });
+    next.dedup_by(|left, right| {
+        left.session_id == right.session_id
+            && left.from_tile_id == right.from_tile_id
+            && left.from_port == right.from_port
+            && left.to_tile_id == right.to_tile_id
+            && left.to_port == right.to_port
+    });
+    network::replace_connections_at(db_path, &next)
+}
+
+fn migrate_agents_to_tile_ids(
+    state: &AppState,
+    records: &[TileRecord],
+    pane_to_tile: &std::collections::HashMap<String, String>,
+    window_to_tile: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let records_by_tile = records
+        .iter()
+        .cloned()
+        .map(|record| (record.tile_id.clone(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut next_agents = Vec::new();
+
+    for mut agent in state.agent_infos_snapshot()? {
+        let matched_record = if let Some(record) = records_by_tile.get(&agent.tile_id) {
+            (record.kind == TileRecordKind::Agent).then_some(record.clone())
+        } else if !agent.pane_id.trim().is_empty() {
+            pane_to_tile
+                .get(&agent.pane_id)
+                .and_then(|tile_id| records_by_tile.get(tile_id))
+                .filter(|record| record.kind == TileRecordKind::Agent)
+                .cloned()
+        } else if agent.tile_id.starts_with('%') {
+            pane_to_tile
+                .get(&agent.tile_id)
+                .and_then(|tile_id| records_by_tile.get(tile_id))
+                .filter(|record| record.kind == TileRecordKind::Agent)
+                .cloned()
+        } else {
+            None
+        }
+        .or_else(|| {
+            window_to_tile
+                .get(&agent.window_id)
+                .and_then(|tile_id| records_by_tile.get(tile_id))
+                .filter(|record| record.kind == TileRecordKind::Agent)
+                .cloned()
+        });
+
+        if let Some(record) = matched_record {
+            agent.tile_id = record.tile_id.clone();
+            agent.pane_id = record.pane_id.clone();
+            agent.window_id = record.window_id.clone();
+            agent.session_id = record.session_id.clone();
+        } else if let Some(record) = records_by_tile.get(&agent.tile_id) {
+            if record.kind != TileRecordKind::Agent && !agent.pane_id.trim().is_empty() {
+                agent.tile_id = agent.pane_id.clone();
+            }
+        }
+        next_agents.push(agent);
+    }
+
+    state.replace_agents_snapshot(next_agents)
+}
+
+pub fn reconcile_tmux_tile_registry(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let snapshot = tmux_state::snapshot(state.inner())?;
+    let db_path = Path::new(runtime::database_path());
+    let _ = work::ensure_tile_ids_at(db_path)?;
+    let work_items = work::list_work_at(db_path, work::WorkListScope::All)?;
+    let work_tile_map = work_items
+        .iter()
+        .map(|item| (format!("work:{}", item.work_id), item.tile_id.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let (records, pane_to_tile, window_to_tile) = reconciled_tmux_tile_records(state.inner(), &snapshot)?;
+    state.replace_tile_records(records.clone())?;
+    migrate_agents_to_tile_ids(state.inner(), &records, &pane_to_tile, &window_to_tile)?;
+    migrate_network_connections_to_tile_ids(&pane_to_tile, &work_tile_map)?;
+    migrate_layout_entries_to_tile_ids(state.inner(), &pane_to_tile, &window_to_tile, &work_tile_map);
+    Ok(())
+}
+
+pub fn ensure_tmux_tile_record_for_backing(
+    state: &AppState,
+    session_id: &str,
+    window_id: &str,
+    pane_id: &str,
+    kind: TileRecordKind,
+    preferred_tile_id: Option<String>,
+) -> Result<TileRecord, String> {
+    let now_ms = now_ms();
+    let existing = state
+        .tile_record_by_window(window_id)?
+        .or_else(|| state.tile_record_by_pane(pane_id).ok().flatten());
+    let tile_id = match existing.as_ref() {
+        Some(record) => record.tile_id.clone(),
+        None => match preferred_tile_id {
+            Some(tile_id) => tile_id,
+            None => tile_registry::generate_unique_tile_id_at(Path::new(runtime::database_path()))?,
+        },
+    };
+    state.upsert_tile_record(TileRecord {
+        tile_id,
+        session_id: session_id.to_string(),
+        kind,
+        window_id: window_id.to_string(),
+        pane_id: pane_id.to_string(),
+        created_at: existing.as_ref().map(|record| record.created_at).unwrap_or(now_ms),
+        updated_at: now_ms,
+    })
 }
 
 fn resolve_ui_network_tile_descriptor(
@@ -94,8 +352,7 @@ fn resolve_ui_network_tile_descriptor(
     session_id: &str,
     tile_id: &str,
 ) -> Result<NetworkTileDescriptor, String> {
-    if let Some(work_id) = tile_id.strip_prefix("work:") {
-        let item = work::get_work_item_at(Path::new(runtime::database_path()), work_id)?;
+    if let Ok(item) = work::get_work_item_by_tile_id_at(Path::new(runtime::database_path()), tile_id) {
         if item.session_id != session_id {
             return Err(format!("tile {tile_id} is not in session {session_id}"));
         }
@@ -106,29 +363,27 @@ fn resolve_ui_network_tile_descriptor(
         });
     }
 
-    let pane = snapshot
-        .panes
-        .iter()
-        .find(|pane| pane.id == tile_id)
+    let record = state
+        .tile_record(tile_id)?
         .ok_or_else(|| format!("unknown tile: {tile_id}"))?;
-    if pane.session_id != session_id {
+    if record.session_id != session_id {
         return Err(format!("tile {tile_id} is not in session {session_id}"));
     }
     Ok(NetworkTileDescriptor {
         tile_id: tile_id.to_string(),
         session_id: session_id.to_string(),
-        kind: pane_network_tile_kind(state, snapshot, tile_id)?,
+        kind: pane_network_tile_kind(state, snapshot, &record.pane_id)?,
     })
 }
 
 fn touched_work_ids_from_connections(connections: &[NetworkConnection]) -> Vec<String> {
     let mut ids = std::collections::BTreeSet::new();
     for connection in connections {
-        if let Some(work_id) = connection.from_tile_id.strip_prefix("work:") {
-            ids.insert(work_id.to_string());
+        if let Ok(item) = work::get_work_item_by_tile_id_at(Path::new(runtime::database_path()), &connection.from_tile_id) {
+            ids.insert(item.work_id);
         }
-        if let Some(work_id) = connection.to_tile_id.strip_prefix("work:") {
-            ids.insert(work_id.to_string());
+        if let Ok(item) = work::get_work_item_by_tile_id_at(Path::new(runtime::database_path()), &connection.to_tile_id) {
+            ids.insert(item.work_id);
         }
     }
     ids.into_iter().collect()
@@ -379,6 +634,15 @@ fn launch_agent_in_pane(
     title: &str,
     role: AgentRole,
 ) -> Result<serde_json::Value, String> {
+    let state = app.state::<AppState>();
+    let tile = ensure_tmux_tile_record_for_backing(
+        state.inner(),
+        &session_id,
+        &window_id,
+        &pane_id,
+        TileRecordKind::Agent,
+        None,
+    )?;
     let cwd = tmux_state::ensure_session_root_cwd(&session_id)?;
     let shell_command = match role {
         AgentRole::Root => build_root_agent_launch_command(&cwd, &pane_id),
@@ -399,6 +663,8 @@ fn launch_agent_in_pane(
             AgentRole::Root => "root",
             AgentRole::Worker => "worker",
         }),
+        "-e",
+        &format!("HERD_TILE_ID={}", tile.tile_id),
         "-e",
         &format!("HERD_PANE_ID={pane_id}"),
         "-e",
@@ -434,6 +700,7 @@ fn launch_agent_in_pane(
 
     Ok(serde_json::json!({
         "agent_id": agent_id,
+        "tile_id": tile.tile_id,
         "agent_type": "claude",
         "agent_role": match role {
             AgentRole::Root => "root",
@@ -462,13 +729,13 @@ fn recorded_root_target_in_snapshot(
     let pane_exists = snapshot
         .panes
         .iter()
-        .any(|pane| pane.id == info.tile_id && pane.session_id == info.session_id && pane.window_id == info.window_id);
+        .any(|pane| pane.id == info.pane_id && pane.session_id == info.session_id && pane.window_id == info.window_id);
     let window_exists = snapshot
         .windows
         .iter()
         .any(|window| window.id == info.window_id && window.session_id == info.session_id);
     if pane_exists && window_exists {
-        return Some((info.window_id.clone(), info.tile_id.clone()));
+        return Some((info.window_id.clone(), info.pane_id.clone()));
     }
     None
 }
@@ -480,7 +747,7 @@ fn reusable_root_target_in_snapshot(
 ) -> Option<(String, String)> {
     let target = recorded_root_target_in_snapshot(snapshot, info)?;
     let occupied_by_other_live_agent = session_agents.iter().any(|agent| {
-        agent.tile_id == info.tile_id && agent.agent_id != info.agent_id && agent.alive
+        agent.pane_id == info.pane_id && agent.agent_id != info.agent_id && agent.alive
     });
     if occupied_by_other_live_agent {
         return None;
@@ -521,6 +788,15 @@ fn prune_duplicate_root_panes(
     Ok(())
 }
 
+pub fn create_session_with_root_agent(
+    app: tauri::AppHandle,
+    name: Option<&str>,
+) -> Result<String, String> {
+    let session_id = tmux_state::create_session(name)?;
+    let _ = ensure_root_agent_for_session(app, session_id.clone(), true)?;
+    Ok(session_id)
+}
+
 pub fn ensure_root_agent_for_session(
     app: tauri::AppHandle,
     session_id: String,
@@ -531,12 +807,13 @@ pub fn ensure_root_agent_for_session(
     let session_agents = state.list_agents_in_session(&session_id)?;
     if let Some(info) = state.root_agent_in_session(&session_id)? {
         if info.alive && reusable_root_target_in_snapshot(&before, &info, &session_agents).is_some() {
-            let _ = prune_duplicate_root_panes(&app, &session_id, &info.tile_id);
+            let _ = prune_duplicate_root_panes(&app, &session_id, &info.pane_id);
             return Ok(serde_json::json!({
                 "agent_id": info.agent_id,
                 "agent_type": "claude",
                 "agent_role": "root",
-                "pane_id": info.tile_id,
+                "tile_id": info.tile_id,
+                "pane_id": info.pane_id,
                 "window_id": info.window_id,
                 "session_id": info.session_id,
             }));
@@ -807,7 +1084,23 @@ fn control_client_tty_from_output(output: &str, control_pid: Option<libc::pid_t>
 
 #[tauri::command]
 pub fn get_tmux_state(state: tauri::State<'_, AppState>) -> Result<tmux_state::TmuxSnapshot, String> {
-    tmux_state::snapshot(&state)
+    let mut snapshot = tmux_state::snapshot(&state)?;
+    let tile_records = state.tile_records_snapshot()?;
+    let tile_id_by_window = tile_records
+        .iter()
+        .map(|record| (record.window_id.as_str(), record.tile_id.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let tile_id_by_pane = tile_records
+        .iter()
+        .map(|record| (record.pane_id.as_str(), record.tile_id.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for window in &mut snapshot.windows {
+        window.tile_id = tile_id_by_window.get(window.id.as_str()).cloned();
+    }
+    for pane in &mut snapshot.panes {
+        pane.tile_id = tile_id_by_pane.get(pane.id.as_str()).cloned();
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -883,7 +1176,6 @@ pub fn create_work_item(
     };
     let item = work::create_work_item_at(
         Path::new(runtime::database_path()),
-        &runtime::project_root_dir(),
         &resolved_session_id,
         &title,
     )?;
@@ -903,18 +1195,17 @@ pub fn delete_work_item(
     let removed_connections = network::disconnect_all_for_tile_at(
         Path::new(runtime::database_path()),
         &item.session_id,
-        &format!("work:{work_id}"),
+        &item.tile_id,
     )
     .unwrap_or_default();
     work::delete_work_item_at(
         Path::new(runtime::database_path()),
-        &runtime::project_root_dir(),
         &work_id,
     )?;
     for connection in &removed_connections {
         notify_agents_about_connection_change(state.inner(), connection, false);
     }
-    state.remove_tile_state(&format!("work:{work_id}"));
+    state.remove_tile_state(&item.tile_id);
     state.save();
     emit_agent_debug_state(&app, &state);
     emit_work_updated(&app, &item);
@@ -941,12 +1232,7 @@ pub fn improve_work_item(
 
 #[tauri::command]
 pub fn read_work_stage_preview(work_id: String) -> Result<String, String> {
-    let item = work::get_work_item_at(Path::new(runtime::database_path()), &work_id)?;
-    let stage = item
-        .current_stage_state()
-        .ok_or_else(|| format!("missing current stage for {}", item.work_id))?;
-    fs::read_to_string(&stage.file_path)
-        .map_err(|error| format!("failed to read {}: {error}", stage.file_path))
+    work::read_current_stage_preview_at(Path::new(runtime::database_path()), &work_id)
 }
 
 #[tauri::command]
@@ -1033,8 +1319,7 @@ pub fn save_layout_state(
 #[tauri::command]
 pub fn new_session(app: tauri::AppHandle, name: Option<String>) -> Result<String, String> {
     let state = app.state::<AppState>();
-    let session_id = tmux_state::create_session(name.as_deref())?;
-    let _ = ensure_root_agent_for_session(app.clone(), session_id.clone(), true)?;
+    let session_id = create_session_with_root_agent(app.clone(), name.as_deref())?;
     switch_control_client_to_session(state.inner(), &session_id)?;
     tmux_state::emit_snapshot(&app)?;
     Ok(session_id)
@@ -1048,7 +1333,7 @@ pub fn kill_session(app: tauri::AppHandle, session_id: String) -> Result<(), Str
     let is_only_session = snapshot.sessions.len() <= 1;
 
     let fallback_session_id = if is_only_session {
-        Some(tmux_state::create_session(Some(runtime::session_name()))?)
+        Some(create_session_with_root_agent(app.clone(), Some(runtime::session_name()))?)
     } else {
         snapshot
             .sessions
@@ -1216,8 +1501,17 @@ fn spawn_browser_window_internal(
         }),
     );
     let _ = tmux_state::emit_snapshot(&app);
+    let tile = ensure_tmux_tile_record_for_backing(
+        state.inner(),
+        &session_id,
+        &window_id,
+        &pane_id,
+        TileRecordKind::Browser,
+        None,
+    )?;
 
     Ok(BrowserWindowSpawn {
+        tile_id: tile.tile_id,
         pane_id,
         window_id,
         session_id,
@@ -1273,7 +1567,7 @@ pub fn kill_window(app: tauri::AppHandle, window_id: String) -> Result<(), Strin
         .find_map(|pane_id| {
             agents
                 .iter()
-                .find(|agent| agent.agent_role == AgentRole::Root && agent.tile_id == *pane_id)
+                .find(|agent| agent.agent_role == AgentRole::Root && agent.pane_id == *pane_id)
                 .cloned()
         });
     if let Some(root_agent) = root_agent {
@@ -1573,6 +1867,30 @@ pub fn read_log_tail(log_name: String, offset: u64) -> Result<String, String> {
     Ok(buf)
 }
 
+fn truncate_log_file(path: &str) -> Result<(), String> {
+    use std::fs::OpenOptions;
+    match OpenOptions::new().create(true).write(true).truncate(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("failed to truncate {path}: {error}")),
+    }
+}
+
+#[tauri::command]
+pub fn clear_debug_logs(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    state.clear_debug_logs()?;
+    truncate_log_file(runtime::socket_log_path())?;
+    truncate_log_file(runtime::cc_log_path())?;
+    if let Some(session_id) = state.last_active_session() {
+        if let Ok(snapshot) = state.snapshot_agent_debug_state_for_session(&session_id) {
+            let _ = app.emit("herd-agent-state", snapshot);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn __write_dom_result(result: String) -> Result<(), String> {
     std::fs::write(runtime::dom_result_path(), result)
@@ -1683,6 +2001,7 @@ mod tests {
             windows: vec![
                 TmuxWindow {
                     id: "@1".to_string(),
+                    tile_id: None,
                     session_id: "$1".to_string(),
                     session_name: "Main".to_string(),
                     index: 0,
@@ -1696,6 +2015,7 @@ mod tests {
                 },
                 TmuxWindow {
                     id: "@2".to_string(),
+                    tile_id: None,
                     session_id: "$1".to_string(),
                     session_name: "Main".to_string(),
                     index: 1,
@@ -1711,6 +2031,8 @@ mod tests {
             panes: vec![
                 TmuxPane {
                     id: "%1".to_string(),
+                    tile_id: None,
+                    role: None,
                     session_id: "$1".to_string(),
                     window_id: "@1".to_string(),
                     window_index: 0,
@@ -1724,6 +2046,8 @@ mod tests {
                 },
                 TmuxPane {
                     id: "%2".to_string(),
+                    tile_id: None,
+                    role: None,
                     session_id: "$1".to_string(),
                     window_id: "@2".to_string(),
                     window_index: 1,
@@ -1772,7 +2096,8 @@ mod tests {
             agent_id: "root:$1".to_string(),
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Root,
-            tile_id: "%1".to_string(),
+            tile_id: "AbCdEf".to_string(),
+            pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
             session_id: "$1".to_string(),
             title: "Root".to_string(),
@@ -1805,7 +2130,8 @@ mod tests {
             agent_id: "root:$1".to_string(),
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Root,
-            tile_id: "%1".to_string(),
+            tile_id: "AbCdEf".to_string(),
+            pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
             session_id: "$1".to_string(),
             title: "Root".to_string(),
@@ -1819,7 +2145,8 @@ mod tests {
             agent_id: "worker-1".to_string(),
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Worker,
-            tile_id: "%1".to_string(),
+            tile_id: "GhIjKl".to_string(),
+            pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
             session_id: "$1".to_string(),
             title: "Agent".to_string(),

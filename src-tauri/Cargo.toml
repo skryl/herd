@@ -25,3 +25,9 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 chrono = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = { version = "0.6.4", features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSError", "NSString", "std"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["WKWebView", "block2", "objc2-app-kit"] }

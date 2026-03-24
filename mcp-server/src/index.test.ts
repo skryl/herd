@@ -15,47 +15,40 @@ describe("mcp tool surface parity", () => {
       "message_public",
       "message_network",
       "message_root",
-      "sudo",
     ]);
   });
 
   it("exposes worker-safe shared tools separately from root-only tools", () => {
     expect(SHARED_TOOL_NAMES).toEqual([
       "network_list",
+      "network_get",
+      "network_call",
     ]);
     expect(WORKER_TOOL_NAMES).toEqual([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES]);
   });
 
   it("exposes the full latest root tool surface", () => {
     expect(ROOT_ONLY_TOOL_NAMES).toEqual([
-      "agent_create",
-      "shell_create",
-      "shells_list",
-      "shell_destroy",
+      "tile_create",
+      "tile_destroy",
+      "tile_list",
+      "tile_rename",
+      "tile_call",
       "shell_input_send",
       "shell_exec",
       "shell_output_read",
-      "shell_title_set",
-      "shell_read_only_set",
       "shell_role_set",
-      "browser_create",
-      "browser_destroy",
       "browser_navigate",
       "browser_load",
-      "agents_list",
-      "topics_list",
-      "topic_subscribe",
-      "topic_unsubscribe",
-      "session_list",
-      "tile_list",
+      "browser_drive",
+      "message_topic_list",
+      "message_topic_subscribe",
+      "message_topic_unsubscribe",
       "tile_get",
       "tile_move",
       "tile_resize",
       "network_connect",
       "network_disconnect",
-      "work_list",
-      "work_get",
-      "work_create",
       "work_stage_start",
       "work_stage_complete",
       "work_review_approve",
@@ -70,7 +63,6 @@ describe("mcp tool surface parity", () => {
       "agent_unregister",
       "agent_events_subscribe",
       "agent_ping_ack",
-      "agent_log_append",
       "test_driver",
       "test_dom_query",
       "test_dom_keys",

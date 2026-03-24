@@ -2,6 +2,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onDestroy, onMount } from 'svelte';
+  import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import type { TerminalInfo } from './types';
   import {
@@ -23,6 +24,7 @@
     removeTerminal,
     selectTile,
     selectedTerminalId,
+    tileActivityById,
     updateTerminal,
     zoomCanvasToTile,
   } from './stores/appState';
@@ -70,6 +72,8 @@
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
   let componentTypeLabel = $derived(info.readOnly ? 'VIEW' : 'WEB');
   let locationLabel = $derived(browserLocationLabel(currentUrl));
+  let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
+  let activityOpen = $state(false);
 
   let isDragging = false;
   let dragStartX = 0;
@@ -472,6 +476,7 @@
   class="pcb-component"
   class:selected={isSelected}
   class:kind-browser={true}
+  data-tile-id={info.tileId}
   style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
   onmousedown={(e) => {
     selectTile(info.id);
@@ -479,7 +484,7 @@
   }}
   oncontextmenu={handleContextMenu}
 >
-  <TilePorts tileId={info.paneId} />
+  <TilePorts tileId={info.tileId} />
   <div class="component-body">
     <div class="ic-notch"></div>
 
@@ -572,17 +577,44 @@
       </div>
     </div>
 
+    {#if activityOpen}
+      <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
+    {/if}
+
     <div class="info-strip">
-      <span class="info-item">
-        <span class="status-dot" class:active={loading}></span>
-        <span class="info-label">{loading ? 'NAV' : 'LIVE'}</span>
-      </span>
-      <span class="info-item">
-        <span class="info-label">{locationLabel}</span>
-      </span>
-      <span class="info-item">
-        <span class="info-label">{Math.round(info.width)}x{Math.round(info.height)}</span>
-      </span>
+      <div class="info-cluster info-cluster-left">
+        <span class="info-item">
+          <span class="info-label">PID:{info.paneId.slice(0, 8)}</span>
+        </span>
+        <span class="info-item">
+          <span class="info-label">TILE:{info.tileId}</span>
+        </span>
+        <span class="info-item">
+          <span class="status-dot" class:active={loading}></span>
+          <span class="info-label">{loading ? 'NAV' : 'LIVE'}</span>
+        </span>
+        <span class="info-item location-item">
+          <span class="info-label">{locationLabel}</span>
+        </span>
+      </div>
+      <div class="info-cluster info-cluster-right">
+        <span class="info-item">
+          <span class="info-label">{Math.round(info.width)}x{Math.round(info.height)}</span>
+        </span>
+        <button
+          class="activity-toggle-btn"
+          class:active={activityOpen}
+          type="button"
+          title={activityOpen ? 'Hide activity log' : 'Show activity log'}
+          aria-label={activityOpen ? 'Hide activity log' : 'Show activity log'}
+          onclick={(event) => {
+            event.stopPropagation();
+            activityOpen = !activityOpen;
+          }}
+        >
+          ACT {activityEntries.length}
+        </button>
+      </div>
     </div>
   </div>
 
@@ -622,6 +654,12 @@
     border: 1px solid rgba(102, 225, 255, 0.34);
     position: relative;
     min-width: 0;
+    --activity-border: rgba(102, 225, 255, 0.22);
+    --activity-border-soft: rgba(102, 225, 255, 0.18);
+    --activity-accent: #66e1ff;
+    --activity-text: var(--silk-dim);
+    --activity-empty: rgba(102, 225, 255, 0.62);
+    --activity-bg: rgba(6, 15, 20, 0.96);
   }
 
   .ic-notch {
@@ -826,11 +864,49 @@
     flex-shrink: 0;
   }
 
+  .info-cluster {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .info-cluster-left {
+    flex: 1;
+  }
+
+  .info-cluster-right {
+    justify-content: flex-end;
+    flex-shrink: 0;
+  }
+
   .info-item {
     display: flex;
     align-items: center;
     gap: 4px;
     min-width: 0;
+  }
+
+  .location-item {
+    flex: 1;
+  }
+
+  .activity-toggle-btn {
+    height: 16px;
+    padding: 0 6px;
+    border: 1px solid var(--activity-border);
+    background: rgba(0, 0, 0, 0.18);
+    color: var(--activity-accent);
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.6px;
+    cursor: pointer;
+  }
+
+  .activity-toggle-btn.active,
+  .activity-toggle-btn:hover {
+    border-color: var(--activity-accent);
+    background: color-mix(in srgb, var(--activity-accent) 10%, rgba(0, 0, 0, 0.18));
   }
 
   .status-dot {

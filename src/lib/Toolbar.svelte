@@ -14,7 +14,7 @@
   let { onSpawnShell, onSpawnAgent, onSpawnBrowser, onSpawnWork }: Props = $props();
 
   let termCount = $derived($activeTabTerminals.length);
-  let agentCount = $derived($agentInfos.filter((agent) => agent.session_id === $activeTabId && agent.alive).length);
+  let agentCount = $derived($agentInfos.length);
   let zoomPct = $derived(Math.round($canvasState.zoom * 100));
 
   let tmuxAlive = $state(false);

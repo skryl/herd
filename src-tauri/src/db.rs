@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{now_ms, AgentInfo};
+use crate::agent::{now_ms, AgentInfo, AgentRole, AgentType};
 use crate::runtime;
 
 const SCHEMA_SQL: &str = r#"
@@ -16,6 +16,16 @@ CREATE TABLE IF NOT EXISTS tile_state (
   y REAL NOT NULL,
   width REAL NOT NULL,
   height REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tile_registry (
+  tile_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  window_id TEXT NOT NULL,
+  pane_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS chatter (
@@ -30,6 +40,18 @@ CREATE TABLE IF NOT EXISTS agent_log (
   agent_id TEXT NOT NULL,
   tile_id TEXT NOT NULL,
   kind TEXT NOT NULL,
+  entry_json TEXT NOT NULL,
+  timestamp_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tile_message_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  wrapper_command TEXT NOT NULL,
+  message_name TEXT NOT NULL,
+  outcome TEXT NOT NULL,
   entry_json TEXT NOT NULL,
   timestamp_ms INTEGER NOT NULL
 );
@@ -59,6 +81,7 @@ CREATE TABLE IF NOT EXISTS network_connection (
 
 CREATE TABLE IF NOT EXISTS work_item (
   work_id TEXT PRIMARY KEY,
+  tile_id TEXT,
   session_id TEXT NOT NULL,
   title TEXT NOT NULL,
   owner_agent_id TEXT,
@@ -72,7 +95,7 @@ CREATE TABLE IF NOT EXISTS work_stage (
   work_id TEXT NOT NULL,
   stage_name TEXT NOT NULL,
   status TEXT NOT NULL,
-  file_path TEXT NOT NULL,
+  content TEXT NOT NULL,
   PRIMARY KEY (work_id, stage_name)
 );
 
@@ -95,6 +118,68 @@ pub struct PersistedTopicRecord {
     pub last_activity_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedAgentInfo {
+    agent_id: String,
+    #[serde(default)]
+    agent_type: AgentType,
+    #[serde(default)]
+    agent_role: AgentRole,
+    tile_id: String,
+    #[serde(default)]
+    pane_id: String,
+    window_id: String,
+    session_id: String,
+    title: String,
+    display_name: String,
+    alive: bool,
+    chatter_subscribed: bool,
+    #[serde(default)]
+    topics: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_pid: Option<u32>,
+}
+
+impl From<PersistedAgentInfo> for AgentInfo {
+    fn from(value: PersistedAgentInfo) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            agent_type: value.agent_type,
+            agent_role: value.agent_role,
+            tile_id: value.tile_id,
+            pane_id: value.pane_id,
+            window_id: value.window_id,
+            session_id: value.session_id,
+            title: value.title,
+            display_name: value.display_name,
+            alive: value.alive,
+            chatter_subscribed: value.chatter_subscribed,
+            topics: value.topics,
+            agent_pid: value.agent_pid,
+        }
+    }
+}
+
+impl From<&AgentInfo> for PersistedAgentInfo {
+    fn from(value: &AgentInfo) -> Self {
+        Self {
+            agent_id: value.agent_id.clone(),
+            agent_type: value.agent_type,
+            agent_role: value.agent_role,
+            tile_id: value.tile_id.clone(),
+            pane_id: value.pane_id.clone(),
+            window_id: value.window_id.clone(),
+            session_id: value.session_id.clone(),
+            title: value.title.clone(),
+            display_name: value.display_name.clone(),
+            alive: value.alive,
+            chatter_subscribed: value.chatter_subscribed,
+            topics: value.topics.clone(),
+            agent_pid: value.agent_pid,
+        }
+    }
+}
+
 pub fn open() -> Result<Connection, String> {
     open_at(Path::new(runtime::database_path()))
 }
@@ -104,11 +189,139 @@ pub fn open_at(path: &Path) -> Result<Connection, String> {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
-    let conn = Connection::open(path)
+    let mut conn = Connection::open(path)
         .map_err(|error| format!("failed to open sqlite db {}: {error}", path.display()))?;
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|error| format!("failed to initialize sqlite schema {}: {error}", path.display()))?;
+    ensure_optional_work_item_tile_id_column(&conn)?;
+    ensure_work_stage_content_storage(&mut conn)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_tile_id ON work_item(tile_id)",
+        [],
+    )
+    .map_err(|error| format!("failed to ensure work item tile_id index {}: {error}", path.display()))?;
     Ok(conn)
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(|error| format!("failed to inspect sqlite table {table_name}: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("failed to query sqlite table info for {table_name}: {error}"))?;
+    for row in rows {
+        if row.map_err(|error| format!("failed to decode sqlite table info for {table_name}: {error}"))? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_optional_work_item_tile_id_column(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "work_item", "tile_id")? {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE work_item ADD COLUMN tile_id TEXT", [])
+        .map_err(|error| format!("failed to add work_item.tile_id column: {error}"))?;
+    Ok(())
+}
+
+fn ensure_work_stage_content_storage(conn: &mut Connection) -> Result<(), String> {
+    let has_content = table_has_column(conn, "work_stage", "content")?;
+    let has_file_path = table_has_column(conn, "work_stage", "file_path")?;
+    if has_content && !has_file_path {
+        return Ok(());
+    }
+    if !has_content && !has_file_path {
+        return Err("work_stage is missing both content and file_path columns".to_string());
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin work_stage migration transaction: {error}"))?;
+    tx.execute(
+        "CREATE TABLE work_stage_new (
+          work_id TEXT NOT NULL,
+          stage_name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          content TEXT NOT NULL,
+          PRIMARY KEY (work_id, stage_name)
+        )",
+        [],
+    )
+    .map_err(|error| format!("failed to create migrated work_stage table: {error}"))?;
+
+    if has_content {
+        let mut stmt = tx
+            .prepare("SELECT work_id, stage_name, status, content FROM work_stage ORDER BY work_id ASC, stage_name ASC")
+            .map_err(|error| format!("failed to prepare work_stage content migration query: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| format!("failed to query work_stage content rows: {error}"))?;
+        for row in rows {
+            let (work_id, stage_name, status, content) =
+                row.map_err(|error| format!("failed to decode work_stage content row: {error}"))?;
+            tx.execute(
+                "INSERT INTO work_stage_new (work_id, stage_name, status, content) VALUES (?1, ?2, ?3, ?4)",
+                params![work_id, stage_name, status, content],
+            )
+            .map_err(|error| format!("failed to insert migrated work_stage content row: {error}"))?;
+        }
+    } else {
+        let mut stmt = tx
+            .prepare("SELECT work_id, stage_name, status, file_path FROM work_stage ORDER BY work_id ASC, stage_name ASC")
+            .map_err(|error| format!("failed to prepare legacy work_stage migration query: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| format!("failed to query legacy work_stage rows: {error}"))?;
+        for row in rows {
+            let (work_id, stage_name, status, file_path) =
+                row.map_err(|error| format!("failed to decode legacy work_stage row: {error}"))?;
+            let content = match fs::read_to_string(&file_path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing_legacy_work_stage_content(&file_path)
+                }
+                Err(error) => {
+                    return Err(format!("failed to migrate legacy work stage file {file_path}: {error}"));
+                }
+            };
+            tx.execute(
+                "INSERT INTO work_stage_new (work_id, stage_name, status, content) VALUES (?1, ?2, ?3, ?4)",
+                params![work_id, stage_name, status, content],
+            )
+            .map_err(|error| format!("failed to insert migrated legacy work_stage row: {error}"))?;
+        }
+    }
+
+    tx.execute("DROP TABLE work_stage", [])
+        .map_err(|error| format!("failed to drop legacy work_stage table: {error}"))?;
+    tx.execute("ALTER TABLE work_stage_new RENAME TO work_stage", [])
+        .map_err(|error| format!("failed to rename migrated work_stage table: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("failed to commit work_stage migration transaction: {error}"))?;
+    Ok(())
+}
+
+fn missing_legacy_work_stage_content(file_path: &str) -> String {
+    format!(
+        "# Missing legacy work stage content\n\nHerd migrated this work stage into SQLite after removing the legacy `work/` directory, but the previous file was already missing.\n\nLegacy path: {file_path}\n"
+    )
 }
 
 pub fn load_agents() -> Result<Vec<AgentInfo>, String> {
@@ -126,9 +339,9 @@ pub fn load_agents_at(path: &Path) -> Result<Vec<AgentInfo>, String> {
     let mut agents = Vec::new();
     for row in rows {
         let json = row.map_err(|error| format!("failed to decode agent row: {error}"))?;
-        let agent = serde_json::from_str::<AgentInfo>(&json)
+        let agent = serde_json::from_str::<PersistedAgentInfo>(&json)
             .map_err(|error| format!("failed to parse agent json: {error}"))?;
-        agents.push(agent);
+        agents.push(agent.into());
     }
     Ok(agents)
 }
@@ -146,7 +359,7 @@ pub fn replace_agents_at(path: &Path, agents: &[AgentInfo]) -> Result<(), String
         .map_err(|error| format!("failed to clear agent rows: {error}"))?;
     let updated_at = now_ms();
     for agent in agents {
-        let data_json = serde_json::to_string(agent)
+        let data_json = serde_json::to_string(&PersistedAgentInfo::from(agent))
             .map_err(|error| format!("failed to serialize agent {}: {error}", agent.agent_id))?;
         tx.execute(
             "INSERT INTO agent (agent_id, session_id, tile_id, data_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -228,7 +441,7 @@ mod tests {
         reset_runtime_presence_state_at, PersistedTopicRecord,
     };
     use crate::agent::{AgentInfo, AgentRole, AgentType};
-    use rusqlite::params;
+    use rusqlite::{params, Connection};
     use std::fs;
     use std::path::PathBuf;
 
@@ -255,12 +468,14 @@ mod tests {
         assert!(names.contains(&"tile_state".to_string()));
         assert!(names.contains(&"chatter".to_string()));
         assert!(names.contains(&"agent_log".to_string()));
+        assert!(names.contains(&"tile_message_log".to_string()));
         assert!(names.contains(&"agent".to_string()));
         assert!(names.contains(&"topic".to_string()));
         assert!(names.contains(&"network_connection".to_string()));
         assert!(names.contains(&"work_item".to_string()));
         assert!(names.contains(&"work_stage".to_string()));
         assert!(names.contains(&"work_review".to_string()));
+        assert!(names.contains(&"tile_registry".to_string()));
 
         let _ = fs::remove_file(path);
     }
@@ -273,6 +488,7 @@ mod tests {
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Worker,
             tile_id: "%1".to_string(),
+            pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
             session_id: "$1".to_string(),
             title: "Agent".to_string(),
@@ -311,6 +527,7 @@ mod tests {
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Worker,
             tile_id: "%1".to_string(),
+            pane_id: "%1".to_string(),
             window_id: "@1".to_string(),
             session_id: "$1".to_string(),
             title: "Agent".to_string(),
@@ -336,5 +553,89 @@ mod tests {
         assert!(!loaded_agents[0].alive);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_legacy_work_stage_file_paths_into_sqlite_content() {
+        let root = std::env::temp_dir().join(format!("herd-db-work-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("work/session-1/work-s1-001")).unwrap();
+        let path = root.join("herd.sqlite");
+        let legacy_file = root.join("work/session-1/work-s1-001/plan.md");
+        fs::write(&legacy_file, "# Migrated plan\n\nStored in sqlite now.\n").unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE work_stage (
+              work_id TEXT NOT NULL,
+              stage_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              PRIMARY KEY (work_id, stage_name)
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_stage (work_id, stage_name, status, file_path) VALUES (?1, ?2, ?3, ?4)",
+            params!["work-s1-001", "plan", "ready", legacy_file.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let migrated = open_at(&path).unwrap();
+        let content = migrated
+            .query_row(
+                "SELECT content FROM work_stage WHERE work_id = ?1 AND stage_name = ?2",
+                params!["work-s1-001", "plan"],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(content, "# Migrated plan\n\nStored in sqlite now.\n");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_missing_legacy_work_stage_files_to_placeholder_content() {
+        let root = std::env::temp_dir().join(format!("herd-db-work-migrate-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("herd.sqlite");
+        let missing_file = root.join("work/session-1/work-s1-001/plan.md");
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE work_stage (
+              work_id TEXT NOT NULL,
+              stage_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              PRIMARY KEY (work_id, stage_name)
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_stage (work_id, stage_name, status, file_path) VALUES (?1, ?2, ?3, ?4)",
+            params!["work-s1-001", "plan", "ready", missing_file.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let migrated = open_at(&path).unwrap();
+        let content = migrated
+            .query_row(
+                "SELECT content FROM work_stage WHERE work_id = ?1 AND stage_name = ?2",
+                params!["work-s1-001", "plan"],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(content.contains("Missing legacy work stage content"));
+        assert!(content.contains(&missing_file.to_string_lossy().to_string()));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

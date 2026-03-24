@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -75,7 +74,6 @@ impl WorkReviewDecision {
 pub struct WorkStageState {
     pub stage: WorkStage,
     pub status: WorkStageStatus,
-    pub file_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +88,7 @@ pub struct WorkReviewEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkItem {
     pub work_id: String,
+    pub tile_id: String,
     pub session_id: String,
     pub title: String,
     pub topic: String,
@@ -125,6 +124,7 @@ impl WorkItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkListScope {
     CurrentSession(String),
+    All,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,16 +134,30 @@ struct WorkItemData {
 
 pub fn list_work_at(db_path: &Path, scope: WorkListScope) -> Result<Vec<WorkItem>, String> {
     let conn = db::open_at(db_path)?;
-    let WorkListScope::CurrentSession(session_id) = scope;
-    let mut stmt = conn
-        .prepare("SELECT work_id FROM work_item WHERE session_id = ?1 ORDER BY updated_at DESC, work_id ASC")
-        .map_err(|error| format!("failed to prepare work list query: {error}"))?;
-    let rows = stmt
-        .query_map([session_id], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("failed to query work items: {error}"))?;
     let mut work_ids = Vec::new();
-    for row in rows {
-        work_ids.push(row.map_err(|error| format!("failed to read work row: {error}"))?);
+    match scope {
+        WorkListScope::CurrentSession(session_id) => {
+            let mut stmt = conn
+                .prepare("SELECT work_id FROM work_item WHERE session_id = ?1 ORDER BY updated_at DESC, work_id ASC")
+                .map_err(|error| format!("failed to prepare work list query: {error}"))?;
+            let rows = stmt
+                .query_map([session_id], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("failed to query work items: {error}"))?;
+            for row in rows {
+                work_ids.push(row.map_err(|error| format!("failed to read work row: {error}"))?);
+            }
+        }
+        WorkListScope::All => {
+            let mut stmt = conn
+                .prepare("SELECT work_id FROM work_item ORDER BY updated_at DESC, work_id ASC")
+                .map_err(|error| format!("failed to prepare work list query: {error}"))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("failed to query work items: {error}"))?;
+            for row in rows {
+                work_ids.push(row.map_err(|error| format!("failed to read work row: {error}"))?);
+            }
+        }
     }
     let mut items = Vec::new();
     for work_id in work_ids {
@@ -164,9 +178,59 @@ pub fn get_work_item_at(db_path: &Path, work_id: &str) -> Result<WorkItem, Strin
     load_work_item_with_conn(&conn, work_id)
 }
 
+pub fn get_work_item_by_tile_id_at(db_path: &Path, tile_id: &str) -> Result<WorkItem, String> {
+    let conn = db::open_at(db_path)?;
+    load_work_item_by_tile_id_with_conn(&conn, tile_id)
+}
+
+pub fn ensure_tile_ids_at(db_path: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut conn = db::open_at(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin work tile id migration transaction: {error}"))?;
+    let mut stmt = tx
+        .prepare("SELECT work_id FROM work_item WHERE tile_id IS NULL OR trim(tile_id) = '' ORDER BY work_id ASC")
+        .map_err(|error| format!("failed to prepare work tile id migration query: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("failed to query work items missing tile ids: {error}"))?;
+    let mut migrated = Vec::new();
+    for row in rows {
+        let work_id = row.map_err(|error| format!("failed to read work tile id migration row: {error}"))?;
+        let tile_id = crate::tile_registry::generate_unique_tile_id_with_conn(&tx)?;
+        tx.execute(
+            "UPDATE work_item SET tile_id = ?2 WHERE work_id = ?1",
+            params![work_id, tile_id],
+        )
+        .map_err(|error| format!("failed to assign tile id for {work_id}: {error}"))?;
+        migrated.push((work_id, tile_id));
+    }
+    drop(stmt);
+    tx.commit()
+        .map_err(|error| format!("failed to commit work tile id migration transaction: {error}"))?;
+    Ok(migrated)
+}
+
+pub fn tile_id_for_work_at(db_path: &Path, work_id: &str) -> Result<String, String> {
+    let conn = db::open_at(db_path)?;
+    tile_id_for_work_with_conn(&conn, work_id)
+}
+
+pub fn tile_id_for_work_with_conn(conn: &Connection, work_id: &str) -> Result<String, String> {
+    conn.query_row(
+        "SELECT tile_id FROM work_item WHERE work_id = ?1",
+        [work_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(|error| format!("failed to load work tile id for {work_id}: {error}"))?
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+    .ok_or_else(|| format!("work item {work_id} is missing a tile id"))
+}
+
 pub fn create_work_item_at(
     db_path: &Path,
-    project_root: &Path,
     session_id: &str,
     title: &str,
 ) -> Result<WorkItem, String> {
@@ -178,19 +242,19 @@ pub fn create_work_item_at(
         .map_err(|error| format!("failed to begin work create transaction: {error}"))?;
 
     let work_id = next_work_id(&tx, session_id)?;
+    let tile_id = crate::tile_registry::generate_unique_tile_id_with_conn(&tx)?;
     let topic = work_topic(&work_id);
     let created_at = now_ms();
-    let stage_files = stage_file_map(project_root, session_id, &work_id);
-    create_stage_files(&stage_files, &normalized_title, &work_id, session_id, &topic)?;
     let data_json = serde_json::to_string(&WorkItemData {
         topic: topic.clone(),
     })
     .map_err(|error| format!("failed to serialize work item data: {error}"))?;
 
     tx.execute(
-        "INSERT INTO work_item (work_id, session_id, title, owner_agent_id, current_stage, data_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO work_item (work_id, tile_id, session_id, title, owner_agent_id, current_stage, data_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             work_id,
+            tile_id,
             session_id,
             normalized_title,
             Option::<String>::None,
@@ -203,16 +267,13 @@ pub fn create_work_item_at(
     .map_err(|error| format!("failed to insert work item: {error}"))?;
 
     for stage in WorkStage::ALL {
-        let file_path = stage_files
-            .get(&stage)
-            .ok_or_else(|| format!("missing stage file mapping for {}", stage.as_str()))?;
         tx.execute(
-            "INSERT INTO work_stage (work_id, stage_name, status, file_path) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO work_stage (work_id, stage_name, status, content) VALUES (?1, ?2, ?3, ?4)",
             params![
                 work_id,
                 stage.as_str(),
                 WorkStageStatus::Ready.as_str(),
-                file_path.to_string_lossy().to_string()
+                default_stage_content(&normalized_title, &work_id, session_id, &topic, stage),
             ],
         )
         .map_err(|error| format!("failed to insert stage {}: {error}", stage.as_str()))?;
@@ -223,9 +284,26 @@ pub fn create_work_item_at(
     get_work_item_at(db_path, &work_id)
 }
 
+pub fn rename_work_item_at(db_path: &Path, work_id: &str, title: &str) -> Result<WorkItem, String> {
+    let normalized_title = normalize_title(title)?;
+    let mut conn = db::open_at(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin work rename transaction: {error}"))?;
+
+    tx.execute(
+        "UPDATE work_item SET title = ?2, updated_at = ?3 WHERE work_id = ?1",
+        params![work_id, normalized_title, now_ms()],
+    )
+    .map_err(|error| format!("failed to rename work item {work_id}: {error}"))?;
+
+    tx.commit()
+        .map_err(|error| format!("failed to commit work rename transaction: {error}"))?;
+    get_work_item_at(db_path, work_id)
+}
+
 pub fn delete_work_item_at(
     db_path: &Path,
-    project_root: &Path,
     work_id: &str,
 ) -> Result<(), String> {
     let mut conn = db::open_at(db_path)?;
@@ -243,15 +321,15 @@ pub fn delete_work_item_at(
 
     tx.commit()
         .map_err(|error| format!("failed to commit work delete transaction: {error}"))?;
-
-    let work_dir = work_directory(project_root, &item.session_id, work_id);
-    if work_dir.exists() {
-        fs::remove_dir_all(&work_dir)
-            .map_err(|error| format!("failed to delete {}: {error}", work_dir.display()))?;
-    }
-    let _ = network::disconnect_all_for_tile_at(db_path, &item.session_id, &network::work_tile_id(work_id));
+    let _ = network::disconnect_all_for_tile_at(db_path, &item.session_id, &item.tile_id);
 
     Ok(())
+}
+
+pub fn read_current_stage_preview_at(db_path: &Path, work_id: &str) -> Result<String, String> {
+    let conn = db::open_at(db_path)?;
+    let item = load_work_item_with_conn(&conn, work_id)?;
+    load_stage_content_with_conn(&conn, work_id, item.current_stage)
 }
 
 pub fn start_work_stage_at(
@@ -381,20 +459,13 @@ pub fn improve_work_stage_at(
     get_work_item_at(db_path, work_id)
 }
 
-fn stage_file_map(project_root: &Path, session_id: &str, work_id: &str) -> BTreeMap<WorkStage, PathBuf> {
-    let work_root = work_directory(project_root, session_id, work_id);
-    BTreeMap::from([
-        (WorkStage::Plan, work_root.join("plan.md")),
-        (WorkStage::Prd, work_root.join("prd.md")),
-        (WorkStage::Artifact, work_root.join("artifact.md")),
-    ])
-}
-
-fn work_directory(project_root: &Path, session_id: &str, work_id: &str) -> PathBuf {
-    project_root
-        .join("work")
-        .join(session_directory_name(session_id))
-        .join(work_id)
+pub fn remove_legacy_work_directory(project_root: &Path) -> Result<(), String> {
+    let work_root = project_root.join("work");
+    if !work_root.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&work_root)
+        .map_err(|error| format!("failed to delete {}: {error}", work_root.display()))
 }
 
 fn normalize_title(title: &str) -> Result<String, String> {
@@ -438,11 +509,6 @@ fn parse_work_sequence(work_id: &str, prefix: &str) -> Option<u32> {
         .and_then(|suffix| suffix.parse::<u32>().ok())
 }
 
-fn session_directory_name(session_id: &str) -> String {
-    let slug = session_numeric_or_sanitized(session_id);
-    format!("session-{slug}")
-}
-
 fn session_prefix(session_id: &str) -> String {
     let slug = session_numeric_or_sanitized(session_id);
     format!("work-s{slug}-")
@@ -468,26 +534,17 @@ fn work_topic(work_id: &str) -> String {
     format!("#{work_id}")
 }
 
-fn create_stage_files(
-    stage_files: &BTreeMap<WorkStage, PathBuf>,
+fn default_stage_content(
     title: &str,
     work_id: &str,
     session_id: &str,
     topic: &str,
-) -> Result<(), String> {
-    for (stage, path) in stage_files {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-        }
-        let contents = format!(
-            "# {title}\n\nWork ID: {work_id}\nSession: {session_id}\nTopic: {topic}\nStage: {}\n",
-            stage.as_str()
-        );
-        fs::write(path, contents)
-            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
-    }
-    Ok(())
+    stage: WorkStage,
+) -> String {
+    format!(
+        "# {title}\n\nWork ID: {work_id}\nSession: {session_id}\nTopic: {topic}\nStage: {}\n",
+        stage.as_str()
+    )
 }
 
 fn update_stage_status(
@@ -528,52 +585,66 @@ fn insert_review_entry(
     Ok(())
 }
 
+fn load_stage_content_with_conn(conn: &Connection, work_id: &str, stage: WorkStage) -> Result<String, String> {
+    conn.query_row(
+        "SELECT content FROM work_stage WHERE work_id = ?1 AND stage_name = ?2",
+        params![work_id, stage.as_str()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("failed to load content for {work_id} stage {}: {error}", stage.as_str()))?
+    .ok_or_else(|| format!("missing content for {work_id} stage {}", stage.as_str()))
+}
+
 fn load_work_item_with_conn(conn: &Connection, work_id: &str) -> Result<WorkItem, String> {
     let row = conn
         .query_row(
-            "SELECT session_id, title, owner_agent_id, current_stage, data_json, created_at, updated_at FROM work_item WHERE work_id = ?1",
+            "SELECT tile_id, session_id, title, owner_agent_id, current_stage, data_json, created_at, updated_at FROM work_item WHERE work_id = ?1",
             [work_id],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| format!("failed to load work item {work_id}: {error}"))?
         .ok_or_else(|| format!("unknown work item: {work_id}"))?;
-    let current_stage = parse_stage(&row.3)?;
-    let data = serde_json::from_str::<WorkItemData>(&row.4)
+    let tile_id = row
+        .0
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("work item {work_id} is missing a tile id"))?;
+    let current_stage = parse_stage(&row.4)?;
+    let data = serde_json::from_str::<WorkItemData>(&row.5)
         .map_err(|error| format!("failed to parse work item data for {work_id}: {error}"))?;
-    let owner_agent_id = network::derived_work_owner_agent_id_with_conn(conn, &row.0, work_id)?;
+    let owner_agent_id = network::controller_agent_id_with_conn(conn, &row.1, &tile_id)?;
 
     let mut stages = Vec::new();
     {
         let mut stmt = conn
-            .prepare("SELECT stage_name, status, file_path FROM work_stage WHERE work_id = ?1")
+            .prepare("SELECT stage_name, status FROM work_stage WHERE work_id = ?1")
             .map_err(|error| format!("failed to prepare work stage query: {error}"))?;
         let rows = stmt
             .query_map([work_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
                 ))
             })
             .map_err(|error| format!("failed to query work stages: {error}"))?;
         for row in rows {
-            let (stage_name, status_name, file_path) =
+            let (stage_name, status_name) =
                 row.map_err(|error| format!("failed to read work stage row: {error}"))?;
             stages.push(WorkStageState {
                 stage: parse_stage(&stage_name)?,
                 status: parse_stage_status(&status_name)?,
-                file_path,
             });
         }
     }
@@ -608,16 +679,30 @@ fn load_work_item_with_conn(conn: &Connection, work_id: &str) -> Result<WorkItem
 
     Ok(WorkItem {
         work_id: work_id.to_string(),
-        session_id: row.0,
-        title: row.1,
+        tile_id,
+        session_id: row.1,
+        title: row.2,
         topic: data.topic,
         owner_agent_id,
         current_stage,
         stages,
         reviews,
-        created_at: row.5,
-        updated_at: row.6,
+        created_at: row.6,
+        updated_at: row.7,
     })
+}
+
+fn load_work_item_by_tile_id_with_conn(conn: &Connection, tile_id: &str) -> Result<WorkItem, String> {
+    let work_id = conn
+        .query_row(
+            "SELECT work_id FROM work_item WHERE tile_id = ?1",
+            [tile_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to load work id for tile {tile_id}: {error}"))?
+        .ok_or_else(|| format!("unknown work tile: {tile_id}"))?;
+    load_work_item_with_conn(conn, &work_id)
 }
 
 fn parse_stage(value: &str) -> Result<WorkStage, String> {
@@ -651,7 +736,7 @@ fn parse_review_decision(value: &str) -> Result<WorkReviewDecision, String> {
 mod tests {
     use super::{
         approve_work_stage_at, complete_work_stage_at, create_work_item_at, delete_work_item_at,
-        get_work_item_at, improve_work_stage_at, list_work_at, stage_file_map,
+        get_work_item_at, improve_work_stage_at, list_work_at, read_current_stage_preview_at,
         start_work_stage_at, WorkListScope, WorkStage, WorkStageStatus,
     };
     use crate::{
@@ -679,6 +764,7 @@ mod tests {
             agent_type: AgentType::Claude,
             agent_role: AgentRole::Worker,
             tile_id: format!("%{agent_id}"),
+            pane_id: format!("%{agent_id}"),
             window_id: format!("@{agent_id}"),
             session_id: session_id.to_string(),
             title: format!("Agent {agent_id}"),
@@ -700,12 +786,13 @@ mod tests {
 
     fn connect_owner(db_path: &PathBuf, work_id: &str, agent: &AgentInfo) {
         db::replace_agents_at(db_path, std::slice::from_ref(agent)).unwrap();
+        let item = get_work_item_at(db_path, work_id).unwrap();
         network::connect_at(
             db_path,
             &owner_tile(agent),
             TilePort::Left,
             &NetworkTileDescriptor {
-                tile_id: network::work_tile_id(work_id),
+                tile_id: item.tile_id,
                 session_id: agent.session_id.clone(),
                 kind: NetworkTileKind::Work,
             },
@@ -715,22 +802,28 @@ mod tests {
     }
 
     #[test]
-    fn creates_work_item_stage_files_and_auto_topic() {
+    fn creates_work_item_stage_content_in_sqlite_without_stage_files() {
         let db_path = temp_db_path("create");
         let project_root = temp_root("create-project");
         db::open_at(&db_path).unwrap();
 
-        let item = create_work_item_at(&db_path, &project_root, "$4", "Socket refactor").unwrap();
+        let item = create_work_item_at(&db_path, "$4", "Socket refactor").unwrap();
         assert_eq!(item.work_id, "work-s4-001");
         assert_eq!(item.topic, "#work-s4-001");
         assert_eq!(item.current_stage, WorkStage::Plan);
         assert_eq!(item.current_stage_state().unwrap().status, WorkStageStatus::Ready);
         assert_eq!(item.owner_agent_id, None);
 
-        let stage_files = stage_file_map(&project_root, "$4", &item.work_id);
-        for path in stage_files.values() {
-            assert!(path.exists(), "missing stage file {}", path.display());
-        }
+        let content = db::open_at(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT content FROM work_stage WHERE work_id = ?1 AND stage_name = ?2",
+                rusqlite::params![item.work_id.clone(), "plan"],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(content.contains("# Socket refactor"));
+        assert!(!project_root.join("work").exists());
 
         let listed = list_work_at(&db_path, WorkListScope::CurrentSession("$4".to_string())).unwrap();
         assert_eq!(listed.len(), 1);
@@ -738,13 +831,24 @@ mod tests {
     }
 
     #[test]
+    fn reads_current_stage_preview_from_sqlite() {
+        let db_path = temp_db_path("preview");
+        let _project_root = temp_root("preview-project");
+        db::open_at(&db_path).unwrap();
+
+        let item = create_work_item_at(&db_path, "$3", "Preview item").unwrap();
+        let preview = read_current_stage_preview_at(&db_path, &item.work_id).unwrap();
+        assert!(preview.contains("# Preview item"));
+        assert!(preview.contains("Stage: plan"));
+    }
+
+    #[test]
     fn derives_owner_only_from_work_left_port_connection() {
         let db_path = temp_db_path("owner-derivation");
-        let project_root = temp_root("owner-derivation-project");
         db::open_at(&db_path).unwrap();
 
         let owner = agent("owner-1", "$1");
-        let item = create_work_item_at(&db_path, &project_root, "$1", "Owned item").unwrap();
+        let item = create_work_item_at(&db_path, "$1", "Owned item").unwrap();
         assert_eq!(item.owner_agent_id, None);
 
         connect_owner(&db_path, &item.work_id, &owner);
@@ -754,7 +858,7 @@ mod tests {
         network::disconnect_at(
             &db_path,
             &owner.session_id,
-            &network::work_tile_id(&item.work_id),
+            &item.tile_id,
             TilePort::Left,
         )
         .unwrap();
@@ -765,11 +869,10 @@ mod tests {
     #[test]
     fn enforces_stage_lifecycle_and_review_flow() {
         let db_path = temp_db_path("lifecycle");
-        let project_root = temp_root("lifecycle-project");
         db::open_at(&db_path).unwrap();
 
         let owner = agent("owner-1", "$7");
-        let item = create_work_item_at(&db_path, &project_root, "$7", "PRD flow").unwrap();
+        let item = create_work_item_at(&db_path, "$7", "PRD flow").unwrap();
         connect_owner(&db_path, &item.work_id, &owner);
         let work_id = item.work_id.clone();
 
@@ -797,12 +900,11 @@ mod tests {
     #[test]
     fn rejects_non_owner_updates_requires_improve_comment_and_completes_artifact() {
         let db_path = temp_db_path("owner-only");
-        let project_root = temp_root("owner-only-project");
         db::open_at(&db_path).unwrap();
 
         let owner = agent("owner-1", "$9");
         let outsider = agent("outsider-1", "$9");
-        let item = create_work_item_at(&db_path, &project_root, "$9", "Artifact flow").unwrap();
+        let item = create_work_item_at(&db_path, "$9", "Artifact flow").unwrap();
         connect_owner(&db_path, &item.work_id, &owner);
         let work_id = item.work_id.clone();
 
@@ -841,11 +943,10 @@ mod tests {
     #[test]
     fn clears_derived_owner_when_agent_edges_are_removed() {
         let db_path = temp_db_path("dead-cleanup");
-        let project_root = temp_root("dead-cleanup-project");
         db::open_at(&db_path).unwrap();
 
         let owner = agent("owner-1", "$5");
-        let item = create_work_item_at(&db_path, &project_root, "$5", "Cleanup flow").unwrap();
+        let item = create_work_item_at(&db_path, "$5", "Cleanup flow").unwrap();
         let work_id = item.work_id.clone();
         connect_owner(&db_path, &work_id, &owner);
 
@@ -858,32 +959,30 @@ mod tests {
     }
 
     #[test]
-    fn deletes_work_item_rows_and_stage_files() {
+    fn deletes_work_item_rows_without_stage_files() {
         let db_path = temp_db_path("delete");
         let project_root = temp_root("delete-project");
         db::open_at(&db_path).unwrap();
 
-        let item = create_work_item_at(&db_path, &project_root, "$8", "Delete me").unwrap();
+        let item = create_work_item_at(&db_path, "$8", "Delete me").unwrap();
         let work_id = item.work_id.clone();
-        let stage_files = stage_file_map(&project_root, "$8", &work_id);
-        assert!(stage_files.values().all(|path| path.exists()));
+        assert!(!project_root.join("work").exists());
 
-        delete_work_item_at(&db_path, &project_root, &work_id).unwrap();
+        delete_work_item_at(&db_path, &work_id).unwrap();
 
         let lookup_error = get_work_item_at(&db_path, &work_id).unwrap_err();
         assert!(lookup_error.contains("unknown work item"));
-        assert!(stage_files.values().all(|path| !path.exists()));
     }
 
     #[test]
     fn lists_completed_review_items_before_newer_in_progress_items() {
         let db_path = temp_db_path("ordering");
-        let project_root = temp_root("ordering-project");
+        let _project_root = temp_root("ordering-project");
         db::open_at(&db_path).unwrap();
 
         let review_owner = agent("owner-1", "$6");
         let review_item =
-            create_work_item_at(&db_path, &project_root, "$6", "Review item").unwrap();
+            create_work_item_at(&db_path, "$6", "Review item").unwrap();
         connect_owner(&db_path, &review_item.work_id, &review_owner);
         let review_item =
             start_work_stage_at(&db_path, &review_item.work_id, &review_owner.agent_id).unwrap();
@@ -893,7 +992,7 @@ mod tests {
 
         let newer_owner = agent("owner-2", "$6");
         let newer_item =
-            create_work_item_at(&db_path, &project_root, "$6", "Newer ready item").unwrap();
+            create_work_item_at(&db_path, "$6", "Newer ready item").unwrap();
         connect_owner(&db_path, &newer_item.work_id, &newer_owner);
 
         let listed = list_work_at(&db_path, WorkListScope::CurrentSession("$6".to_string())).unwrap();

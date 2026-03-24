@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
@@ -7,6 +10,7 @@ use tauri::{
 
 const DEFAULT_BROWSER_URL: &str = "https://example.com/";
 const BROWSER_URL_EVENT: &str = "browser-url-changed";
+const BROWSER_DRIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +145,191 @@ fn apply_browser_viewport(
 
 fn get_browser_webview(app: &tauri::AppHandle, pane_id: &str) -> Option<tauri::Webview> {
     app.get_webview(&browser_webview_label(pane_id))
+}
+
+fn required_browser_drive_string_arg(args: &Value, field: &str, action: &str) -> Result<String, String> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("browser_drive {action} requires a non-empty string field `{field}`"))
+}
+
+fn browser_drive_action_script(action: &str, args: &Value) -> Result<String, String> {
+    match action {
+        "click" => {
+            let selector = serde_json::to_string(&required_browser_drive_string_arg(args, "selector", action)?)
+                .map_err(|error| format!("failed to serialize browser selector: {error}"))?;
+            Ok(format!(
+                r#"
+const element = document.querySelector({selector});
+if (!(element instanceof Element)) {{
+  throw new Error(`No element matched selector: ${{{selector}}}`);
+}}
+element.scrollIntoView({{ block: 'center', inline: 'center' }});
+if (typeof element.click === 'function') {{
+  element.click();
+}} else {{
+  element.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, composed: true }}));
+}}
+return {{ clicked: true }};
+"#
+            ))
+        }
+        "type" => {
+            let selector = serde_json::to_string(&required_browser_drive_string_arg(args, "selector", action)?)
+                .map_err(|error| format!("failed to serialize browser selector: {error}"))?;
+            let text = serde_json::to_string(&required_browser_drive_string_arg(args, "text", action)?)
+                .map_err(|error| format!("failed to serialize browser input text: {error}"))?;
+            let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(true);
+            Ok(format!(
+                r#"
+const element = document.querySelector({selector});
+if (!(element instanceof Element)) {{
+  throw new Error(`No element matched selector: ${{{selector}}}`);
+}}
+element.scrollIntoView({{ block: 'center', inline: 'center' }});
+if (typeof element.focus === 'function') {{
+  element.focus();
+}}
+const text = {text};
+const clear = {clear};
+if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {{
+  const nextValue = clear ? text : `${{element.value}}${{text}}`;
+  element.value = nextValue;
+  element.dispatchEvent(new Event('input', {{ bubbles: true, cancelable: true }}));
+  element.dispatchEvent(new Event('change', {{ bubbles: true, cancelable: true }}));
+  return {{ value: element.value }};
+}}
+if (element instanceof HTMLElement && element.isContentEditable) {{
+  const nextValue = clear ? text : `${{element.textContent ?? ''}}${{text}}`;
+  element.textContent = nextValue;
+  element.dispatchEvent(new Event('input', {{ bubbles: true, cancelable: true }}));
+  element.dispatchEvent(new Event('change', {{ bubbles: true, cancelable: true }}));
+  return {{ value: element.textContent ?? '' }};
+}}
+throw new Error(`Element matched by ${{{selector}}} is not a supported text input`);
+"#
+            ))
+        }
+        "dom_query" => {
+            let js = required_browser_drive_string_arg(args, "js", action)?;
+            Ok(format!("return (\n{js}\n);"))
+        }
+        "eval" => required_browser_drive_string_arg(args, "js", action),
+        other => Err(format!("unsupported browser_drive action: {other}")),
+    }
+}
+
+fn browser_drive_wrapper_script(action_script: &str, args: &Value) -> Result<String, String> {
+    let args_json = serde_json::to_string(args)
+        .map_err(|error| format!("failed to serialize browser drive args: {error}"))?;
+    Ok(format!(
+        r#"(function() {{
+const __herdArgs = {args_json};
+const __herdResult = (() => {{
+  try {{
+    const __result = (function(args) {{
+{action_script}
+    }})(__herdArgs);
+    return JSON.stringify({{
+      ok: true,
+      data: __result === undefined ? null : __result,
+    }});
+  }} catch (error) {{
+    const message = error && typeof error === 'object' && 'message' in error
+      ? String(error.message)
+      : String(error);
+    return JSON.stringify({{
+      ok: false,
+      error: message,
+    }});
+  }}
+}})();
+return __herdResult;
+}})();"#,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserDriveEnvelope {
+    ok: bool,
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn evaluate_browser_script(webview: &tauri::Webview, script: &str) -> Result<String, String> {
+    use block2::{DynBlock, RcBlock};
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_web_kit::WKWebView;
+
+    let (sender, receiver) = mpsc::channel();
+    let script = script.to_string();
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            let wk_webview: &WKWebView = &*platform_webview.inner().cast();
+            let script = NSString::from_str(&script);
+            let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                let result = autoreleasepool(|_| {
+                    if !error.is_null() {
+                        return Err((&*error).localizedDescription().to_string());
+                    }
+                    if value.is_null() {
+                        return Err("browser_drive returned no result".to_string());
+                    }
+                    let value = &*(value.cast::<NSString>());
+                    Ok(value.to_string())
+                });
+                let _ = sender.send(result);
+            });
+            let callback: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError) + 'static> = &callback;
+            wk_webview.evaluateJavaScript_completionHandler(&script, Some(callback));
+        })
+        .map_err(|error| format!("failed to access browser webview: {error}"))?;
+    match receiver.recv_timeout(BROWSER_DRIVE_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("browser_drive evaluation timed out in browser webview".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("browser_drive evaluation channel disconnected".to_string())
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn evaluate_browser_script(_webview: &tauri::Webview, _script: &str) -> Result<String, String> {
+    Err("browser_drive is currently supported only on macOS".to_string())
+}
+
+pub fn drive_browser_webview(
+    app: &tauri::AppHandle,
+    _state: &crate::state::AppState,
+    pane_id: &str,
+    action: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let webview = get_browser_webview(app, pane_id)
+        .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
+    let action_script = browser_drive_action_script(action, args)?;
+    let wrapped = browser_drive_wrapper_script(&action_script, args)?;
+    let raw_result = evaluate_browser_script(&webview, &wrapped)
+        .map_err(|error| format!("browser_drive {action} failed for pane {pane_id}: {error}"))?;
+    let envelope: BrowserDriveEnvelope = serde_json::from_str(&raw_result)
+        .map_err(|error| format!("browser_drive {action} returned invalid JSON: {error}"))?;
+    if envelope.ok {
+        Ok(envelope.data.unwrap_or(Value::Null))
+    } else {
+        Err(envelope
+            .error
+            .unwrap_or_else(|| format!("browser_drive {action} failed for pane {pane_id}")))
+    }
 }
 
 fn ensure_browser_webview(

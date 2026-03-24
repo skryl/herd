@@ -33,6 +33,13 @@
     $appState.tmux.activeSessionId ? ($appState.tmux.sessions[$appState.tmux.activeSessionId] ?? null) : null,
   );
   let sessionWorkItems = $derived($activeSessionWorkItems);
+  let selectedTileId = $derived.by(() => {
+    const paneId = $appState.ui.selectedPaneId;
+    if (!paneId) return null;
+    const pane = $appState.tmux.panes[paneId];
+    if (!pane) return null;
+    return pane.tile_id ?? $appState.tmux.windows[pane.window_id]?.tile_id ?? null;
+  });
 
   async function handleEditSpawnDirectory() {
     if (!activeSession) return;
@@ -181,7 +188,7 @@
                 <button
                   type="button"
                   class="agent-item"
-                  class:active-agent={agent.tile_id === $appState.ui.selectedPaneId}
+                  class:active-agent={agent.tile_id === selectedTileId}
                   class:dead-agent={!agent.alive}
                   onclick={() => selectAgentItem(agent.agent_id)}
                 >

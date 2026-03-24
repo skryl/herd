@@ -56,7 +56,8 @@ import {
   buildCanvasWorkCards,
   buildContextMenuItems,
   buildCanvasConnections,
-  buildAgentActivityEntries,
+  buildTestDriverProjection,
+  buildTileActivityEntries,
   clientDeltaToWorldDelta,
   buildRenderedNetworkConnections,
   buildSidebarItems,
@@ -82,6 +83,48 @@ function freshState(): AppStateTree {
   return JSON.parse(JSON.stringify(initialAppState)) as AppStateTree;
 }
 
+const TILE_BY_PANE = {
+  '%1': 'AaAaA1',
+  '%2': 'BbBbB2',
+  '%3': 'CcCcC3',
+  '%4': 'DdDdD4',
+  '%5': 'EeEeE5',
+  '%6': 'FfFfF6',
+  '%7': 'GgGgG7',
+  '%8': 'HhHhH8',
+} as const;
+
+const TILE_BY_WINDOW = {
+  '@1': TILE_BY_PANE['%1'],
+  '@2': TILE_BY_PANE['%2'],
+  '@3': TILE_BY_PANE['%3'],
+  '@4': TILE_BY_PANE['%4'],
+  '@5': TILE_BY_PANE['%5'],
+  '@6': TILE_BY_PANE['%6'],
+  '@7': TILE_BY_PANE['%7'],
+  '@8': TILE_BY_PANE['%8'],
+} as const;
+
+function tileForPane(paneId: keyof typeof TILE_BY_PANE): string {
+  return TILE_BY_PANE[paneId];
+}
+
+function tileForWindow(windowId: keyof typeof TILE_BY_WINDOW): string {
+  return TILE_BY_WINDOW[windowId];
+}
+
+function tileForWork(workId: string): string {
+  return {
+    'work-s1-001': 'WwWwW1',
+    'work-s1-002': 'XxXxX2',
+    'work-s2-001': 'YyYyY3',
+  }[workId] ?? `work-${workId}`;
+}
+
+function layoutEntryForWindow(state: AppStateTree, windowId: keyof typeof TILE_BY_WINDOW) {
+  return state.layout.entries[tileForWindow(windowId)];
+}
+
 function baseSnapshot(): TmuxSnapshot {
   return {
     version: 1,
@@ -94,15 +137,28 @@ function baseSnapshot(): TmuxSnapshot {
       { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3', root_cwd: '/Users/skryl/Dev/herd/src-tauri' },
     ],
     windows: [
-      { id: '@1', session_id: '$1', session_name: 'Main', index: 0, name: 'shell', active: true, cols: 80, rows: 24, pane_ids: ['%1'] },
-      { id: '@2', session_id: '$1', session_name: 'Main', index: 1, name: 'logs', active: false, cols: 90, rows: 28, pane_ids: ['%2'] },
-      { id: '@3', session_id: '$2', session_name: 'Build', index: 0, name: 'build', active: true, cols: 100, rows: 30, pane_ids: ['%3'] },
+      { id: '@1', tile_id: tileForWindow('@1'), session_id: '$1', session_name: 'Main', index: 0, name: 'shell', active: true, cols: 80, rows: 24, pane_ids: ['%1'] },
+      { id: '@2', tile_id: tileForWindow('@2'), session_id: '$1', session_name: 'Main', index: 1, name: 'logs', active: false, cols: 90, rows: 28, pane_ids: ['%2'] },
+      { id: '@3', tile_id: tileForWindow('@3'), session_id: '$2', session_name: 'Build', index: 0, name: 'build', active: true, cols: 100, rows: 30, pane_ids: ['%3'] },
     ],
     panes: [
-      { id: '%1', session_id: '$1', window_id: '@1', window_index: 0, pane_index: 0, cols: 80, rows: 24, title: 'shell', command: 'zsh', active: true, dead: false },
-      { id: '%2', session_id: '$1', window_id: '@2', window_index: 1, pane_index: 0, cols: 90, rows: 28, title: 'logs', command: 'tail', active: false, dead: false },
-      { id: '%3', session_id: '$2', window_id: '@3', window_index: 0, pane_index: 0, cols: 100, rows: 30, title: 'build', command: 'npm', active: true, dead: false },
+      { id: '%1', tile_id: tileForPane('%1'), session_id: '$1', window_id: '@1', window_index: 0, pane_index: 0, cols: 80, rows: 24, title: 'shell', command: 'zsh', active: true, dead: false },
+      { id: '%2', tile_id: tileForPane('%2'), session_id: '$1', window_id: '@2', window_index: 1, pane_index: 0, cols: 90, rows: 28, title: 'logs', command: 'tail', active: false, dead: false },
+      { id: '%3', tile_id: tileForPane('%3'), session_id: '$2', window_id: '@3', window_index: 0, pane_index: 0, cols: 100, rows: 30, title: 'build', command: 'npm', active: true, dead: false },
     ],
+  };
+}
+
+function baseTestDriverStatus() {
+  return {
+    enabled: true,
+    frontend_ready: true,
+    bootstrap_complete: true,
+    runtime_id: null,
+    tmux_server_name: 'herd',
+    socket_path: '/tmp/herd.sock',
+    tmux_server_alive: true,
+    control_client_alive: true,
   };
 }
 
@@ -122,6 +178,7 @@ function snapshotWithMainWindowCount(count: number): TmuxSnapshot {
     extraWindowIds.push(windowId);
     extraWindows.push({
       id: windowId,
+      tile_id: tileForWindow(windowId as keyof typeof TILE_BY_WINDOW),
       session_id: '$1',
       session_name: 'Main',
       index: offset + 2,
@@ -133,6 +190,7 @@ function snapshotWithMainWindowCount(count: number): TmuxSnapshot {
     });
     extraPanes.push({
       id: paneId,
+      tile_id: tileForPane(paneId as keyof typeof TILE_BY_PANE),
       session_id: '$1',
       window_id: windowId,
       window_index: offset + 2,
@@ -179,7 +237,7 @@ beforeEach(() => {
   __resetWindowResizeTrackingForTest();
   Object.values(tauriMocks).forEach((mockFn) => mockFn.mockReset());
   tauriMocks.getClaudeMenuDataForPane.mockResolvedValue({ commands: [], skills: [] });
-  tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], connections: [] });
+  tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
   tauriMocks.getWorkItems.mockResolvedValue([]);
   tauriMocks.resizeWindow.mockResolvedValue(undefined);
   tauriMocks.spawnAgentWindow.mockResolvedValue(undefined);
@@ -188,17 +246,19 @@ beforeEach(() => {
 });
 
 function sampleWorkItem(overrides: Partial<WorkItem> = {}): WorkItem {
+  const workId = overrides.work_id ?? 'work-s1-001';
   return {
-    work_id: 'work-s1-001',
+    work_id: workId,
+    tile_id: tileForWork(workId),
     session_id: '$1',
     title: 'Socket refactor',
     topic: '#work-s1-001',
     owner_agent_id: null,
     current_stage: 'plan',
     stages: [
-      { stage: 'plan', status: 'ready', file_path: '/tmp/plan.md' },
-      { stage: 'prd', status: 'ready', file_path: '/tmp/prd.md' },
-      { stage: 'artifact', status: 'ready', file_path: '/tmp/artifact.md' },
+      { stage: 'plan', status: 'ready' },
+      { stage: 'prd', status: 'ready' },
+      { stage: 'artifact', status: 'ready' },
     ],
     reviews: [],
     created_at: 1,
@@ -219,14 +279,21 @@ describe('applyTmuxSnapshotToState', () => {
     expect(next.tmux.windowOrder).toEqual(['@1', '@2', '@3']);
     expect(next.tmux.sessions['$1'].root_cwd).toBe('/Users/skryl/Dev/herd');
     expect(next.ui.selectedPaneId).toBe('%1');
-    expect(Object.keys(next.layout.entries)).toEqual(['@1', '@2', '@3']);
+    expect(Object.keys(next.layout.entries)).toEqual([
+      tileForWindow('@1'),
+      tileForWindow('@2'),
+      tileForWindow('@3'),
+    ]);
   });
 
   it('drops stale layout entries and preserves read-only pane metadata', () => {
-    const withSnapshot = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    withSnapshot.layout.entries['@1'] = { x: 10, y: 20, width: 500, height: 300 };
+    const withSnapshot = applyWorkItemsToState(
+      applyTmuxSnapshotToState(freshState(), baseSnapshot()),
+      [sampleWorkItem()],
+    );
+    withSnapshot.layout.entries[tileForWindow('@1')] = { x: 10, y: 20, width: 500, height: 300 };
     withSnapshot.layout.entries['@9'] = { x: 1, y: 1, width: 1, height: 1 };
-    withSnapshot.layout.entries['work:work-s1-001'] = { x: 1400, y: 120, width: 360, height: 320 };
+    withSnapshot.layout.entries[tileForWork('work-s1-001')] = { x: 1400, y: 120, width: 360, height: 320 };
     const readOnlyState = applyPaneReadOnlyToState(withSnapshot, '%2', true);
 
     const next = applyTmuxSnapshotToState(readOnlyState, {
@@ -236,7 +303,7 @@ describe('applyTmuxSnapshotToState', () => {
         { id: '$1', name: 'Main', active: true, window_ids: ['@1'], active_window_id: '@1' },
       ],
       windows: [
-        { id: '@1', session_id: '$1', session_name: 'Main', index: 0, name: 'shell', active: true, cols: 80, rows: 24, pane_ids: ['%1'] },
+        { ...baseSnapshot().windows[0], active: true },
       ],
       panes: [baseSnapshot().panes[0]],
       active_session_id: '$1',
@@ -244,16 +311,16 @@ describe('applyTmuxSnapshotToState', () => {
       active_pane_id: '%1',
     });
 
-    expect(next.layout.entries['@1']).toEqual({ x: 10, y: 20, width: 500, height: 300 });
+    expect(next.layout.entries[tileForWindow('@1')]).toEqual({ x: 10, y: 20, width: 500, height: 300 });
     expect(next.layout.entries['@9']).toBeUndefined();
-    expect(next.layout.entries['work:work-s1-001']).toEqual({ x: 1400, y: 120, width: 360, height: 320 });
+    expect(next.layout.entries[tileForWork('work-s1-001')]).toEqual({ x: 1400, y: 120, width: 360, height: 320 });
     expect(next.tmux.panes['%2']).toBeUndefined();
   });
 
   it('preserves tile layout entries when switching tabs between sessions', () => {
     const initial = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    initial.layout.entries['@1'] = { x: 10, y: 20, width: 500, height: 300 };
-    initial.layout.entries['@3'] = { x: 700, y: 40, width: 640, height: 400 };
+    initial.layout.entries[tileForWindow('@1')] = { x: 10, y: 20, width: 500, height: 300 };
+    initial.layout.entries[tileForWindow('@3')] = { x: 700, y: 40, width: 640, height: 400 };
 
     const switched = applyTmuxSnapshotToState(initial, {
       ...baseSnapshot(),
@@ -277,8 +344,8 @@ describe('applyTmuxSnapshotToState', () => {
       ],
     });
 
-    expect(switched.layout.entries['@1']).toEqual({ x: 10, y: 20, width: 500, height: 300 });
-    expect(switched.layout.entries['@3']).toEqual({ x: 700, y: 40, width: 640, height: 400 });
+    expect(switched.layout.entries[tileForWindow('@1')]).toEqual({ x: 10, y: 20, width: 500, height: 300 });
+    expect(switched.layout.entries[tileForWindow('@3')]).toEqual({ x: 700, y: 40, width: 640, height: 400 });
     expect(switched.tmux.activeSessionId).toBe('$2');
     expect(switched.ui.selectedPaneId).toBe('%3');
   });
@@ -297,6 +364,7 @@ describe('applyTmuxSnapshotToState', () => {
         { ...baseSnapshot().windows[2] },
         {
           id: '@4',
+          tile_id: tileForWindow('@4'),
           session_id: '$1',
           session_name: 'Main',
           index: 2,
@@ -312,6 +380,7 @@ describe('applyTmuxSnapshotToState', () => {
         ...baseSnapshot().panes,
         {
           id: '%4',
+          tile_id: tileForPane('%4'),
           session_id: '$1',
           window_id: '@4',
           window_index: 2,
@@ -326,30 +395,31 @@ describe('applyTmuxSnapshotToState', () => {
       ],
     });
 
-    expect(next.layout.entries['@4'].x).toBeGreaterThan(next.layout.entries['@1'].x + next.layout.entries['@1'].width);
-    expect(Math.abs(next.layout.entries['@4'].y - next.layout.entries['@1'].y)).toBeLessThanOrEqual(60);
+    expect(next.layout.entries[tileForWindow('@4')].x).toBeGreaterThan(next.layout.entries[tileForWindow('@1')].x + next.layout.entries[tileForWindow('@1')].width);
+    expect(Math.abs(next.layout.entries[tileForWindow('@4')].y - next.layout.entries[tileForWindow('@1')].y)).toBeLessThanOrEqual(60);
   });
 });
 
 describe('network connectors', () => {
   it('builds curved network connector control points', () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 240, height: 160 };
-    state.layout.entries['@2'] = { x: 420, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
     state.network.connections = [{
       session_id: '$1',
-      from_tile_id: '%1',
+      from_tile_id: tileForPane('%1'),
       from_port: 'right',
-      to_tile_id: '%2',
+      to_tile_id: tileForPane('%2'),
       to_port: 'left',
     }];
 
     const [connection] = buildRenderedNetworkConnections(state);
     expect(connection).toMatchObject({
-      fromTileId: '%1',
+      fromTileId: tileForPane('%1'),
       fromPort: 'right',
-      toTileId: '%2',
+      toTileId: tileForPane('%2'),
       toPort: 'left',
+      wireMode: 'full_duplex',
       x1: 240,
       y1: 80,
       x2: 420,
@@ -359,17 +429,34 @@ describe('network connectors', () => {
     expect(connection.cx2).toBeLessThan(connection.x2);
   });
 
+  it('keeps browser connections full-duplex on non-left ports', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%2', 'browser');
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    state.network.connections = [{
+      session_id: '$1',
+      from_tile_id: tileForPane('%1'),
+      from_port: 'right',
+      to_tile_id: tileForPane('%2'),
+      to_port: 'top',
+    }];
+
+    const [connection] = buildRenderedNetworkConnections(state);
+    expect(connection?.wireMode).toBe('full_duplex');
+  });
+
   it('snaps network drags to the nearest valid target port and completes on mouseup', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 240, height: 160 };
-    state.layout.entries['@2'] = { x: 420, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
     appState.set(state);
 
-    beginNetworkPortDrag('%1', 'right', 240, 80);
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
     updateNetworkPortDrag(405, 136);
 
     expect(get(activeNetworkDrag)).toMatchObject({
-      snappedTileId: '%2',
+      snappedTileId: tileForPane('%2'),
       snappedPort: 'left',
       snappedX: 420,
       snappedY: 130,
@@ -377,28 +464,33 @@ describe('network connectors', () => {
 
     await completeNetworkPortDrag();
 
-    expect(tauriMocks.connectNetworkTiles).toHaveBeenCalledWith('%1', 'right', '%2', 'left');
+    expect(tauriMocks.connectNetworkTiles).toHaveBeenCalledWith(
+      tileForPane('%1'),
+      'right',
+      tileForPane('%2'),
+      'left',
+    );
   });
 
   it('detaches occupied drags from the opposite endpoint', () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 240, height: 160 };
-    state.layout.entries['@2'] = { x: 420, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
     state.network.connections = [{
       session_id: '$1',
-      from_tile_id: '%1',
+      from_tile_id: tileForPane('%1'),
       from_port: 'right',
-      to_tile_id: '%2',
+      to_tile_id: tileForPane('%2'),
       to_port: 'left',
     }];
     appState.set(state);
 
-    beginNetworkPortDrag('%1', 'right', 240, 80);
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
 
     expect(get(activeNetworkDrag)).toMatchObject({
-      tileId: '%2',
+      tileId: tileForPane('%2'),
       port: 'left',
-      grabbedTileId: '%1',
+      grabbedTileId: tileForPane('%1'),
       grabbedPort: 'right',
       startX: 420,
       startY: 130,
@@ -413,6 +505,7 @@ describe('network connectors', () => {
     snapshot.sessions[0].window_ids.push('@4');
     snapshot.windows.push({
       id: '@4',
+      tile_id: tileForWindow('@4'),
       session_id: '$1',
       session_name: 'Main',
       index: 2,
@@ -424,6 +517,7 @@ describe('network connectors', () => {
     });
     snapshot.panes.push({
       id: '%4',
+      tile_id: tileForPane('%4'),
       session_id: '$1',
       window_id: '@4',
       window_index: 2,
@@ -437,44 +531,49 @@ describe('network connectors', () => {
     });
 
     const state = applyTmuxSnapshotToState(freshState(), snapshot);
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 240, height: 160 };
-    state.layout.entries['@2'] = { x: 420, y: 40, width: 260, height: 180 };
-    state.layout.entries['@4'] = { x: 780, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@4')] = { x: 780, y: 40, width: 260, height: 180 };
     state.network.connections = [{
       session_id: '$1',
-      from_tile_id: '%1',
+      from_tile_id: tileForPane('%1'),
       from_port: 'right',
-      to_tile_id: '%2',
+      to_tile_id: tileForPane('%2'),
       to_port: 'left',
     }];
     appState.set(state);
 
-    beginNetworkPortDrag('%1', 'right', 240, 80);
-    await completeNetworkPortDrag('%4', 'left');
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    await completeNetworkPortDrag(tileForPane('%4'), 'left');
 
-    expect(tauriMocks.connectNetworkTiles).toHaveBeenCalledWith('%2', 'left', '%4', 'left');
+    expect(tauriMocks.connectNetworkTiles).toHaveBeenCalledWith(
+      tileForPane('%2'),
+      'left',
+      tileForPane('%4'),
+      'left',
+    );
   });
 
   it('starts a retract animation when an occupied drag is released without reconnecting', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 240, height: 160 };
-    state.layout.entries['@2'] = { x: 420, y: 40, width: 260, height: 180 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
     state.network.connections = [{
       session_id: '$1',
-      from_tile_id: '%1',
+      from_tile_id: tileForPane('%1'),
       from_port: 'right',
-      to_tile_id: '%2',
+      to_tile_id: tileForPane('%2'),
       to_port: 'left',
     }];
     appState.set(state);
 
-    beginNetworkPortDrag('%1', 'right', 240, 80);
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
     updateNetworkPortDrag(332, 108);
     await completeNetworkPortDrag();
 
-    expect(tauriMocks.disconnectNetworkPort).toHaveBeenCalledWith('%2', 'left');
+    expect(tauriMocks.disconnectNetworkPort).toHaveBeenCalledWith(tileForPane('%2'), 'left');
     expect(get(networkReleaseAnimation)).toMatchObject({
-      anchorTileId: '%2',
+      anchorTileId: tileForPane('%2'),
       anchorPort: 'left',
       anchorX: 420,
       anchorY: 130,
@@ -486,7 +585,7 @@ describe('work state', () => {
   it('bootstraps current-session work items from tauri', async () => {
     tauriMocks.getLayoutState.mockResolvedValue({});
     tauriMocks.getTmuxState.mockResolvedValue(baseSnapshot());
-    tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], connections: [] });
+    tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
     tauriMocks.getWorkItems.mockResolvedValue([
       sampleWorkItem(),
       sampleWorkItem({
@@ -494,9 +593,9 @@ describe('work state', () => {
         title: 'PRD review',
         current_stage: 'prd',
         stages: [
-          { stage: 'plan', status: 'approved', file_path: '/tmp/plan-2.md' },
-          { stage: 'prd', status: 'completed', file_path: '/tmp/prd-2.md' },
-          { stage: 'artifact', status: 'ready', file_path: '/tmp/artifact-2.md' },
+          { stage: 'plan', status: 'approved' },
+          { stage: 'prd', status: 'completed' },
+          { stage: 'artifact', status: 'ready' },
         ],
         updated_at: 20,
       }),
@@ -556,7 +655,7 @@ describe('session-scoped agent debug state', () => {
           agent_id: 'agent-1',
           agent_type: 'claude',
           agent_role: 'worker',
-          tile_id: '%1',
+          tile_id: tileForPane('%1'),
           window_id: '@1',
           session_id: '$1',
           title: 'Agent',
@@ -569,7 +668,7 @@ describe('session-scoped agent debug state', () => {
           agent_id: 'agent-2',
           agent_type: 'claude',
           agent_role: 'worker',
-          tile_id: '%3',
+          tile_id: tileForPane('%3'),
           window_id: '@3',
           session_id: '$2',
           title: 'Agent',
@@ -580,6 +679,7 @@ describe('session-scoped agent debug state', () => {
         },
       ],
       agent_logs: [],
+      tile_message_logs: [],
       connections: [],
       topics: [
         { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
@@ -631,7 +731,7 @@ describe('session-scoped agent debug state', () => {
             agent_id: 'agent-1',
             agent_type: 'claude',
             agent_role: 'worker',
-            tile_id: '%1',
+            tile_id: tileForPane('%1'),
             window_id: '@1',
             session_id: '$1',
             title: 'Agent',
@@ -644,7 +744,7 @@ describe('session-scoped agent debug state', () => {
             agent_id: 'agent-2',
             agent_type: 'claude',
             agent_role: 'worker',
-            tile_id: '%3',
+            tile_id: tileForPane('%3'),
             window_id: '@3',
             session_id: '$2',
             title: 'Agent',
@@ -655,6 +755,7 @@ describe('session-scoped agent debug state', () => {
           },
         ],
         agent_logs: [],
+        tile_message_logs: [],
         connections: [],
         topics: [
           { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
@@ -687,7 +788,7 @@ describe('session-scoped agent debug state', () => {
     expect(get(appState).chatter).toEqual([]);
   });
 
-  it('merges persisted agent logs into agent activity entries in timestamp order', () => {
+  it('merges chatter, agent logs, and tile message logs into tile activity entries in timestamp order', () => {
     const state = applyAgentDebugStateToState(
       applyTmuxSnapshotToState(freshState(), baseSnapshot()),
       {
@@ -696,7 +797,7 @@ describe('session-scoped agent debug state', () => {
             agent_id: 'agent-1',
             agent_type: 'claude',
             agent_role: 'worker',
-            tile_id: '%1',
+            tile_id: tileForPane('%1'),
             window_id: '@1',
             session_id: '$1',
             title: 'Agent',
@@ -727,34 +828,56 @@ describe('session-scoped agent debug state', () => {
           {
             session_id: '$1',
             agent_id: 'agent-1',
-            tile_id: '%1',
+            tile_id: tileForPane('%1'),
             kind: 'incoming_hook',
-            text: 'MCP hook [system] Port connected: %1:left <-> work:work-s1-001:left',
+            text: `MCP hook [system] Port connected: ${tileForPane('%1')}:left <-> ${tileForWork('work-s1-001')}:left`,
             timestamp_ms: 10,
           },
           {
             session_id: '$1',
             agent_id: 'agent-1',
-            tile_id: '%1',
+            tile_id: tileForPane('%1'),
             kind: 'outgoing_call',
             text: 'MCP call message_direct {"to_agent_id":"agent-2","message":"hello"}',
             timestamp_ms: 30,
+          },
+        ],
+        tile_message_logs: [
+          {
+            session_id: '$1',
+            layer: 'message',
+            channel: 'socket',
+            target_id: tileForPane('%1'),
+            target_kind: 'agent',
+            wrapper_command: 'tile_call',
+            message_name: 'output_read',
+            caller_tile_id: tileForPane('%2'),
+            args: {},
+            related_tile_ids: [tileForPane('%1'), tileForPane('%2')],
+            outcome: 'ok',
+            duration_ms: 5,
+            timestamp_ms: 25,
           },
         ],
         connections: [],
       },
     );
 
-    expect(buildAgentActivityEntries(state, '%1')).toEqual([
+    expect(buildTileActivityEntries(state, tileForPane('%1'))).toEqual([
       {
         kind: 'incoming_hook',
-        text: 'MCP hook [system] Port connected: %1:left <-> work:work-s1-001:left',
+        text: `MCP hook [system] Port connected: ${tileForPane('%1')}:left <-> ${tileForWork('work-s1-001')}:left`,
         timestamp_ms: 10,
       },
       {
         kind: 'incoming_dm',
         text: 'Agent 2 -> Agent 1: hello',
         timestamp_ms: 20,
+      },
+      {
+        kind: 'message_log',
+        text: `[MESSAGE/SOCKET] recv output_read <- ${tileForPane('%2')}`,
+        timestamp_ms: 25,
       },
       {
         kind: 'outgoing_call',
@@ -913,8 +1036,8 @@ describe('reduceIntent', () => {
     expect(send.effects).toEqual([{ type: 'write-pane', paneId: '%1', data: 'ls\r' }]);
 
     state = reduceIntent(state, { type: 'move-selected-pane', dx: 25, dy: 15 }).state;
-    expect(state.layout.entries['@1'].x).toBeGreaterThan(0);
-    expect(state.layout.entries['@1'].y).toBeGreaterThan(0);
+    expect(state.layout.entries[tileForWindow('@1')].x).toBeGreaterThan(0);
+    expect(state.layout.entries[tileForWindow('@1')].y).toBeGreaterThan(0);
 
     state.ui.canvas = { panX: 100, panY: 200, zoom: 2 };
     state = reduceIntent(state, { type: 'reset-canvas' }).state;
@@ -1025,7 +1148,7 @@ describe('reduceIntent', () => {
           agent_id: 'agent-1',
           agent_type: 'claude',
           agent_role: 'worker',
-          tile_id: '%2',
+          tile_id: tileForPane('%2'),
           window_id: '@2',
           session_id: '$1',
           title: 'Agent',
@@ -1036,6 +1159,7 @@ describe('reduceIntent', () => {
         },
       ],
       agent_logs: [],
+      tile_message_logs: [],
       connections: [],
       topics: [],
       chatter: [],
@@ -1074,6 +1198,114 @@ describe('reduceIntent', () => {
 
     expect(buildContextMenuItems(seeded)).toEqual([
       { id: 'close-shell', label: 'Close Root Agent', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('prefers backend-provided pane roles over title-based browser guesses', () => {
+    const state = applyTmuxSnapshotToState(freshState(), {
+      ...baseSnapshot(),
+      windows: [
+        { ...baseSnapshot().windows[0], name: 'Browser' },
+        ...baseSnapshot().windows.slice(1),
+      ],
+      panes: [
+        { ...baseSnapshot().panes[0], title: 'Browser', role: 'regular' },
+        ...baseSnapshot().panes.slice(1),
+      ],
+    });
+
+    const projection = buildTestDriverProjection(state, baseTestDriverStatus());
+    expect(projection.active_tab_terminals.find((term) => term.id === tileForPane('%1'))?.kind).toBe('regular');
+  });
+
+  it('surfaces one current agent entry per current agent tile and excludes stale non-agent bindings', () => {
+    let state = applyTmuxSnapshotToState(freshState(), {
+      ...baseSnapshot(),
+      active_window_id: '@1',
+      windows: [
+        { ...baseSnapshot().windows[0], name: 'Root' },
+        { ...baseSnapshot().windows[1], id: '@4', tile_id: tileForWindow('@4'), index: 1, name: 'Worker-1', pane_ids: ['%4'] },
+        { ...baseSnapshot().windows[2], id: '@5', tile_id: tileForWindow('@5'), session_id: '$1', session_name: 'Main', active: false, index: 2, name: 'Worker-2', pane_ids: ['%5'], cols: 90, rows: 28 },
+        { ...baseSnapshot().windows[2], id: '@6', tile_id: tileForWindow('@6'), session_id: '$1', session_name: 'Main', active: false, index: 3, name: 'Browser', pane_ids: ['%6'], cols: 90, rows: 28 },
+      ],
+      panes: [
+        { ...baseSnapshot().panes[0], title: 'Root', role: 'root_agent' },
+        { ...baseSnapshot().panes[1], id: '%4', tile_id: tileForPane('%4'), window_id: '@4', window_index: 1, title: 'Worker-1', command: '2.1.81', role: 'claude' },
+        { ...baseSnapshot().panes[2], id: '%5', tile_id: tileForPane('%5'), session_id: '$1', window_id: '@5', window_index: 2, title: 'Worker-2', command: '2.1.81', active: false, role: 'claude' },
+        { ...baseSnapshot().panes[2], id: '%6', tile_id: tileForPane('%6'), session_id: '$1', window_id: '@6', window_index: 3, title: 'Browser', command: 'zsh', active: false, role: 'browser' },
+      ],
+      sessions: [
+        { ...baseSnapshot().sessions[0], window_ids: ['@1', '@4', '@5', '@6'], active_window_id: '@1' },
+        baseSnapshot().sessions[1],
+      ],
+    });
+    state = applyAgentDebugStateToState(state, {
+      agents: [
+        {
+          agent_id: 'root:$1',
+          agent_type: 'claude',
+          agent_role: 'root',
+          tile_id: tileForPane('%1'),
+          window_id: '@1',
+          session_id: '$1',
+          title: 'Root',
+          display_name: 'Root',
+          alive: true,
+          chatter_subscribed: true,
+          topics: [],
+        },
+        {
+          agent_id: 'worker-1-live',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%4'),
+          window_id: '@4',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 1',
+          alive: true,
+          chatter_subscribed: true,
+          topics: [],
+        },
+        {
+          agent_id: 'worker-2-dead',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%5'),
+          window_id: '@5',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 2',
+          alive: false,
+          chatter_subscribed: true,
+          topics: [],
+        },
+        {
+          agent_id: 'stale-browser-binding',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%6'),
+          window_id: '@6',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 999',
+          alive: false,
+          chatter_subscribed: true,
+          topics: [],
+        },
+      ],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      topics: [],
+      chatter: [],
+    });
+
+    appState.set(state);
+    expect(get(agentInfos).map((agent) => agent.tile_id)).toEqual([
+      tileForPane('%4'),
+      tileForPane('%5'),
+      tileForPane('%1'),
     ]);
   });
 });
@@ -1139,9 +1371,9 @@ describe('buildCanvasWorkCards', () => {
       ],
     );
 
-    state.layout.entries['@1'] = { x: 100, y: 80, width: 640, height: 400 };
-    state.layout.entries['@2'] = { x: 860, y: 120, width: 640, height: 400 };
-    state.layout.entries['@3'] = { x: 40, y: 60, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 80, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 860, y: 120, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@3')] = { x: 40, y: 60, width: 640, height: 400 };
 
     const cards = buildCanvasWorkCards(state);
 
@@ -1158,14 +1390,14 @@ describe('buildCanvasWorkCards', () => {
       [sampleWorkItem()],
     );
 
-    expect(state.layout.entries['work:work-s1-001']).toEqual({
+    expect(state.layout.entries[tileForWork('work-s1-001')]).toEqual({
       x: expect.any(Number),
       y: expect.any(Number),
       width: 360,
       height: 320,
     });
 
-    state.layout.entries['work:work-s1-001'] = {
+    state.layout.entries[tileForWork('work-s1-001')] = {
       x: 2220,
       y: 420,
       width: 480,
@@ -1176,6 +1408,7 @@ describe('buildCanvasWorkCards', () => {
     expect(cards).toEqual([
       {
         workId: 'work-s1-001',
+        tileId: tileForWork('work-s1-001'),
         x: 2220,
         y: 420,
         width: 480,
@@ -1281,6 +1514,7 @@ describe('context menu state', () => {
         ...baseSnapshot().windows,
         {
           id: '@4',
+          tile_id: tileForWindow('@4'),
           session_id: '$1',
           session_name: 'Main',
           index: 2,
@@ -1295,6 +1529,7 @@ describe('context menu state', () => {
         ...baseSnapshot().panes,
         {
           id: '%4',
+          tile_id: tileForPane('%4'),
           session_id: '$1',
           window_id: '@4',
           window_index: 2,
@@ -1309,7 +1544,7 @@ describe('context menu state', () => {
       ],
     });
 
-    expect(next.layout.entries['@4']).toMatchObject({
+    expect(next.layout.entries[tileForWindow('@4')]).toMatchObject({
       x: 120,
       y: 100,
     });
@@ -1476,44 +1711,44 @@ describe('executeCommandBarCommand', () => {
 describe('autoArrange', () => {
   it('anchors the first arrangement on the selected tile and persists the new layout', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 100, y: 100, width: 640, height: 400 };
-    state.layout.entries['@2'] = { x: 880, y: 60, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 880, y: 60, width: 640, height: 400 };
     state.ui.selectedPaneId = '%1';
     appState.set(state);
 
     await autoArrange('$1');
 
     const next = get(appState);
-    expect(next.layout.entries['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(next.layout.entries['@2']).toEqual({ x: 100, y: -700, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@2')]).toEqual({ x: 100, y: -700, width: 640, height: 400 });
     expect(next.ui.arrangementModeBySession['$1']).toBe('circle');
     expect(next.ui.arrangementCycleBySession['$1']).toBe(1);
     expect(tauriMocks.saveLayoutState).toHaveBeenCalledTimes(2);
-    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(1, '@1', 100, 100, 640, 400);
-    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(2, '@2', 100, -700, 640, 400);
+    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(1, tileForWindow('@1'), 100, 100, 640, 400);
+    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(2, tileForWindow('@2'), 100, -700, 640, 400);
   });
 
   it('advances through the remaining arrangement cycle on repeated calls', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 100, y: 100, width: 640, height: 400 };
-    state.layout.entries['@2'] = { x: 880, y: 60, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 880, y: 60, width: 640, height: 400 };
     state.ui.selectedPaneId = '%1';
     appState.set(state);
 
     await autoArrange('$1');
-    const first = get(appState).layout.entries['@2'];
+    const first = get(appState).layout.entries[tileForWindow('@2')];
 
     await autoArrange('$1');
-    const second = get(appState).layout.entries['@2'];
+    const second = get(appState).layout.entries[tileForWindow('@2')];
 
     await autoArrange('$1');
-    const third = get(appState).layout.entries['@2'];
+    const third = get(appState).layout.entries[tileForWindow('@2')];
 
     await autoArrange('$1');
-    const fourth = get(appState).layout.entries['@2'];
+    const fourth = get(appState).layout.entries[tileForWindow('@2')];
 
     await autoArrange('$1');
-    const fifth = get(appState).layout.entries['@2'];
+    const fifth = get(appState).layout.entries[tileForWindow('@2')];
 
     expect(first).toEqual({ x: 100, y: -700, width: 640, height: 400 });
     expect(second).toEqual({ x: 500, y: -580, width: 640, height: 400 });
@@ -1525,7 +1760,12 @@ describe('autoArrange', () => {
   it('adds circle and snowflake radial arrangements around the selected tile', async () => {
     const state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(7));
     for (const windowId of state.tmux.sessions['$1'].window_ids) {
-      state.layout.entries[windowId] = { x: 100, y: 100, width: 640, height: 400 };
+      state.layout.entries[tileForWindow(windowId as keyof typeof TILE_BY_WINDOW)] = {
+        x: 100,
+        y: 100,
+        width: 640,
+        height: 400,
+      };
     }
     state.ui.selectedPaneId = '%1';
     appState.set(state);
@@ -1541,25 +1781,30 @@ describe('autoArrange', () => {
     await autoArrange('$1');
     const spiral = get(appState).layout.entries;
 
-    expect(circle['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(circle['@2']).toEqual({ x: 100, y: -700, width: 640, height: 400 });
-    expect(circle['@4']).toEqual({ x: 780, y: -300, width: 640, height: 400 });
-    expect(circle['@5']).toEqual({ x: 780, y: 500, width: 640, height: 400 });
+    expect(circle[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(circle[tileForWindow('@2')]).toEqual({ x: 100, y: -700, width: 640, height: 400 });
+    expect(circle[tileForWindow('@4')]).toEqual({ x: 780, y: -300, width: 640, height: 400 });
+    expect(circle[tileForWindow('@5')]).toEqual({ x: 780, y: 500, width: 640, height: 400 });
 
-    expect(snowflake['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(snowflake['@2']).toEqual({ x: 500, y: -580, width: 640, height: 400 });
-    expect(snowflake['@4']).toEqual({ x: 900, y: 100, width: 640, height: 400 });
-    expect(snowflake['@5']).toEqual({ x: 500, y: 780, width: 640, height: 400 });
+    expect(snowflake[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(snowflake[tileForWindow('@2')]).toEqual({ x: 500, y: -580, width: 640, height: 400 });
+    expect(snowflake[tileForWindow('@4')]).toEqual({ x: 900, y: 100, width: 640, height: 400 });
+    expect(snowflake[tileForWindow('@5')]).toEqual({ x: 500, y: 780, width: 640, height: 400 });
 
-    expect(spiral['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(spiral['@2']).toEqual({ x: 780, y: 100, width: 640, height: 400 });
-    expect(spiral['@4']).toEqual({ x: 780, y: 540, width: 640, height: 400 });
+    expect(spiral[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(spiral[tileForWindow('@2')]).toEqual({ x: 780, y: 100, width: 640, height: 400 });
+    expect(spiral[tileForWindow('@4')]).toEqual({ x: 780, y: 540, width: 640, height: 400 });
   });
 
   it('keeps all arranged windows non-overlapping across the full cycle', async () => {
     const state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(7));
     for (const windowId of state.tmux.sessions['$1'].window_ids) {
-      state.layout.entries[windowId] = { x: 100, y: 100, width: 640, height: 400 };
+      state.layout.entries[tileForWindow(windowId as keyof typeof TILE_BY_WINDOW)] = {
+        x: 100,
+        y: 100,
+        width: 640,
+        height: 400,
+      };
     }
     state.ui.selectedPaneId = '%1';
     appState.set(state);
@@ -1567,7 +1812,9 @@ describe('autoArrange', () => {
     for (let cycle = 0; cycle < 5; cycle += 1) {
       await autoArrange('$1');
       const entries = get(appState).layout.entries;
-      const arranged = state.tmux.sessions['$1'].window_ids.map((windowId) => entries[windowId]);
+      const arranged = state.tmux.sessions['$1'].window_ids.map(
+        (windowId) => entries[tileForWindow(windowId as keyof typeof TILE_BY_WINDOW)],
+      );
 
       for (let left = 0; left < arranged.length; left += 1) {
         for (let right = left + 1; right < arranged.length; right += 1) {
@@ -1580,7 +1827,12 @@ describe('autoArrange', () => {
   it('reapplies the current arrangement mode when a new shell appears in the same session', async () => {
     const state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
     for (const windowId of state.tmux.sessions['$1'].window_ids) {
-      state.layout.entries[windowId] = { x: 100, y: 100, width: 640, height: 400 };
+      state.layout.entries[tileForWindow(windowId as keyof typeof TILE_BY_WINDOW)] = {
+        x: 100,
+        y: 100,
+        width: 640,
+        height: 400,
+      };
     }
     state.ui.selectedPaneId = '%1';
     appState.set(state);
@@ -1591,11 +1843,11 @@ describe('autoArrange', () => {
 
     expect(next.ui.arrangementModeBySession['$1']).toBe('circle');
     expect(next.ui.arrangementCycleBySession['$1']).toBe(1);
-    expect(next.layout.entries['@1']).toEqual({ x: 100, y: 100, width: 640, height: 400 });
-    expect(next.layout.entries['@2']).toEqual({ x: 100, y: -700, width: 640, height: 400 });
-    expect(next.layout.entries['@4']).toEqual({ x: 900, y: 100, width: 640, height: 400 });
-    expect(next.layout.entries['@5']).toEqual({ x: 100, y: 900, width: 640, height: 400 });
-    expect(next.layout.entries['@6']).toEqual({ x: -700, y: 100, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@2')]).toEqual({ x: 100, y: -700, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@4')]).toEqual({ x: 900, y: 100, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@5')]).toEqual({ x: 100, y: 900, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@6')]).toEqual({ x: -700, y: 100, width: 640, height: 400 });
   });
 });
 
@@ -1663,7 +1915,7 @@ describe('window sizing helpers', () => {
 
   it('persists snapped tile dimensions after tmux reports the actual window size', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 640, height: 400 };
     appState.set(state);
     await reportPaneViewport('%1', 100, 24, 750, 480, true);
 
@@ -1686,14 +1938,14 @@ describe('window sizing helpers', () => {
       ],
     });
 
-    expect(get(appState).layout.entries['@1']).toEqual({ x: 0, y: 0, width: 790, height: 464 });
-    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith('@1', 0, 0, 790, 464);
+    expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 0, y: 0, width: 790, height: 464 });
+    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWindow('@1'), 0, 0, 790, 464);
   });
 
   it('does not snap unrelated tiles when another tile in the session is resized', async () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
-    state.layout.entries['@1'] = { x: 0, y: 0, width: 640, height: 400 };
-    state.layout.entries['@2'] = { x: 500, y: 0, width: 540, height: 360 };
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 500, y: 0, width: 540, height: 360 };
     state.ui.paneViewportHints['%1'] = { cols: 80, rows: 20, pixelWidth: 600, pixelHeight: 320 };
     state.ui.paneViewportHints['%2'] = { cols: 80, rows: 20, pixelWidth: 600, pixelHeight: 320 };
     appState.set(state);
@@ -1718,7 +1970,7 @@ describe('window sizing helpers', () => {
       ],
     });
 
-    expect(get(appState).layout.entries['@1']).toEqual({ x: 0, y: 0, width: 790, height: 464 });
-    expect(get(appState).layout.entries['@2']).toEqual({ x: 500, y: 0, width: 540, height: 360 });
+    expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 0, y: 0, width: 790, height: 464 });
+    expect(get(appState).layout.entries[tileForWindow('@2')]).toEqual({ x: 500, y: 0, width: 540, height: 360 });
   });
 });

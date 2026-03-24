@@ -8,6 +8,8 @@ mod persist;
 mod runtime;
 mod socket;
 mod state;
+mod tile_registry;
+mod tile_message;
 mod tmux;
 mod tmux_control;
 mod tmux_state;
@@ -159,6 +161,7 @@ fn run_gui() {
             commands::resize_pty,
             commands::tmux_status,
             commands::read_log_tail,
+            commands::clear_debug_logs,
             commands::sync_panes,
             commands::redraw_all_panes,
             commands::__write_dom_result,
@@ -183,39 +186,17 @@ fn run_gui() {
 
             // Ensure tmux server and session exist
             let already_running = tmux::is_running();
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            let herd_sock_env = format!("HERD_SOCK={}", runtime::socket_path());
+            let mut seeded_session_id: Option<String> = None;
 
             if !already_running {
-                match tmux::output(&[
-                    "new-session",
-                    "-d",
-                    "-s",
-                    runtime::session_name(),
-                    "-x",
-                    "80",
-                    "-y",
-                    "24",
-                    "-e",
-                    &herd_sock_env,
-                    &shell,
-                ]) {
-                    Ok(output) if output.status.success() => {
-                        let _ = crate::tmux_state::set_session_env(
-                            runtime::session_name(),
-                            "HERD_SOCK",
-                            runtime::socket_path(),
-                        );
-                        let _ = crate::tmux_state::set_session_root_cwd(
-                            runtime::session_name(),
-                            &runtime::project_root_dir().to_string_lossy(),
-                        );
+                match crate::commands::create_session_with_root_agent(
+                    app.handle().clone(),
+                    Some(runtime::session_name()),
+                ) {
+                    Ok(session_id) => {
+                        seeded_session_id = Some(session_id);
                         log::info!("Created tmux session '{}'", runtime::session_name())
                     }
-                    Ok(output) => log::error!(
-                        "Failed to create tmux session: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
                     Err(error) => log::error!("Failed to create tmux session: {error}"),
                 }
             } else {
@@ -243,7 +224,7 @@ fn run_gui() {
             match connect_tmux_control(handle.clone(), state.inner(), state.last_active_session()) {
                 Ok(attach_session) => {
                     log::info!("tmux control mode connected to '{attach_session}'");
-                    let reuse_primary_pane = !already_running;
+                    let reuse_primary_pane = !already_running && seeded_session_id.is_none();
                     if let Ok(snapshot) = crate::tmux_state::snapshot(state.inner()) {
                         for session in snapshot.sessions {
                             let _ = crate::tmux_state::set_session_env(
@@ -251,6 +232,9 @@ fn run_gui() {
                                 "HERD_SOCK",
                                 runtime::socket_path(),
                             );
+                            if seeded_session_id.as_deref() == Some(session.id.as_str()) {
+                                continue;
+                            }
                             if let Err(error) = crate::commands::ensure_root_agent_for_session(
                                 app.handle().clone(),
                                 session.id.clone(),
@@ -259,6 +243,9 @@ fn run_gui() {
                                 log::warn!("Failed to ensure root agent for session {}: {error}", session.id);
                             }
                         }
+                    }
+                    if let Err(error) = crate::commands::reconcile_tmux_tile_registry(app.handle().clone()) {
+                        log::warn!("Failed to reconcile tmux tile registry: {error}");
                     }
                     let _ = crate::tmux_state::emit_snapshot(&app.handle());
                 }
@@ -272,6 +259,10 @@ fn run_gui() {
                 let state_reconnect = app.state::<AppState>().inner().clone();
                 let handle_reconnect = app.handle().clone();
                 app.handle().listen("tmux-cc-disconnected", move |event| {
+                    if state_reconnect.is_shutting_down() {
+                        log::info!("Ignoring tmux -CC disconnect while Herd is shutting down");
+                        return;
+                    }
                     let disconnected_pid = serde_json::from_str::<i32>(event.payload()).ok();
 
                     if let Some(pid) = disconnected_pid {
@@ -287,6 +278,11 @@ fn run_gui() {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(1));
 
+                        if state.is_shutting_down() {
+                            log::info!("Skipping tmux -CC reconnect because Herd is shutting down");
+                            return;
+                        }
+
                         if let Some(pid) = disconnected_pid {
                             if state.current_control_pid() != Some(pid) {
                                 log::info!("Skipping stale tmux -CC reconnect for pid {pid}");
@@ -299,6 +295,9 @@ fn run_gui() {
                         match connect_tmux_control(handle, &state, preferred_session) {
                             Ok(session_name) => {
                                 log::info!("tmux -CC reconnected to '{session_name}'");
+                                if let Err(error) = crate::commands::reconcile_tmux_tile_registry(emit_handle.clone()) {
+                                    log::warn!("Failed to reconcile tmux tile registry after reconnect: {error}");
+                                }
                                 let _ = crate::tmux_state::emit_snapshot(&emit_handle);
                             }
                             Err(e) => log::error!("tmux -CC reconnect failed: {e}"),
@@ -316,15 +315,40 @@ fn run_gui() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Some(state) = window.try_state::<AppState>() {
+                    if state.is_shutting_down() {
+                        return;
+                    }
+                    state.begin_shutdown();
+                }
+                let app = window.app_handle();
+                for (label, webview) in app.webviews() {
+                    if label == "main" {
+                        continue;
+                    }
+                    let _ = webview.close();
+                }
+                app.exit(0);
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(s) = app.try_state::<AppState>() {
-                    s.save();
+            match event {
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                    if let Some(s) = app.try_state::<AppState>() {
+                        s.begin_shutdown();
+                        s.save();
+                    }
+                    socket::server::cleanup();
+                    // Don't kill tmux — sessions survive restarts
                 }
-                socket::server::cleanup();
-                // Don't kill tmux — sessions survive restarts
+                _ => {}
             }
         });
 }

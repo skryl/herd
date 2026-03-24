@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { expect } from 'vitest';
 
-import type { TerminalInfo, TestDriverProjection } from '../../src/lib/types';
+import type { ProjectedTerminalInfo, TestDriverProjection } from '../../src/lib/types';
 import { HerdTestClient } from './client';
 import type { HerdIntegrationRuntime } from './runtime';
 
@@ -50,10 +50,10 @@ export async function waitFor<T>(
   throw new Error(`timed out waiting for ${label}: ${JSON.stringify(lastValue)}`);
 }
 
-export function terminalById(terminals: TerminalInfo[], paneId: string): TerminalInfo {
-  const terminal = terminals.find((item) => item.id === paneId);
+export function terminalById(terminals: ProjectedTerminalInfo[], tileId: string): ProjectedTerminalInfo {
+  const terminal = terminals.find((item) => item.id === tileId);
   if (!terminal) {
-    throw new Error(`missing terminal for pane ${paneId}`);
+    throw new Error(`missing terminal for tile ${tileId}`);
   }
   return terminal;
 }
@@ -70,6 +70,18 @@ export async function createIsolatedTab(client: HerdTestClient, name: string): P
     30_000,
     150,
   );
+}
+
+export async function backingPaneIdForTile(client: HerdTestClient, tileId: string): Promise<string> {
+  const state = await client.getStateTree();
+  const pane = Object.values(state.tmux.panes).find((item) => {
+    const windowTileId = state.tmux.windows[item.window_id]?.tile_id ?? null;
+    return (item.tile_id ?? windowTileId ?? null) === tileId;
+  });
+  if (!pane) {
+    throw new Error(`missing backing pane for tile ${tileId}`);
+  }
+  return pane.id;
 }
 
 export async function accumulatePaneOutput(

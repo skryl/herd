@@ -34,7 +34,7 @@ Herd currently behaves like this:
 - Herd owns tile geometry, canvas zoom/pan, overlays, parent-line rendering, manual network edges, local read-only state, and UI mode
 - A tab maps to a tmux session
 - A visible shell/Agent/Browser tile maps to a tmux window with its primary pane
-- A Work tile is a session-local registry item backed by markdown stage files plus SQLite metadata
+- A Work tile is a session-local registry item backed entirely by Herd-owned SQLite state
 - New shells are created by splitting from an existing pane and immediately breaking that pane into its own window so every tile remains independent on the canvas
 
 ## Stack
@@ -115,16 +115,15 @@ When the app starts, it refreshes `~/.local/bin/herd` to point at the installed 
 Examples:
 
 ```bash
-herd shell list
-herd agent list
 herd network list
+herd network list shell
 herd session list
-herd tile list
+herd session list agent
+herd session list work
 herd tile get %7
 herd tile move %7 1180 260
 herd tile resize %7 760 520
 herd topic list
-herd work list
 herd work create "Socket API follow-up"
 herd message public "Picking up #prd-7 with @agent-1234"
 herd message network "Need another pair of eyes on this local network"
@@ -170,47 +169,41 @@ Herd-managed agent launches pass the repo-root `.mcp.json` explicitly with `--mc
 
 Available MCP tools depend on the calling agent role:
 
-- worker agents get message tools plus local network inspection:
+- worker agents get message tools plus local network inspection and local tool access:
   - `message_direct`
   - `message_public`
   - `message_network`
   - `message_root`
-  - `sudo`
   - `network_list`
+  - `network_get`
+  - `network_call`
 - root agents additionally get the latest user-facing root/socket surface:
-  - `shell_create`
-  - `shells_list`
-  - `shell_destroy`
+  - `tile_create`
+  - `tile_destroy`
+  - `tile_list`
+  - `tile_rename`
+  - `tile_call`
   - `shell_input_send`
   - `shell_exec`
   - `shell_output_read`
-  - `shell_title_set`
-  - `shell_read_only_set`
   - `shell_role_set`
-  - `browser_create`
-  - `browser_destroy`
   - `browser_navigate`
   - `browser_load`
-  - `agents_list`
-  - `topics_list`
-  - `topic_subscribe`
-  - `topic_unsubscribe`
-  - `session_list`
-  - `tile_list`
+  - `browser_drive`
+  - `message_topic_list`
+  - `message_topic_subscribe`
+  - `message_topic_unsubscribe`
   - `tile_get`
   - `tile_move`
   - `tile_resize`
   - `network_connect`
   - `network_disconnect`
-  - `work_list`
-  - `work_get`
-  - `work_create`
   - `work_stage_start`
   - `work_stage_complete`
   - `work_review_approve`
   - `work_review_improve`
 
-When `TMUX_PANE` or `HERD_SESSION_ID` is present in the calling environment, `shell_create` forwards parent context so spawned tiles stay linked to the originating shell.
+When `HERD_TILE_ID` or `HERD_SESSION_ID` is present in the calling environment, `tile_create` forwards parent context so spawned tiles stay linked to the originating tile/session.
 
 The app must be running before the MCP server can connect successfully.
 
@@ -221,7 +214,9 @@ When launched inside a Herd-managed agent tile, the MCP server also:
 3. forwards backend events to Claude through `notifications/claude/channel`
 4. acknowledges Herd `PING` events for liveness tracking
 
-Every session/tab also has one visible red Root agent with stable id `root:<session_id>`. Root and worker agents both use the same checked-in `server:herd` entry; the MCP server switches between message-only worker mode and full-tool root mode by inspecting `HERD_AGENT_ROLE` and `HERD_AGENT_ID`.
+Every session/tab also has one visible red Root agent with stable id `root:<session_id>`. Root and worker agents both use the same checked-in `server:herd` entry; the MCP server switches between worker-safe local-network mode and full-tool root mode by inspecting `HERD_AGENT_ROLE` and `HERD_AGENT_ID`.
+
+Over the worker network surface, `agent` and `root_agent` tiles are always read-only. Agents coordinate with each other through the `message_*` tools, not by sending terminal control actions over `network_call`.
 
 The MCP server also teaches agents how the inbound message channel works:
 
@@ -229,6 +224,8 @@ The MCP server also teaches agents how the inbound message channel works:
 - metadata includes sender, recipient, topics, mentions, replay flag, and timestamp
 - `replay=true` means historical context, not a fresh request
 - if an agent wants Herd or another agent to see a reply, it must answer through the Herd messaging tools, not plain assistant text
+
+`browser_drive` is the dedicated child-webview automation surface for browser tiles. It takes a browser `tile_id`, an `action`, and action-specific args. Supported actions are `click`, `type`, `dom_query`, and `eval`. Root may use it on any browser tile in the current session. Workers should use `network_call` against a visible local-network browser tile with action `drive`, and inspect `network_get(...).message_api` for the exact browser args and `drive` subcommands.
 
 ## Agent Integration
 
@@ -243,11 +240,14 @@ In the current setup:
 
 - Herd injects `HERD_SOCK` into the tmux shells it creates so processes inside those shells can call back into Herd
 - Herd injects `HERD_AGENT_ID` into Herd-managed agent launches
+- Herd injects `HERD_TILE_ID` into Herd-managed agent launches
 - Each tmux tab/session carries a configurable spawn directory used by both new shell and new Agent windows; new sessions default it to the project root
-- The hook scripts use `TMUX_PANE` when available so child tiles retain visible parent linkage
+- The hook scripts may still use tmux pane metadata internally so child tiles retain visible parent linkage
 - The `Agent` hook creates a normal child tile, titles it, launches the child process with `--mcp-config <repo-root>/.mcp.json --teammate-mode tmux --dangerously-load-development-channels server:herd`, and streams transcript/task updates into that tile
 - Root agents are spawned and repaired by Herd automatically, are highlighted in red, and can be closed only through a confirmation flow that immediately restarts them
-- Worker agents remain message-only at the MCP layer and should use `message root` for privileged Herd actions
+- Worker agents can inspect visible local-network `shell` and `browser` tiles with `network_list` / `network_get`, read `message_api` for action args, and invoke worker-safe tile messages through `network_call`, including browser `drive`
+- Root agents can use generic `tile_call` across any tile in the current session
+- Worker agents should still use `message root` for privileged Herd actions such as lifecycle, layout, topology, and work mutations
 - The background `Bash` hook only acts on `run_in_background` calls and marks the spawned tile as read-only
 - Herd keeps per-session agent/work registries, per-session chatter history, topic subscriptions, session-local tile networks, and per-agent activity panels for Agent tiles
 - Herd also discovers tmux-created teammate panes directly through control mode, so tmux-created agent teammates still appear as linked tiles even without a socket callback

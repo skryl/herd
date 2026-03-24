@@ -3,7 +3,14 @@ import readline from 'node:readline';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { AgentInfo, TestDriverProjection, WorkItem, WorkStage } from '../../src/lib/types';
+import type {
+  AgentInfo,
+  SessionTileInfo,
+  TestDriverProjection,
+  WorkItem,
+  WorkStage,
+  WorkTileDetails,
+} from '../../src/lib/types';
 import { HerdTestClient } from './client';
 import { createIsolatedTab, waitFor } from './helpers';
 import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime';
@@ -50,6 +57,23 @@ function workTileId(workId: string) {
   return `work:${workId}`;
 }
 
+function workItemFromTile(tile: SessionTileInfo): WorkItem {
+  const details = tile.details as WorkTileDetails;
+  return {
+    work_id: details.work_id,
+    tile_id: tile.tile_id,
+    session_id: tile.session_id,
+    title: tile.title,
+    topic: details.topic,
+    owner_agent_id: details.owner_agent_id ?? null,
+    current_stage: details.current_stage,
+    stages: details.stages,
+    reviews: details.reviews,
+    created_at: details.created_at,
+    updated_at: details.updated_at,
+  };
+}
+
 function rootAgentForProjection(projection: TestDriverProjection): AgentInfo | undefined {
   return projection.agents.find(
     (agent) => agent.agent_role === 'root' && agent.alive && agent.session_id === projection.active_tab_id,
@@ -89,9 +113,8 @@ async function waitForRootAgentInSession(client: HerdTestClient, sessionId: stri
 async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
   const before = await client.getProjection();
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
-  await client.sendCommand({
-    command: 'shell_create',
-    parent_session_id: before.active_tab_id,
+  await client.tileCreate('shell', {
+    parentSessionId: before.active_tab_id,
   });
   const projection = await waitFor(
     'shell create in active tab',
@@ -105,6 +128,28 @@ async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
     throw new Error('failed to locate spawned shell pane');
   }
   return created.id;
+}
+
+async function createWorkInSession(
+  client: HerdTestClient,
+  title: string,
+  senderTileId: string,
+): Promise<WorkItem> {
+  const createdTile = await client.tileCreate('work', {
+    title,
+    parentTileId: senderTileId,
+    senderTileId,
+  });
+  return workItemFromTile(createdTile);
+}
+
+async function loadWorkItemAsRoot(
+  client: HerdTestClient,
+  rootAgent: AgentInfo,
+  workId: string,
+): Promise<WorkItem> {
+  const tile = await client.getWorkTile(workId, rootAgent.tile_id, rootAgent.agent_id);
+  return workItemFromTile(tile);
 }
 
 async function openAgentEventSubscription(socketPath: string, agentId: string): Promise<AgentEventSubscription> {
@@ -285,24 +330,36 @@ describe.sequential('work registry integration', () => {
     const secondSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-private-b');
 
     try {
-      const firstWork = await client.workCreate('Private work A', firstPaneId);
+      const firstWork = await createWorkInSession(client, 'Private work A', firstPaneId);
       await client.messageChatter('scope-a sync #scope-a', firstChatterPaneId, ['#scope-a']);
-      const secondWork = await client.workCreate('Private work B', secondPaneId);
+      const secondWork = await createWorkInSession(client, 'Private work B', secondPaneId);
       await client.messageChatter('scope-b sync #scope-b', secondChatterPaneId, ['#scope-b']);
 
-      const firstAgents = (await client.listAgents(firstPaneId)).map((agent) => agent.agent_id).sort();
+      const firstAgents = (await client.tileList(firstChatterPaneId, null, 'agent')).tiles
+        .map((tile) => (tile.details as { agent_id: string }).agent_id)
+        .sort();
       expect(firstAgents).toContain('agent-private-a');
       expect(firstAgents.some((agentId) => agentId.startsWith('root:'))).toBe(true);
       expect(firstAgents).toHaveLength(2);
-      expect((await client.listTopics(firstPaneId)).map((topic) => topic.name)).toEqual(['#scope-a', firstWork.topic]);
-      expect((await client.workList(firstPaneId)).map((item) => item.work_id)).toEqual([firstWork.work_id]);
+      expect((await client.messageTopicList(firstChatterPaneId)).map((topic) => topic.name)).toEqual(['#scope-a', firstWork.topic]);
+      expect(
+        (await client.tileList(firstChatterPaneId, null, 'work')).tiles.map(
+          (tile) => (tile.details as { work_id: string }).work_id,
+        ),
+      ).toEqual([firstWork.work_id]);
 
-      const secondAgents = (await client.listAgents(secondPaneId)).map((agent) => agent.agent_id).sort();
+      const secondAgents = (await client.tileList(secondChatterPaneId, null, 'agent')).tiles
+        .map((tile) => (tile.details as { agent_id: string }).agent_id)
+        .sort();
       expect(secondAgents).toContain('agent-private-b');
       expect(secondAgents.some((agentId) => agentId.startsWith('root:'))).toBe(true);
       expect(secondAgents).toHaveLength(2);
-      expect((await client.listTopics(secondPaneId)).map((topic) => topic.name)).toEqual(['#scope-b', secondWork.topic]);
-      expect((await client.workList(secondPaneId)).map((item) => item.work_id)).toEqual([secondWork.work_id]);
+      expect((await client.messageTopicList(secondChatterPaneId)).map((topic) => topic.name)).toEqual(['#scope-b', secondWork.topic]);
+      expect(
+        (await client.tileList(secondChatterPaneId, null, 'work')).tiles.map(
+          (tile) => (tile.details as { work_id: string }).work_id,
+        ),
+      ).toEqual([secondWork.work_id]);
 
       await expect(client.messageDirect('agent-private-b', 'cross-session denied', firstPaneId)).rejects.toThrow(
         /across sessions/,
@@ -343,14 +400,14 @@ describe.sequential('work registry integration', () => {
     const nonOwnerSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-non-owner-life');
 
     try {
-      let item = await client.workCreate('Lifecycle work item', ownerPaneId);
+      let item = await createWorkInSession(client, 'Lifecycle work item', ownerPaneId);
       expect(item.owner_agent_id ?? null).toBeNull();
       expect(currentStageStatus(item)).toBe('ready');
 
-      expect((await client.listTopics(ownerPaneId)).some((topic) => topic.name === item.topic)).toBe(true);
+      expect((await client.messageTopicList(rootAgent.tile_id)).some((topic) => topic.name === item.topic)).toBe(true);
 
       await client.networkConnect(ownerPaneId, 'left', workTileId(item.work_id), 'left', rootAgent.tile_id);
-      item = await client.workGet(item.work_id, ownerPaneId);
+      item = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
       expect(item.owner_agent_id).toBe('agent-owner-life');
 
       const ownerNetwork = await client.listNetwork(ownerPaneId, 'agent-owner-life');
@@ -396,11 +453,49 @@ describe.sequential('work registry integration', () => {
       expect(item.current_stage).toBe('artifact');
       expect(currentStageStatus(item, 'artifact')).toBe('approved');
 
-      await client.networkDisconnect(ownerPaneId, 'left', ownerPaneId);
-      const unowned = await client.workGet(item.work_id, ownerPaneId);
+      const projectionWithWorkLogs = await waitFor(
+        'work command wrappers appear in tile message logs',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const targetId = workTileId(item.work_id);
+          const wrappers = nextProjection.tile_message_logs
+            .filter((entry) => entry.channel === 'socket' && entry.target_id === targetId)
+            .map((entry) => entry.wrapper_command);
+          return (
+            nextProjection.tile_message_logs.some(
+              (entry) =>
+                entry.channel === 'socket'
+                && entry.target_id === item.session_id
+                && entry.target_kind === 'session'
+                && entry.wrapper_command === 'tile_create'
+                && entry.message_name === 'tile_create',
+            )
+            && (
+              wrappers.includes('work_stage_start')
+              && wrappers.includes('work_stage_complete')
+              && wrappers.includes('work_review_improve')
+              && wrappers.includes('work_review_approve')
+            )
+          );
+        },
+        30_000,
+        150,
+      );
+      expect(
+        projectionWithWorkLogs.tile_message_logs.some(
+          (entry) =>
+            entry.channel === 'socket'
+            && entry.target_id === workTileId(item.work_id)
+            && entry.wrapper_command === 'work_stage_start'
+            && entry.message_name === 'stage_start',
+        ),
+      ).toBe(true);
+
+      await client.networkDisconnect(ownerPaneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
+      const unowned = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
       expect(unowned.owner_agent_id ?? null).toBeNull();
 
-      const reloaded = await client.workGet(item.work_id, ownerPaneId);
+      const reloaded = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
       expect(reloaded.reviews.map((review) => review.decision)).toEqual([
         'improve',
         'approve',
@@ -422,16 +517,16 @@ describe.sequential('work registry integration', () => {
     const ownerInfo = (await client.agentRegister('agent-dead-owner', ownerPaneId, 'Dead Owner')).agent;
     const ownerSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-dead-owner');
     try {
-      let item = await client.workCreate('Dead cleanup work', ownerPaneId);
+      let item = await createWorkInSession(client, 'Dead cleanup work', ownerPaneId);
       await client.networkConnect(ownerPaneId, 'left', workTileId(item.work_id), 'left', rootAgent.tile_id);
-      item = await client.workGet(item.work_id, senderPaneId);
+      item = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
       expect(item.owner_agent_id).toBe('agent-dead-owner');
 
       ownerSubscription.close();
       await expect(client.messageDirect('agent-dead-owner', 'ping owner', senderPaneId)).rejects.toThrow(
         /no live subscribers/,
       );
-      item = await client.workGet(item.work_id, senderPaneId);
+      item = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
       expect(item.owner_agent_id ?? null).toBeNull();
 
       const chatterProjection = await waitFor(
@@ -465,7 +560,7 @@ describe.sequential('work registry integration', () => {
 
     try {
       await client.networkConnect(agentAPaneId, 'left', agentBPaneId, 'right', rootAgent.tile_id);
-      const work = await client.workCreate('Network list work', agentAPaneId);
+      const work = await createWorkInSession(client, 'Network list work', agentAPaneId);
       await client.networkConnect(agentAPaneId, 'top', workTileId(work.work_id), 'left', rootAgent.tile_id);
 
       const component = await client.listNetwork(agentAPaneId, 'agent-network-a');
@@ -476,7 +571,6 @@ describe.sequential('work registry integration', () => {
       expect(component.tiles.find((tile) => tile.tile_id === agentAPaneId)).toMatchObject({
         session_id: projection.active_tab_id,
         kind: 'agent',
-        pane_id: agentAPaneId,
         command: expect.any(String),
         details: {
           agent_id: 'agent-network-a',
@@ -538,7 +632,7 @@ describe.sequential('work registry integration', () => {
 
   it('sends the welcome DM and replays the last hour of public chatter on first agent subscription', async () => {
     const projection = await createIsolatedTab(client, 'welcome-bootstrap');
-    const paneId = projection.selected_pane_id!;
+    const paneId = projection.selected_tile_id!;
 
     await client.messageChatter('bootstrap replay #welcome-bootstrap', paneId, ['#welcome-bootstrap']);
     await client.agentRegister('agent-bootstrap', paneId, 'Bootstrap Agent');

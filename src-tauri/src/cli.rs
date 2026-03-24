@@ -29,11 +29,9 @@ pub fn is_cli_invocation(args: &[String]) -> bool {
                     value,
                     "sudo"
                         | "network"
-                        | "session"
                         | "tile"
                         | "browser"
                         | "message"
-                        | "topic"
                         | "agent"
                         | "shell"
                         | "work"
@@ -98,41 +96,35 @@ fn print_help() {
         "\
 Usage:
   herd [--socket <path>] [--agent-pid <pid>] sudo <message>
-  herd [--socket <path>] [--agent-pid <pid>] agent create [--parent-session-id <id>] [--parent-pane-id <id>]
-  herd [--socket <path>] [--agent-pid <pid>] agent list
   herd [--socket <path>] [--agent-pid <pid>] agent ack-ping [<agent_id>]
   herd [--socket <path>] [--agent-pid <pid>] network list [shell|agent|browser|work]
+  herd [--socket <path>] [--agent-pid <pid>] network get <tile_id>
+  herd [--socket <path>] [--agent-pid <pid>] network call <tile_id> <action> [json_args]
   herd [--socket <path>] [--agent-pid <pid>] network connect <from_tile> <from_port> <to_tile> <to_port>
   herd [--socket <path>] [--agent-pid <pid>] network disconnect <tile> <port>
-  herd [--socket <path>] [--agent-pid <pid>] session list [shell|agent|browser|work]
+  herd [--socket <path>] [--agent-pid <pid>] tile create <shell|agent|browser|work> [--title <text>] [--x <n>] [--y <n>] [--width <n>] [--height <n>] [--parent-session-id <id>] [--parent-tile-id <id>]
   herd [--socket <path>] [--agent-pid <pid>] tile list [shell|agent|browser|work]
+  herd [--socket <path>] [--agent-pid <pid>] tile destroy <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] tile get <tile_id>
+  herd [--socket <path>] [--agent-pid <pid>] tile call <tile_id> <action> [json_args]
   herd [--socket <path>] [--agent-pid <pid>] tile move <tile_id> <x> <y>
   herd [--socket <path>] [--agent-pid <pid>] tile resize <tile_id> <width> <height>
-  herd [--socket <path>] [--agent-pid <pid>] topic list
-  herd [--socket <path>] [--agent-pid <pid>] topic subscribe <topic>
-  herd [--socket <path>] [--agent-pid <pid>] topic unsubscribe <topic>
+  herd [--socket <path>] [--agent-pid <pid>] tile rename <tile_id> <title>
   herd [--socket <path>] [--agent-pid <pid>] message direct <agent_id> <message>
   herd [--socket <path>] [--agent-pid <pid>] message public <message> [--topic <topic>...] [--mention <agent_id>...]
   herd [--socket <path>] [--agent-pid <pid>] message network <message>
   herd [--socket <path>] [--agent-pid <pid>] message root <message>
+  herd [--socket <path>] [--agent-pid <pid>] message topic list
+  herd [--socket <path>] [--agent-pid <pid>] message topic subscribe <topic>
+  herd [--socket <path>] [--agent-pid <pid>] message topic unsubscribe <topic>
   herd [--socket <path>] [--agent-pid <pid>] message topic <topic> <message>
-  herd [--socket <path>] [--agent-pid <pid>] shell list
-  herd [--socket <path>] [--agent-pid <pid>] shell create [--x <n>] [--y <n>] [--width <n>] [--height <n>] [--parent-session-id <id>] [--parent-pane-id <id>]
-  herd [--socket <path>] [--agent-pid <pid>] shell destroy <pane_id>
-  herd [--socket <path>] [--agent-pid <pid>] shell send <pane_id> <input>
-  herd [--socket <path>] [--agent-pid <pid>] shell exec <pane_id> <command>
-  herd [--socket <path>] [--agent-pid <pid>] shell read <pane_id>
-  herd [--socket <path>] [--agent-pid <pid>] shell title <pane_id> <title>
-  herd [--socket <path>] [--agent-pid <pid>] shell read-only <pane_id> <true|false>
-  herd [--socket <path>] [--agent-pid <pid>] shell role <pane_id> <regular|claude|output>
-  herd [--socket <path>] [--agent-pid <pid>] browser create [--parent-session-id <id>] [--parent-pane-id <id>]
-  herd [--socket <path>] [--agent-pid <pid>] browser destroy <pane_id>
-  herd [--socket <path>] [--agent-pid <pid>] browser navigate <pane_id> <url>
-  herd [--socket <path>] [--agent-pid <pid>] browser load <pane_id> <path>
-  herd [--socket <path>] [--agent-pid <pid>] work list
-  herd [--socket <path>] [--agent-pid <pid>] work show <work_id>
-  herd [--socket <path>] [--agent-pid <pid>] work create <title>
+  herd [--socket <path>] [--agent-pid <pid>] shell send <tile_id> <input>
+  herd [--socket <path>] [--agent-pid <pid>] shell exec <tile_id> <command>
+  herd [--socket <path>] [--agent-pid <pid>] shell read <tile_id>
+  herd [--socket <path>] [--agent-pid <pid>] shell role <tile_id> <regular|claude|output>
+  herd [--socket <path>] [--agent-pid <pid>] browser navigate <tile_id> <url>
+  herd [--socket <path>] [--agent-pid <pid>] browser load <tile_id> <path>
+  herd [--socket <path>] [--agent-pid <pid>] browser drive <tile_id> <click|type|dom_query|eval> [json_args]
   herd [--socket <path>] [--agent-pid <pid>] work stage start <work_id>
   herd [--socket <path>] [--agent-pid <pid>] work stage complete <work_id>
   herd [--socket <path>] [--agent-pid <pid>] raw <json>
@@ -142,6 +134,10 @@ Usage:
 }
 
 fn send_command(socket_path: &str, payload: &Value) -> Result<Value, String> {
+    let mut payload = payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.entry("channel".to_string()).or_insert_with(|| json!("cli"));
+    }
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|error| format!("failed to connect to Herd socket at {socket_path}: {error}"))?;
     stream
@@ -169,97 +165,65 @@ fn non_empty_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
 
-fn env_pane_id() -> Option<String> {
-    if let Some(pane_id) = non_empty_env("HERD_PANE_ID") {
-        return Some(pane_id);
-    }
-
-    if non_empty_env("HERD_SOCK").is_some() || non_empty_env("HERD_SESSION_ID").is_some() {
-        return non_empty_env("TMUX_PANE");
-    }
-
-    None
+fn env_tile_id() -> Option<String> {
+    non_empty_env("HERD_TILE_ID")
 }
 
 fn require_env_agent_id() -> Result<String, String> {
     env_agent_id().ok_or("HERD_AGENT_ID is required for this command".to_string())
 }
 
-fn shell_create_payload(args: &[String]) -> Result<Value, String> {
+fn parse_tile_type(value: &str, command_name: &str) -> Result<String, String> {
+    match value {
+        "shell" | "agent" | "browser" | "work" => Ok(value.to_string()),
+        other => Err(format!("unsupported tile type for {command_name}: {other}")),
+    }
+}
+
+fn tile_create_payload(args: &[String]) -> Result<Value, String> {
+    let tile_type = parse_tile_type(
+        args.first().map(String::as_str).ok_or("tile create requires a tile type")?,
+        "tile create",
+    )?;
+    let mut title = None;
     let mut x = None;
     let mut y = None;
     let mut width = None;
     let mut height = None;
     let mut parent_session_id = None;
-    let mut parent_pane_id = None;
-    let mut index = 0usize;
+    let mut parent_tile_id = None;
+    let mut index = 1usize;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
         let value = args.get(index).ok_or_else(|| format!("{flag} requires a value"))?.clone();
         index += 1;
         match flag {
+            "--title" => title = Some(value),
             "--x" => x = value.parse::<f64>().ok(),
             "--y" => y = value.parse::<f64>().ok(),
             "--width" => width = value.parse::<f64>().ok(),
             "--height" => height = value.parse::<f64>().ok(),
             "--parent-session-id" => parent_session_id = Some(value),
-            "--parent-pane-id" => parent_pane_id = Some(value),
-            _ => return Err(format!("unknown shell create flag: {flag}")),
+            "--parent-tile-id" => parent_tile_id = Some(value),
+            _ => return Err(format!("unknown tile create flag: {flag}")),
         }
     }
+    if tile_type == "work" && title.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_none() {
+        return Err("tile create work requires --title <text>".to_string());
+    }
     Ok(json!({
-        "command": "shell_create",
+        "command": "tile_create",
+        "tile_type": tile_type,
+        "title": title,
         "x": x,
         "y": y,
         "width": width,
         "height": height,
         "parent_session_id": parent_session_id,
-        "parent_pane_id": parent_pane_id,
-    }))
-}
-
-fn browser_create_payload(args: &[String]) -> Result<Value, String> {
-    let mut parent_session_id = None;
-    let mut parent_pane_id = None;
-    let mut index = 0usize;
-    while index < args.len() {
-        let flag = args[index].as_str();
-        index += 1;
-        let value = args.get(index).ok_or_else(|| format!("{flag} requires a value"))?.clone();
-        index += 1;
-        match flag {
-            "--parent-session-id" => parent_session_id = Some(value),
-            "--parent-pane-id" => parent_pane_id = Some(value),
-            _ => return Err(format!("unknown browser create flag: {flag}")),
-        }
-    }
-    Ok(json!({
-        "command": "browser_create",
-        "parent_session_id": parent_session_id,
-        "parent_pane_id": parent_pane_id,
-    }))
-}
-
-fn agent_create_payload(args: &[String]) -> Result<Value, String> {
-    let mut parent_session_id = None;
-    let mut parent_pane_id = None;
-    let mut index = 0usize;
-    while index < args.len() {
-        let flag = args[index].as_str();
-        index += 1;
-        let value = args.get(index).ok_or_else(|| format!("{flag} requires a value"))?.clone();
-        index += 1;
-        match flag {
-            "--parent-session-id" => parent_session_id = Some(value),
-            "--parent-pane-id" => parent_pane_id = Some(value),
-            _ => return Err(format!("unknown agent create flag: {flag}")),
-        }
-    }
-    Ok(json!({
-        "command": "agent_create",
-        "parent_session_id": parent_session_id,
-        "parent_pane_id": parent_pane_id,
+        "parent_tile_id": parent_tile_id,
+        "sender_agent_id": env_agent_id(),
+        "sender_tile_id": env_tile_id(),
     }))
 }
 
@@ -280,7 +244,7 @@ fn tile_list_payload(command: &str, tile_type: Option<String>) -> Value {
     let mut payload = json!({
         "command": command,
         "sender_agent_id": env_agent_id(),
-        "sender_pane_id": env_pane_id(),
+        "sender_tile_id": env_tile_id(),
     });
     if let Some(tile_type) = tile_type {
         payload["tile_type"] = json!(tile_type);
@@ -295,6 +259,17 @@ fn parse_number_arg(value: Option<&String>, error: &str) -> Result<f64, String> 
         .map_err(|_| error.to_string())
 }
 
+fn parse_json_object_arg(raw: Option<String>, error: &str) -> Result<Value, String> {
+    let Some(raw) = raw else {
+        return Ok(json!({}));
+    };
+    let value = serde_json::from_str::<Value>(&raw).map_err(|parse_error| format!("{error}: {parse_error}"))?;
+    if !value.is_object() {
+        return Err(format!("{error}: expected a JSON object"));
+    }
+    Ok(value)
+}
+
 fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, String> {
     let Some(group) = args.first().map(String::as_str) else {
         return Err("missing command group".to_string());
@@ -305,7 +280,7 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
             "command": "message_root",
             "message": args.get(1..).ok_or("sudo requires a message")?.join(" "),
             "sender_agent_id": env_agent_id(),
-            "sender_pane_id": env_pane_id(),
+            "sender_tile_id": env_tile_id(),
             "sender_agent_pid": ctx.agent_pid,
         })),
         "network" => {
@@ -315,6 +290,28 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     "network_list",
                     parse_optional_tile_type(&args[2..], "network list")?,
                 )),
+                "get" => Ok(json!({
+                    "command": "network_get",
+                    "tile_id": args.get(2).ok_or("network get requires a tile_id")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "call" => {
+                    let tile_id = args.get(2).ok_or("network call requires <tile_id> <action> [json_args]")?;
+                    let action = args.get(3).ok_or("network call requires <tile_id> <action> [json_args]")?;
+                    let args_json = parse_json_object_arg(
+                        args.get(4..).filter(|values| !values.is_empty()).map(|values| values.join(" ")),
+                        "network call requires valid JSON args",
+                    )?;
+                    Ok(json!({
+                        "command": "network_call",
+                        "tile_id": tile_id,
+                        "action": action,
+                        "args": args_json,
+                        "sender_agent_id": env_agent_id(),
+                        "sender_tile_id": env_tile_id(),
+                    }))
+                }
                 "connect" => Ok(json!({
                     "command": "network_connect",
                     "from_tile_id": args.get(2).ok_or("network connect requires <from_tile> <from_port> <to_tile> <to_port>")?,
@@ -322,48 +319,68 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     "to_tile_id": args.get(4).ok_or("network connect requires <from_tile> <from_port> <to_tile> <to_port>")?,
                     "to_port": args.get(5).ok_or("network connect requires <from_tile> <from_port> <to_tile> <to_port>")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "disconnect" => Ok(json!({
                     "command": "network_disconnect",
                     "tile_id": args.get(2).ok_or("network disconnect requires <tile> <port>")?,
                     "port": args.get(3).ok_or("network disconnect requires <tile> <port>")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 _ => Err(format!("unknown network target: {sub}")),
-            }
-        }
-        "session" => {
-            let sub = args.get(1).map(String::as_str).ok_or("missing session target")?;
-            match sub {
-                "list" => Ok(tile_list_payload(
-                    "session_list",
-                    parse_optional_tile_type(&args[2..], "session list")?,
-                )),
-                _ => Err(format!("unknown session target: {sub}")),
             }
         }
         "tile" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing tile target")?;
             match sub {
+                "create" => tile_create_payload(&args[2..]),
                 "list" => Ok(tile_list_payload(
                     "tile_list",
                     parse_optional_tile_type(&args[2..], "tile list")?,
                 )),
+                "destroy" => Ok(json!({
+                    "command": "tile_destroy",
+                    "tile_id": args.get(2).ok_or("tile destroy requires a tile_id")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
                 "get" => Ok(json!({
                     "command": "tile_get",
                     "tile_id": args.get(2).ok_or("tile get requires a tile_id")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
+                "rename" => Ok(json!({
+                    "command": "tile_rename",
+                    "tile_id": args.get(2).ok_or("tile rename requires <tile_id> <title>")?,
+                    "title": args.get(3..).ok_or("tile rename requires a title")?.join(" "),
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "call" => {
+                    let tile_id = args.get(2).ok_or("tile call requires <tile_id> <action> [json_args]")?;
+                    let action = args.get(3).ok_or("tile call requires <tile_id> <action> [json_args]")?;
+                    let args_json = parse_json_object_arg(
+                        args.get(4..).filter(|values| !values.is_empty()).map(|values| values.join(" ")),
+                        "tile call requires valid JSON args",
+                    )?;
+                    Ok(json!({
+                        "command": "tile_call",
+                        "tile_id": tile_id,
+                        "action": action,
+                        "args": args_json,
+                        "sender_agent_id": env_agent_id(),
+                        "sender_tile_id": env_tile_id(),
+                    }))
+                }
                 "move" => Ok(json!({
                     "command": "tile_move",
                     "tile_id": args.get(2).ok_or("tile move requires <tile_id> <x> <y>")?,
                     "x": parse_number_arg(args.get(3), "tile move requires <tile_id> <x> <y>")?,
                     "y": parse_number_arg(args.get(4), "tile move requires <tile_id> <x> <y>")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "resize" => Ok(json!({
                     "command": "tile_resize",
@@ -371,62 +388,44 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     "width": parse_number_arg(args.get(3), "tile resize requires <tile_id> <width> <height>")?,
                     "height": parse_number_arg(args.get(4), "tile resize requires <tile_id> <width> <height>")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 _ => Err(format!("unknown tile target: {sub}")),
-            }
-        }
-        "topic" => {
-            let sub = args.get(1).map(String::as_str).ok_or("missing topic target")?;
-            match sub {
-                "list" => Ok(json!({
-                    "command": "topics_list",
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
-                "subscribe" => {
-                    let topic = args.get(2).ok_or("topic subscribe requires a topic")?;
-                    Ok(json!({
-                        "command": "topic_subscribe",
-                        "agent_id": require_env_agent_id()?,
-                        "topic": topic,
-                    }))
-                }
-                "unsubscribe" => {
-                    let topic = args.get(2).ok_or("topic unsubscribe requires a topic")?;
-                    Ok(json!({
-                        "command": "topic_unsubscribe",
-                        "agent_id": require_env_agent_id()?,
-                        "topic": topic,
-                    }))
-                }
-                _ => Err(format!("unknown topic target: {sub}")),
             }
         }
         "browser" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing browser target")?;
             match sub {
-                "create" => browser_create_payload(&args[2..]),
-                "destroy" => Ok(json!({
-                    "command": "browser_destroy",
-                    "pane_id": args.get(2).ok_or("browser destroy requires a pane_id")?,
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
                 "navigate" => Ok(json!({
                     "command": "browser_navigate",
-                    "pane_id": args.get(2).ok_or("browser navigate requires <pane_id> <url>")?,
+                    "tile_id": args.get(2).ok_or("browser navigate requires <tile_id> <url>")?,
                     "url": args.get(3).ok_or("browser navigate requires a url")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "load" => Ok(json!({
                     "command": "browser_load",
-                    "pane_id": args.get(2).ok_or("browser load requires <pane_id> <path>")?,
+                    "tile_id": args.get(2).ok_or("browser load requires <tile_id> <path>")?,
                     "path": args.get(3).ok_or("browser load requires a path")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
+                "drive" => {
+                    let tile_id = args.get(2).ok_or("browser drive requires <tile_id> <action> [json_args]")?;
+                    let action = args.get(3).ok_or("browser drive requires <tile_id> <action> [json_args]")?;
+                    let args_json = parse_json_object_arg(
+                        args.get(4..).filter(|values| !values.is_empty()).map(|values| values.join(" ")),
+                        "browser drive requires valid JSON args",
+                    )?;
+                    Ok(json!({
+                        "command": "browser_drive",
+                        "tile_id": tile_id,
+                        "action": action,
+                        "args": args_json,
+                        "sender_agent_id": env_agent_id(),
+                        "sender_tile_id": env_tile_id(),
+                    }))
+                }
                 _ => Err(format!("unknown browser target: {sub}")),
             }
         }
@@ -441,7 +440,7 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                         "to_agent_id": to_agent_id,
                         "message": message,
                         "sender_agent_id": env_agent_id(),
-                        "sender_pane_id": env_pane_id(),
+                        "sender_tile_id": env_tile_id(),
                         "sender_agent_pid": ctx.agent_pid,
                     }))
                 }
@@ -473,7 +472,7 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                         "topics": topics,
                         "mentions": mentions,
                         "sender_agent_id": env_agent_id(),
-                        "sender_pane_id": env_pane_id(),
+                        "sender_tile_id": env_tile_id(),
                         "sender_agent_pid": ctx.agent_pid,
                     }))
                 }
@@ -481,17 +480,43 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     "command": "message_network",
                     "message": args.get(2..).ok_or("message network requires a message")?.join(" "),
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                     "sender_agent_pid": ctx.agent_pid,
                 })),
                 "root" => Ok(json!({
                     "command": "message_root",
                     "message": args.get(2..).ok_or("message root requires a message")?.join(" "),
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                     "sender_agent_pid": ctx.agent_pid,
                 })),
                 "topic" => {
+                    match args.get(2).map(String::as_str) {
+                        Some("list") => {
+                            return Ok(json!({
+                                "command": "message_topic_list",
+                                "sender_agent_id": env_agent_id(),
+                                "sender_tile_id": env_tile_id(),
+                            }));
+                        }
+                        Some("subscribe") => {
+                            let topic = args.get(3).ok_or("message topic subscribe requires a topic")?;
+                            return Ok(json!({
+                                "command": "message_topic_subscribe",
+                                "agent_id": require_env_agent_id()?,
+                                "topic": topic,
+                            }));
+                        }
+                        Some("unsubscribe") => {
+                            let topic = args.get(3).ok_or("message topic unsubscribe requires a topic")?;
+                            return Ok(json!({
+                                "command": "message_topic_unsubscribe",
+                                "agent_id": require_env_agent_id()?,
+                                "topic": topic,
+                            }));
+                        }
+                        _ => {}
+                    }
                     let topic = args.get(2).ok_or("message topic requires <topic> <message>")?;
                     let message = args.get(3..).ok_or("message topic requires a message")?.join(" ");
                     Ok(json!({
@@ -500,7 +525,7 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                         "topics": [topic],
                         "mentions": [],
                         "sender_agent_id": env_agent_id(),
-                        "sender_pane_id": env_pane_id(),
+                        "sender_tile_id": env_tile_id(),
                         "sender_agent_pid": ctx.agent_pid,
                     }))
                 }
@@ -510,12 +535,6 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
         "agent" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing agent target")?;
             match sub {
-                "create" => agent_create_payload(&args[2..]),
-                "list" => Ok(json!({
-                    "command": "agent_list",
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
                 "ack-ping" => {
                     let agent_id = args.get(2).cloned().or_else(env_agent_id).ok_or("agent ack-ping requires an agent id or HERD_AGENT_ID")?;
                     Ok(json!({
@@ -529,58 +548,32 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
         "shell" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing shell target")?;
             match sub {
-                "list" => Ok(json!({
-                    "command": "shell_list",
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
-                "create" => shell_create_payload(&args[2..]),
-                "destroy" => Ok(json!({
-                    "command": "shell_destroy",
-                    "session_id": args.get(2).ok_or("shell destroy requires a pane_id")?,
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
                 "send" => Ok(json!({
                     "command": "shell_input_send",
-                    "session_id": args.get(2).ok_or("shell send requires <pane_id> <input>")?,
+                    "tile_id": args.get(2).ok_or("shell send requires <tile_id> <input>")?,
                     "input": args.get(3..).ok_or("shell send requires input")?.join(" "),
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "exec" => Ok(json!({
                     "command": "shell_exec",
-                    "session_id": args.get(2).ok_or("shell exec requires <pane_id> <command>")?,
+                    "tile_id": args.get(2).ok_or("shell exec requires <tile_id> <command>")?,
                     "shell_command": args.get(3..).ok_or("shell exec requires a command")?.join(" "),
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "read" => Ok(json!({
                     "command": "shell_output_read",
-                    "session_id": args.get(2).ok_or("shell read requires a pane_id")?,
+                    "tile_id": args.get(2).ok_or("shell read requires a tile_id")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
-                "title" => Ok(json!({
-                    "command": "shell_title_set",
-                    "session_id": args.get(2).ok_or("shell title requires <pane_id> <title>")?,
-                    "title": args.get(3..).ok_or("shell title requires a title")?.join(" "),
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                })),
-                "read-only" => Ok(json!({
-                    "command": "shell_read_only_set",
-                    "session_id": args.get(2).ok_or("shell read-only requires <pane_id> <true|false>")?,
-                    "read_only": args.get(3).ok_or("shell read-only requires a boolean")?.parse::<bool>().map_err(|_| "invalid boolean for shell read-only".to_string())?,
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 "role" => Ok(json!({
                     "command": "shell_role_set",
-                    "session_id": args.get(2).ok_or("shell role requires <pane_id> <role>")?,
+                    "tile_id": args.get(2).ok_or("shell role requires <tile_id> <role>")?,
                     "role": args.get(3).ok_or("shell role requires a role")?,
                     "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
+                    "sender_tile_id": env_tile_id(),
                 })),
                 _ => Err(format!("unknown shell target: {sub}")),
             }
@@ -588,32 +581,6 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
         "work" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing work target")?;
             match sub {
-                "list" => {
-                    if args.get(2).map(String::as_str) == Some("--all") {
-                        return Err("work list is session-local; --all is no longer supported".to_string());
-                    }
-                    Ok(json!({
-                        "command": "work_list",
-                        "scope": "current_session",
-                        "agent_id": env_agent_id(),
-                        "session_id": Value::Null,
-                        "sender_pane_id": env_pane_id(),
-                    }))
-                }
-                "show" => Ok(json!({
-                    "command": "work_get",
-                    "work_id": args.get(2).ok_or("work show requires a work_id")?,
-                    "agent_id": env_agent_id(),
-                    "session_id": Value::Null,
-                    "sender_pane_id": env_pane_id(),
-                })),
-                "create" => Ok(json!({
-                    "command": "work_create",
-                    "title": args.get(2..).ok_or("work create requires a title")?.join(" "),
-                    "sender_agent_id": env_agent_id(),
-                    "sender_pane_id": env_pane_id(),
-                    "session_id": Value::Null,
-                })),
                 "stage" => {
                     let action = args.get(2).map(String::as_str).ok_or("missing work stage action")?;
                     let work_id = args.get(3).ok_or("work stage requires a work_id")?;
@@ -672,50 +639,40 @@ mod tests {
         result
     }
 
-    fn with_agent_and_pane_env<R>(agent_id: &str, pane_id: &str, f: impl FnOnce() -> R) -> R {
+    fn with_agent_and_tile_env<R>(agent_id: &str, tile_id: &str, f: impl FnOnce() -> R) -> R {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let previous_agent = std::env::var("HERD_AGENT_ID").ok();
-        let previous_pane = std::env::var("HERD_PANE_ID").ok();
-        let previous_tmux_pane = std::env::var("TMUX_PANE").ok();
+        let previous_tile = std::env::var("HERD_TILE_ID").ok();
         std::env::set_var("HERD_AGENT_ID", agent_id);
-        std::env::set_var("HERD_PANE_ID", pane_id);
-        std::env::set_var("TMUX_PANE", pane_id);
+        std::env::set_var("HERD_TILE_ID", tile_id);
         let result = f();
         match previous_agent {
             Some(value) => std::env::set_var("HERD_AGENT_ID", value),
             None => std::env::remove_var("HERD_AGENT_ID"),
         }
-        match previous_pane {
-            Some(value) => std::env::set_var("HERD_PANE_ID", value),
-            None => std::env::remove_var("HERD_PANE_ID"),
-        }
-        match previous_tmux_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
+        match previous_tile {
+            Some(value) => std::env::set_var("HERD_TILE_ID", value),
+            None => std::env::remove_var("HERD_TILE_ID"),
         }
         result
     }
 
     fn with_cli_env<R>(
-        herd_pane_id: Option<&str>,
-        tmux_pane: Option<&str>,
+        herd_tile_id: Option<&str>,
         herd_sock: Option<&str>,
         herd_session_id: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
-        let previous_herd_pane = std::env::var("HERD_PANE_ID").ok();
-        let previous_tmux_pane = std::env::var("TMUX_PANE").ok();
+        let previous_agent = std::env::var("HERD_AGENT_ID").ok();
+        let previous_herd_tile = std::env::var("HERD_TILE_ID").ok();
         let previous_herd_sock = std::env::var("HERD_SOCK").ok();
         let previous_herd_session = std::env::var("HERD_SESSION_ID").ok();
 
-        match herd_pane_id {
-            Some(value) => std::env::set_var("HERD_PANE_ID", value),
-            None => std::env::remove_var("HERD_PANE_ID"),
-        }
-        match tmux_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
+        std::env::remove_var("HERD_AGENT_ID");
+        match herd_tile_id {
+            Some(value) => std::env::set_var("HERD_TILE_ID", value),
+            None => std::env::remove_var("HERD_TILE_ID"),
         }
         match herd_sock {
             Some(value) => std::env::set_var("HERD_SOCK", value),
@@ -728,13 +685,13 @@ mod tests {
 
         let result = f();
 
-        match previous_herd_pane {
-            Some(value) => std::env::set_var("HERD_PANE_ID", value),
-            None => std::env::remove_var("HERD_PANE_ID"),
+        match previous_agent {
+            Some(value) => std::env::set_var("HERD_AGENT_ID", value),
+            None => std::env::remove_var("HERD_AGENT_ID"),
         }
-        match previous_tmux_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
+        match previous_herd_tile {
+            Some(value) => std::env::set_var("HERD_TILE_ID", value),
+            None => std::env::remove_var("HERD_TILE_ID"),
         }
         match previous_herd_sock {
             Some(value) => std::env::set_var("HERD_SOCK", value),
@@ -749,77 +706,100 @@ mod tests {
     }
 
     #[test]
-    fn serializes_work_list_payload() {
-        with_agent_and_pane_env("agent-7", "%7", || {
-            let payload = build_command_payload(&ctx(), &["work".into(), "list".into()]).unwrap();
+    fn serializes_tile_create_agent_payload() {
+        with_cli_env(None, None, None, || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "create".into(),
+                    "agent".into(),
+                    "--parent-session-id".into(),
+                    "$7".into(),
+                    "--parent-tile-id".into(),
+                    "tile7".into(),
+                ],
+            )
+            .unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "work_list",
-                    "scope": "current_session",
-                    "agent_id": "agent-7",
-                    "session_id": null,
-                    "sender_pane_id": "%7",
+                    "command": "tile_create",
+                    "tile_type": "agent",
+                    "title": null,
+                    "x": null,
+                    "y": null,
+                    "width": null,
+                    "height": null,
+                    "parent_session_id": "$7",
+                    "parent_tile_id": "tile7",
+                    "sender_agent_id": null,
+                    "sender_tile_id": null,
                 })
             );
         });
-    }
-
-    #[test]
-    fn rejects_global_work_list_flag() {
-        let error = build_command_payload(&ctx(), &["work".into(), "list".into(), "--all".into()]).unwrap_err();
-        assert_eq!(error, "work list is session-local; --all is no longer supported");
-    }
-
-    #[test]
-    fn serializes_list_agents_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
-            let payload = build_command_payload(&ctx(), &["agent".into(), "list".into()]).unwrap();
-            assert_eq!(
-                payload,
-                json!({
-                    "command": "agent_list",
-                    "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
-                })
-            );
-        });
-    }
-
-    #[test]
-    fn serializes_agent_create_payload() {
-        let payload = build_command_payload(
-            &ctx(),
-            &[
-                "agent".into(),
-                "create".into(),
-                "--parent-session-id".into(),
-                "$7".into(),
-                "--parent-pane-id".into(),
-                "%7".into(),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            payload,
-            json!({
-                "command": "agent_create",
-                "parent_session_id": "$7",
-                "parent_pane_id": "%7",
-            })
-        );
     }
 
     #[test]
     fn serializes_list_network_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(&ctx(), &["network".into(), "list".into()]).unwrap();
             assert_eq!(
                 payload,
                 json!({
                     "command": "network_list",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_network_get_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &["network".into(), "get".into(), "tile9".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "network_get",
+                    "tile_id": "tile9",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_network_call_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "network".into(),
+                    "call".into(),
+                    "tile9".into(),
+                    "input_send".into(),
+                    r#"{"input":"ls\n"}"#.into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "network_call",
+                    "tile_id": "tile9",
+                    "action": "input_send",
+                    "args": {
+                        "input": "ls\n",
+                    },
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
@@ -827,7 +807,7 @@ mod tests {
 
     #[test]
     fn serializes_filtered_list_payloads_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let network_payload = build_command_payload(
                 &ctx(),
                 &["network".into(), "list".into(), "agent".into()],
@@ -838,40 +818,26 @@ mod tests {
                 json!({
                     "command": "network_list",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "tile_type": "agent",
                 })
             );
 
             let session_payload = build_command_payload(
                 &ctx(),
-                &["session".into(), "list".into(), "work".into()],
+                &["tile".into(), "list".into(), "work".into()],
             )
             .unwrap();
             assert_eq!(
                 session_payload,
                 json!({
-                    "command": "session_list",
+                    "command": "tile_list",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "tile_type": "work",
                 })
             );
 
-            let tile_payload = build_command_payload(
-                &ctx(),
-                &["tile".into(), "list".into(), "shell".into()],
-            )
-            .unwrap();
-            assert_eq!(
-                tile_payload,
-                json!({
-                    "command": "tile_list",
-                    "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
-                    "tile_type": "shell",
-                })
-            );
         });
     }
 
@@ -887,19 +853,70 @@ mod tests {
 
     #[test]
     fn serializes_tile_get_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
-                &["tile".into(), "get".into(), "%9".into()],
+                &["tile".into(), "get".into(), "tile9".into()],
             )
             .unwrap();
             assert_eq!(
                 payload,
                 json!({
                     "command": "tile_get",
-                    "tile_id": "%9",
+                    "tile_id": "tile9",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_tile_rename_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &["tile".into(), "rename".into(), "tile9".into(), "Renamed".into(), "Tile".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "tile_rename",
+                    "tile_id": "tile9",
+                    "title": "Renamed Tile",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_tile_call_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "call".into(),
+                    "tile9".into(),
+                    "input_send".into(),
+                    r#"{"input":"ls\n"}"#.into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "tile_call",
+                    "tile_id": "tile9",
+                    "action": "input_send",
+                    "args": {
+                        "input": "ls\n",
+                    },
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
@@ -907,21 +924,21 @@ mod tests {
 
     #[test]
     fn serializes_tile_move_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
-                &["tile".into(), "move".into(), "%9".into(), "420".into(), "160".into()],
+                &["tile".into(), "move".into(), "tile9".into(), "420".into(), "160".into()],
             )
             .unwrap();
             assert_eq!(
                 payload,
                 json!({
                     "command": "tile_move",
-                    "tile_id": "%9",
+                    "tile_id": "tile9",
                     "x": 420.0,
                     "y": 160.0,
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
@@ -929,85 +946,77 @@ mod tests {
 
     #[test]
     fn serializes_tile_resize_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
-                &["tile".into(), "resize".into(), "%9".into(), "720".into(), "480".into()],
+                &["tile".into(), "resize".into(), "tile9".into(), "720".into(), "480".into()],
             )
             .unwrap();
             assert_eq!(
                 payload,
                 json!({
                     "command": "tile_resize",
-                    "tile_id": "%9",
+                    "tile_id": "tile9",
                     "width": 720.0,
                     "height": 480.0,
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
     }
 
     #[test]
-    fn serializes_topic_list_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
-            let payload = build_command_payload(&ctx(), &["topic".into(), "list".into()]).unwrap();
+    fn serializes_message_topic_list_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(&ctx(), &["message".into(), "topic".into(), "list".into()]).unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "topics_list",
+                    "command": "message_topic_list",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
     }
 
     #[test]
-    fn serializes_shell_create_payload() {
-        let payload = build_command_payload(
-            &ctx(),
-            &[
-                "shell".into(),
-                "create".into(),
-                "--x".into(),
-                "180".into(),
-                "--y".into(),
-                "140".into(),
-                "--width".into(),
-                "640".into(),
-                "--height".into(),
-                "400".into(),
-                "--parent-pane-id".into(),
-                "%1".into(),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            payload,
-            json!({
-                "command": "shell_create",
-                "x": 180.0,
-                "y": 140.0,
-                "width": 640.0,
-                "height": 400.0,
-                "parent_session_id": null,
-                "parent_pane_id": "%1",
-            })
-        );
-    }
-
-    #[test]
-    fn serializes_shell_list_payload_with_sender_context() {
-        with_agent_and_pane_env("agent-7", "%7", || {
-            let payload = build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap();
+    fn serializes_tile_create_shell_payload() {
+        with_cli_env(None, None, None, || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "create".into(),
+                    "shell".into(),
+                    "--x".into(),
+                    "180".into(),
+                    "--y".into(),
+                    "140".into(),
+                    "--width".into(),
+                    "640".into(),
+                    "--height".into(),
+                    "400".into(),
+                    "--parent-tile-id".into(),
+                    "tile1".into(),
+                ],
+            )
+            .unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "shell_list",
-                    "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "command": "tile_create",
+                    "tile_type": "shell",
+                    "title": null,
+                    "x": 180.0,
+                    "y": 140.0,
+                    "width": 640.0,
+                    "height": 400.0,
+                    "parent_session_id": null,
+                    "parent_tile_id": "tile1",
+                    "sender_agent_id": null,
+                    "sender_tile_id": null,
                 })
             );
         });
@@ -1015,12 +1024,13 @@ mod tests {
 
     #[test]
     fn serializes_browser_command_payloads() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let create = build_command_payload(
                 &ctx(),
                 &[
-                    "browser".into(),
+                    "tile".into(),
                     "create".into(),
+                    "browser".into(),
                     "--parent-session-id".into(),
                     "$1".into(),
                 ],
@@ -1029,56 +1039,89 @@ mod tests {
             assert_eq!(
                 create,
                 json!({
-                    "command": "browser_create",
+                    "command": "tile_create",
+                    "tile_type": "browser",
+                    "title": null,
+                    "x": null,
+                    "y": null,
+                    "width": null,
+                    "height": null,
                     "parent_session_id": "$1",
-                    "parent_pane_id": null,
+                    "parent_tile_id": null,
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
                 })
             );
 
             let destroy = build_command_payload(
                 &ctx(),
-                &["browser".into(), "destroy".into(), "%9".into()],
+                &["tile".into(), "destroy".into(), "tile9".into()],
             )
             .unwrap();
             assert_eq!(
                 destroy,
                 json!({
-                    "command": "browser_destroy",
-                    "pane_id": "%9",
+                    "command": "tile_destroy",
+                    "tile_id": "tile9",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
 
             let navigate = build_command_payload(
                 &ctx(),
-                &["browser".into(), "navigate".into(), "%9".into(), "https://example.com".into()],
+                &["browser".into(), "navigate".into(), "tile9".into(), "https://example.com".into()],
             )
             .unwrap();
             assert_eq!(
                 navigate,
                 json!({
                     "command": "browser_navigate",
-                    "pane_id": "%9",
+                    "tile_id": "tile9",
                     "url": "https://example.com",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
 
             let load = build_command_payload(
                 &ctx(),
-                &["browser".into(), "load".into(), "%9".into(), "./fixtures/index.html".into()],
+                &["browser".into(), "load".into(), "tile9".into(), "./fixtures/index.html".into()],
             )
             .unwrap();
             assert_eq!(
                 load,
                 json!({
                     "command": "browser_load",
-                    "pane_id": "%9",
+                    "tile_id": "tile9",
                     "path": "./fixtures/index.html",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+
+            let drive = build_command_payload(
+                &ctx(),
+                &[
+                    "browser".into(),
+                    "drive".into(),
+                    "tile9".into(),
+                    "click".into(),
+                    "{\"selector\":\"#go\"}".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                drive,
+                json!({
+                    "command": "browser_drive",
+                    "tile_id": "tile9",
+                    "action": "click",
+                    "args": {
+                        "selector": "#go",
+                    },
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
@@ -1086,7 +1129,7 @@ mod tests {
 
     #[test]
     fn serializes_message_public_payload() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
                 &[
@@ -1108,7 +1151,7 @@ mod tests {
                     "command": "message_public",
                     "message": "sync on #prd-7",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "sender_agent_pid": "4242",
                     "topics": ["#alpha"],
                     "mentions": ["agent-2"],
@@ -1119,7 +1162,7 @@ mod tests {
 
     #[test]
     fn serializes_message_network_and_root_payloads() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let network = build_command_payload(
                 &ctx(),
                 &["message".into(), "network".into(), "hello".into(), "team".into()],
@@ -1131,7 +1174,7 @@ mod tests {
                     "command": "message_network",
                     "message": "hello team",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "sender_agent_pid": "4242",
                 })
             );
@@ -1147,7 +1190,7 @@ mod tests {
                     "command": "message_root",
                     "message": "need help",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "sender_agent_pid": "4242",
                 })
             );
@@ -1156,7 +1199,7 @@ mod tests {
 
     #[test]
     fn serializes_sudo_payload_as_message_root() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
                 &["sudo".into(), "please".into(), "take".into(), "over".into()],
@@ -1168,7 +1211,7 @@ mod tests {
                     "command": "message_root",
                     "message": "please take over",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                     "sender_agent_pid": "4242",
                 })
             );
@@ -1177,13 +1220,13 @@ mod tests {
 
     #[test]
     fn serializes_network_connect_and_disconnect_payloads() {
-        with_agent_and_pane_env("agent-7", "%7", || {
+        with_agent_and_tile_env("agent-7", "tile7", || {
             let connect = build_command_payload(
                 &ctx(),
                 &[
                     "network".into(),
                     "connect".into(),
-                    "%7".into(),
+                    "tile7".into(),
                     "left".into(),
                     "work:work-s4-001".into(),
                     "left".into(),
@@ -1194,72 +1237,75 @@ mod tests {
                 connect,
                 json!({
                     "command": "network_connect",
-                    "from_tile_id": "%7",
+                    "from_tile_id": "tile7",
                     "from_port": "left",
                     "to_tile_id": "work:work-s4-001",
                     "to_port": "left",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
 
             let disconnect = build_command_payload(
                 &ctx(),
-                &["network".into(), "disconnect".into(), "%7".into(), "left".into()],
+                &["network".into(), "disconnect".into(), "tile7".into(), "left".into()],
             )
             .unwrap();
             assert_eq!(
                 disconnect,
                 json!({
                     "command": "network_disconnect",
-                    "tile_id": "%7",
+                    "tile_id": "tile7",
                     "port": "left",
                     "sender_agent_id": "agent-7",
-                    "sender_pane_id": "%7",
+                    "sender_tile_id": "tile7",
                 })
             );
         });
     }
 
     #[test]
-    fn serializes_work_create_payload() {
-        with_agent_and_pane_env("agent-1", "%7", || {
+    fn serializes_tile_create_work_payload() {
+        with_agent_and_tile_env("agent-1", "tile7", || {
             let payload = build_command_payload(
                 &ctx(),
-                &["work".into(), "create".into(), "Socket".into(), "refactor".into()],
+                &[
+                    "tile".into(),
+                    "create".into(),
+                    "work".into(),
+                    "--title".into(),
+                    "Socket refactor".into(),
+                ],
             )
             .unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "work_create",
+                    "command": "tile_create",
+                    "tile_type": "work",
                     "title": "Socket refactor",
+                    "x": null,
+                    "y": null,
+                    "width": null,
+                    "height": null,
+                    "parent_session_id": null,
+                    "parent_tile_id": null,
                     "sender_agent_id": "agent-1",
-                    "sender_pane_id": "%7",
-                    "session_id": null,
+                    "sender_tile_id": "tile7",
                 })
             );
         });
     }
 
     #[test]
-    fn serializes_work_show_payload() {
-        with_agent_and_pane_env("agent-7", "%7", || {
-            let payload = build_command_payload(
+    fn rejects_work_show_command() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let error = build_command_payload(
                 &ctx(),
                 &["work".into(), "show".into(), "work-s4-001".into()],
             )
-            .unwrap();
-            assert_eq!(
-                payload,
-                json!({
-                    "command": "work_get",
-                    "work_id": "work-s4-001",
-                    "agent_id": "agent-7",
-                    "session_id": null,
-                    "sender_pane_id": "%7",
-                })
-            );
+            .unwrap_err();
+            assert!(error.contains("unknown work target"));
         });
     }
 
@@ -1297,17 +1343,17 @@ mod tests {
     }
 
     #[test]
-    fn serializes_topic_subscribe_and_unsubscribe_payloads() {
+    fn serializes_message_topic_subscribe_and_unsubscribe_payloads() {
         with_agent_env("owner-1", || {
             let subscribe = build_command_payload(
                 &ctx(),
-                &["topic".into(), "subscribe".into(), "#prd-7".into()],
+                &["message".into(), "topic".into(), "subscribe".into(), "#prd-7".into()],
             )
             .unwrap();
             assert_eq!(
                 subscribe,
                 json!({
-                    "command": "topic_subscribe",
+                    "command": "message_topic_subscribe",
                     "agent_id": "owner-1",
                     "topic": "#prd-7",
                 })
@@ -1315,13 +1361,13 @@ mod tests {
 
             let unsubscribe = build_command_payload(
                 &ctx(),
-                &["topic".into(), "unsubscribe".into(), "#prd-7".into()],
+                &["message".into(), "topic".into(), "unsubscribe".into(), "#prd-7".into()],
             )
             .unwrap();
             assert_eq!(
                 unsubscribe,
                 json!({
-                    "command": "topic_unsubscribe",
+                    "command": "message_topic_unsubscribe",
                     "agent_id": "owner-1",
                     "topic": "#prd-7",
                 })
@@ -1344,54 +1390,76 @@ mod tests {
     }
 
     #[test]
-    fn prefers_herd_pane_id_and_ignores_bare_tmux_pane() {
-        with_cli_env(Some("%1"), Some("%99"), None, None, || {
-            let payload = build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap();
-            assert_eq!(
-                payload,
-                json!({
-                    "command": "shell_list",
-                    "sender_agent_id": null,
-                    "sender_pane_id": "%1",
-                })
-            );
-        });
+    fn rejects_removed_specific_list_and_create_destroy_commands() {
+        assert_eq!(
+            build_command_payload(&ctx(), &["agent".into(), "list".into()]).unwrap_err(),
+            "unknown agent target: list"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap_err(),
+            "unknown shell target: list"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["work".into(), "list".into()]).unwrap_err(),
+            "unknown work target: list"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["session".into(), "list".into()]).unwrap_err(),
+            "unknown command group: session"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["shell".into(), "create".into()]).unwrap_err(),
+            "unknown shell target: create"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["shell".into(), "destroy".into(), "tile1".into()]).unwrap_err(),
+            "unknown shell target: destroy"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["browser".into(), "create".into()]).unwrap_err(),
+            "unknown browser target: create"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["browser".into(), "destroy".into(), "tile1".into()]).unwrap_err(),
+            "unknown browser target: destroy"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["agent".into(), "create".into()]).unwrap_err(),
+            "unknown agent target: create"
+        );
+        assert_eq!(
+            build_command_payload(&ctx(), &["work".into(), "create".into(), "Title".into()]).unwrap_err(),
+            "unknown work target: create"
+        );
+    }
 
-        with_cli_env(None, Some("%99"), None, None, || {
-            let payload = build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap();
+    #[test]
+    fn uses_herd_tile_id_for_sender_context() {
+        with_cli_env(Some("tile1"), None, None, || {
+            let payload = build_command_payload(&ctx(), &["tile".into(), "list".into(), "shell".into()]).unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "shell_list",
+                    "command": "tile_list",
                     "sender_agent_id": null,
-                    "sender_pane_id": null,
+                    "sender_tile_id": "tile1",
+                    "tile_type": "shell",
                 })
             );
         });
     }
 
     #[test]
-    fn uses_tmux_pane_when_running_inside_herd_environment() {
-        with_cli_env(None, Some("%7"), Some("/tmp/herd.sock"), None, || {
-            let payload = build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap();
+    fn ignores_socket_and_session_env_without_herd_tile_id() {
+        with_cli_env(None, Some("/tmp/herd.sock"), Some("$1"), || {
+            let payload = build_command_payload(&ctx(), &["tile".into(), "list".into(), "shell".into()]).unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "shell_list",
+                    "command": "tile_list",
                     "sender_agent_id": null,
-                    "sender_pane_id": "%7",
-                })
-            );
-        });
-
-        with_cli_env(None, Some("%8"), None, Some("$1"), || {
-            let payload = build_command_payload(&ctx(), &["shell".into(), "list".into()]).unwrap();
-            assert_eq!(
-                payload,
-                json!({
-                    "command": "shell_list",
-                    "sender_agent_id": null,
-                    "sender_pane_id": "%8",
+                    "sender_tile_id": null,
+                    "tile_type": "shell",
                 })
             );
         });

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { HerdTestClient } from './client';
-import { createIsolatedTab, runTmux, waitFor } from './helpers';
+import { backingPaneIdForTile, createIsolatedTab, runTmux, waitFor } from './helpers';
 import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime';
 
 describe.sequential('tmux-created teammate integration coverage', () => {
@@ -19,7 +19,8 @@ describe.sequential('tmux-created teammate integration coverage', () => {
 
   it('projects externally tmux-created panes as separate child tiles with root lineage', async () => {
     const projection = await createIsolatedTab(client, 'tmux-team');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -37,12 +38,12 @@ describe.sequential('tmux-created teammate integration coverage', () => {
       150,
     );
 
-    const firstChild = current.active_tab_terminals.find((term) => term.id !== rootPaneId);
+    const firstChild = current.active_tab_terminals.find((term) => term.id !== rootTileId);
     expect(firstChild).toBeTruthy();
     expect(firstChild?.parentWindowId).toBe(rootWindowId);
     expect(firstChild?.readOnly ?? false).toBe(false);
 
-    runTmux(runtime, ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', firstChild!.id, '/bin/zsh']);
+    runTmux(runtime, ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', await backingPaneIdForTile(client, firstChild!.id), '/bin/zsh']);
 
     current = await waitFor(
       'second tmux child tile',
@@ -55,7 +56,7 @@ describe.sequential('tmux-created teammate integration coverage', () => {
       150,
     );
 
-    const childTiles = current.active_tab_terminals.filter((term) => term.id !== rootPaneId);
+    const childTiles = current.active_tab_terminals.filter((term) => term.id !== rootTileId);
     expect(childTiles).toHaveLength(2);
     expect(childTiles.every((term) => term.parentWindowId === rootWindowId)).toBe(true);
     expect(current.active_tab_connections.every((connection) => connection.parent_window_id === rootWindowId)).toBe(true);

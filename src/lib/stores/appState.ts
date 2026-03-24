@@ -28,7 +28,6 @@ import {
   writePane,
 } from '../tauri';
 import type {
-  AgentActivityEntry,
   AgentDebugState,
   AgentInfo,
   ArrangementMode,
@@ -58,6 +57,8 @@ import type {
   TerminalInfo,
   TestDriverProjection,
   TestDriverStatus,
+  TileActivityEntry,
+  TileMessageLogEntry,
   TopicInfo,
   TilePort,
   WorkCanvasCard,
@@ -194,6 +195,7 @@ export const initialAppState: AppStateTree = {
   topics: {},
   chatter: [],
   agentLogs: [],
+  tileMessageLogs: [],
   network: {
     connections: [],
   },
@@ -271,12 +273,35 @@ function snapToGrid(value: number): number {
   return Math.round(value / GRID_SNAP) * GRID_SNAP;
 }
 
-function workLayoutKey(workId: string): string {
-  return `work:${workId}`;
+function windowTileId(window: TmuxWindow | null | undefined): string | null {
+  return window?.tile_id ?? null;
 }
 
-function isWorkLayoutKey(entryId: string): boolean {
-  return entryId.startsWith('work:');
+function paneTileId(state: AppStateTree, paneId: string): string | null {
+  const pane = state.tmux.panes[paneId];
+  if (!pane) return null;
+  return pane.tile_id ?? windowTileId(state.tmux.windows[pane.window_id]) ?? null;
+}
+
+export function paneIdForTileId(state: AppStateTree, tileId: string): string | null {
+  for (const pane of Object.values(state.tmux.panes)) {
+    if ((pane.tile_id ?? windowTileId(state.tmux.windows[pane.window_id]) ?? null) === tileId) {
+      return pane.id;
+    }
+  }
+  return null;
+}
+
+function workLayoutKey(state: AppStateTree, workId: string): string | null {
+  return state.work.items[workId]?.tile_id ?? null;
+}
+
+function workTileIdSet(workItems: WorkItem[]): Set<string> {
+  return new Set(workItems.map((item) => item.tile_id));
+}
+
+function workItemForTileId(state: AppStateTree, tileId: string): WorkItem | null {
+  return Object.values(state.work.items).find((item) => item?.tile_id === tileId) ?? null;
 }
 
 function rectsOverlap(
@@ -378,7 +403,7 @@ function buildPanesRecord(panes: TmuxPane[], existing: AppStateTree['tmux']['pan
     panesRecord[pane.id] = {
       ...pane,
       readOnly: existing[pane.id]?.readOnly ?? false,
-      role: existing[pane.id]?.role,
+      role: pane.role ?? existing[pane.id]?.role,
     };
     if (!paneOrderByWindow[pane.window_id]) {
       paneOrderByWindow[pane.window_id] = [];
@@ -517,10 +542,27 @@ function activeSessionWorkItemsInState(state: AppStateTree): WorkItem[] {
     );
 }
 
+function compareAgentsForCurrentTile(left: AgentInfo, right: AgentInfo): number {
+  return Number(right.alive) - Number(left.alive)
+    || Number(right.agent_role === 'root') - Number(left.agent_role === 'root')
+    || left.display_name.localeCompare(right.display_name)
+    || left.agent_id.localeCompare(right.agent_id);
+}
+
 function activeSessionAgentsInState(state: AppStateTree): AgentInfo[] {
   const activeSessionId = state.tmux.activeSessionId;
-  return Object.values(state.agents)
-    .filter((agent) => !activeSessionId || agent.session_id === activeSessionId)
+  const currentAgentsByTile = new Map<string, AgentInfo>();
+  for (const agent of Object.values(state.agents).filter((agent) => !activeSessionId || agent.session_id === activeSessionId)) {
+    const paneId = paneIdForTileId(state, agent.tile_id);
+    if (!paneId) continue;
+    const kind = paneKindForPane(state, paneId);
+    if (kind !== 'claude' && kind !== 'root_agent') continue;
+    const existing = currentAgentsByTile.get(agent.tile_id);
+    if (!existing || compareAgentsForCurrentTile(agent, existing) < 0) {
+      currentAgentsByTile.set(agent.tile_id, agent);
+    }
+  }
+  return [...currentAgentsByTile.values()]
     .sort((left, right) => left.display_name.localeCompare(right.display_name));
 }
 
@@ -529,13 +571,14 @@ function selectFirstWorkId(state: AppStateTree): string | null {
 }
 
 function selectFirstAgentPaneId(state: AppStateTree): string | null {
-  return activeSessionAgentsInState(state)[0]?.tile_id ?? null;
+  const agent = activeSessionAgentsInState(state)[0];
+  return agent ? paneIdForTileId(state, agent.tile_id) : null;
 }
 
 function isAgentPaneSelected(state: AppStateTree): boolean {
   const selectedPaneId = state.ui.selectedPaneId;
   if (!selectedPaneId) return false;
-  return activeSessionAgentsInState(state).some((agent) => agent.tile_id === selectedPaneId);
+  return activeSessionAgentsInState(state).some((agent) => paneIdForTileId(state, agent.tile_id) === selectedPaneId);
 }
 
 function sidebarSectionForState(state: AppStateTree): SidebarSection {
@@ -608,10 +651,10 @@ function selectedAgentPaneIdForSession(
   if (agents.length === 0) {
     return null;
   }
-  if (preferredPaneId && agents.some((agent) => agent.tile_id === preferredPaneId)) {
+  if (preferredPaneId && agents.some((agent) => paneIdForTileId(state, agent.tile_id) === preferredPaneId)) {
     return preferredPaneId;
   }
-  return agents[0].tile_id;
+  return paneIdForTileId(state, agents[0].tile_id);
 }
 
 function countPanesInSession(tmux: AppStateTree['tmux'], sessionId: string): number {
@@ -737,8 +780,18 @@ function paneKindForPane(state: AppStateTree, paneId: string): PaneKind {
     return 'regular';
   }
 
-  if (pane.role === 'claude' || pane.role === 'root_agent' || pane.role === 'output' || pane.role === 'browser') {
+  if (pane.role) {
     return pane.role;
+  }
+
+  const tileId = paneTileId(state, paneId);
+  const liveAgent = tileId
+    ? Object.values(state.agents)
+      .filter((agent) => agent.tile_id === tileId && agent.alive)
+      .sort(compareAgentsForCurrentTile)[0]
+    : null;
+  if (liveAgent) {
+    return liveAgent.agent_role === 'root' ? 'root_agent' : 'claude';
   }
 
   const titleSignals = [pane.title, window.name].join(' ');
@@ -1000,44 +1053,67 @@ function reconcileLayoutEntries(
   previousEntries: Record<string, LayoutEntry>,
   sessions: Record<string, TmuxSession>,
   windows: Record<string, TmuxWindow>,
+  workItems: Record<string, WorkItem>,
 ): Record<string, LayoutEntry> {
   const nextEntries: Record<string, LayoutEntry> = {};
+  const windowEntryIds = new Set(
+    Object.values(windows)
+      .map((window) => windowTileId(window))
+      .filter((entryId): entryId is string => Boolean(entryId)),
+  );
+  const workEntryIds = new Set(
+    Object.values(workItems)
+      .map((item) => item?.tile_id)
+      .filter((entryId): entryId is string => Boolean(entryId)),
+  );
 
   for (const [entryId, entry] of Object.entries(previousEntries)) {
-    if (isWorkLayoutKey(entryId)) {
+    if (workEntryIds.has(entryId)) {
       nextEntries[entryId] = entry;
     }
   }
 
   for (const session of Object.values(sessions)) {
     for (const windowId of session.window_ids) {
-      const existing = previousEntries[windowId];
+      const window = windows[windowId];
+      const entryId = windowTileId(window);
+      if (!window || !entryId) {
+        continue;
+      }
+      const existing = previousEntries[entryId];
       if (existing) {
-        nextEntries[windowId] = existing;
+        nextEntries[entryId] = existing;
         continue;
       }
 
-      const parentWindowId = windows[windowId]?.parent_window_id ?? null;
-      const parentEntry = parentWindowId ? nextEntries[parentWindowId] ?? previousEntries[parentWindowId] : null;
+      const parentWindowId = window.parent_window_id ?? null;
+      const parentEntryId = parentWindowId ? windowTileId(windows[parentWindowId]) : null;
+      const parentEntry = parentEntryId ? nextEntries[parentEntryId] ?? previousEntries[parentEntryId] : null;
       if (parentEntry) {
-        nextEntries[windowId] = findOpenPosition(
+        nextEntries[entryId] = findOpenPosition(
           parentEntry.x + parentEntry.width + GAP + GRID_SNAP,
           parentEntry.y,
           DEFAULT_TILE_WIDTH,
           DEFAULT_TILE_HEIGHT,
-          session.window_ids.filter((id) => id !== windowId),
+          session.window_ids
+            .filter((id) => id !== windowId)
+            .map((id) => windowTileId(windows[id]))
+            .filter((id): id is string => Boolean(id)),
           nextEntries,
         );
         continue;
       }
 
       const offset = session.window_ids.indexOf(windowId) * 40;
-      nextEntries[windowId] = findOpenPosition(
+      nextEntries[entryId] = findOpenPosition(
         100 + offset,
         100 + offset,
         DEFAULT_TILE_WIDTH,
         DEFAULT_TILE_HEIGHT,
-        session.window_ids.filter((id) => id !== windowId),
+        session.window_ids
+          .filter((id) => id !== windowId)
+          .map((id) => windowTileId(windows[id]))
+          .filter((id): id is string => Boolean(id)),
         nextEntries,
       );
     }
@@ -1113,11 +1189,15 @@ function applyPendingSpawnPlacement(
   }
 
   const targetWindowId = newWindowIds[newWindowIds.length - 1];
+  const targetEntryId = windowTileId(nextTmux.windows[targetWindowId]);
+  if (!targetEntryId) {
+    return { entries, pendingSpawnPlacement: pending, consumedSessionId: null };
+  }
   const nextEntries = { ...entries };
-  const existing = nextEntries[targetWindowId];
+  const existing = nextEntries[targetEntryId];
   const width = existing?.width ?? DEFAULT_TILE_WIDTH;
   const height = existing?.height ?? DEFAULT_TILE_HEIGHT;
-  nextEntries[targetWindowId] = {
+  nextEntries[targetEntryId] = {
     x: snapToGrid(pending.worldX),
     y: snapToGrid(pending.worldY),
     width,
@@ -1143,9 +1223,10 @@ function snapLayoutEntriesToTmux(
     if (pendingResizeKey !== `${window.cols}x${window.rows}`) continue;
 
     const paneId = window.pane_ids[0];
-    const entry = nextEntries[windowId];
+    const entryId = windowTileId(window);
+    const entry = entryId ? nextEntries[entryId] : null;
     const hint = paneId ? paneViewportHints[paneId] : null;
-    if (!paneId || !entry || !hint) continue;
+    if (!paneId || !entryId || !entry || !hint) continue;
     if (hint.cols <= 0 || hint.rows <= 0 || hint.pixelWidth <= 0 || hint.pixelHeight <= 0) continue;
     if (window.cols <= 0 || window.rows <= 0) continue;
 
@@ -1160,7 +1241,7 @@ function snapLayoutEntriesToTmux(
       continue;
     }
 
-    nextEntries[windowId] = {
+    nextEntries[entryId] = {
       ...entry,
       width: snappedWidth,
       height: snappedHeight,
@@ -1228,7 +1309,7 @@ export function applyTmuxSnapshotToState(
   const { record: sessions, order: sessionOrder } = buildSessionsRecord(snapshot.sessions);
   const { record: windows, order: windowOrder } = buildWindowsRecord(snapshot.windows);
   const { panesRecord, paneOrderByWindow } = buildPanesRecord(snapshot.panes, previousState.tmux.panes);
-  const layoutEntries = reconcileLayoutEntries(previousState.layout.entries, sessions, windows);
+  const layoutEntries = reconcileLayoutEntries(previousState.layout.entries, sessions, windows, previousState.work.items);
 
   const activeSessionId = snapshot.active_session_id ?? sessionOrder[0] ?? null;
   const activeWindowId = snapshot.active_window_id
@@ -1277,6 +1358,7 @@ export function applyTmuxSnapshotToState(
     topics: previousState.topics,
     chatter: previousState.chatter,
     agentLogs: previousState.agentLogs,
+    tileMessageLogs: previousState.tileMessageLogs,
     network: previousState.network,
     work: previousState.work,
     ui: {
@@ -1683,7 +1765,7 @@ export function reduceIntent(
         }
         const currentIndex = Math.max(
           0,
-          agents.findIndex((agent) => agent.tile_id === selectedAgentPaneIdForSession(state)),
+          agents.findIndex((agent) => paneIdForTileId(state, agent.tile_id) === selectedAgentPaneIdForSession(state)),
         );
         const nextIndex = Math.max(0, Math.min(agents.length - 1, currentIndex + intent.delta));
         return {
@@ -1692,7 +1774,7 @@ export function reduceIntent(
             ui: {
               ...state.ui,
               sidebarSection: 'agents',
-              selectedPaneId: agents[nextIndex]?.tile_id ?? null,
+              selectedPaneId: agents[nextIndex] ? paneIdForTileId(state, agents[nextIndex].tile_id) : null,
               selectedWorkId: null,
             },
           },
@@ -1728,13 +1810,17 @@ export function reduceIntent(
       if (!agent) {
         return { state, effects: [] };
       }
+      const paneId = paneIdForTileId(state, agent.tile_id);
+      if (!paneId) {
+        return { state, effects: [] };
+      }
       return {
         state: {
           ...state,
           ui: {
             ...state.ui,
             sidebarSection: 'agents',
-            selectedPaneId: agent.tile_id,
+            selectedPaneId: paneId,
             selectedWorkId: null,
           },
         },
@@ -1796,16 +1882,16 @@ export function reduceIntent(
 
     case 'move-selected-pane': {
       const paneId = state.ui.selectedPaneId;
-      const windowId = paneId ? state.tmux.panes[paneId]?.window_id : null;
-      const entry = windowId ? state.layout.entries[windowId] : null;
-      if (!paneId || !windowId || !entry) return { state, effects: [] };
+      const tileId = paneId ? paneTileId(state, paneId) : null;
+      const entry = tileId ? state.layout.entries[tileId] : null;
+      if (!paneId || !tileId || !entry) return { state, effects: [] };
       return {
         state: {
           ...state,
           layout: {
             entries: {
               ...state.layout.entries,
-              [windowId]: {
+              [tileId]: {
                 ...entry,
                 x: entry.x + intent.dx,
                 y: entry.y + intent.dy,
@@ -1893,7 +1979,7 @@ export async function bootstrapAppState() {
   const [layout, snapshot, debugState, workItems] = await Promise.all([
     getLayoutState(),
     getTmuxState(),
-    getAgentDebugState().catch(() => ({ agents: [], topics: [], chatter: [], agent_logs: [], connections: [] } satisfies AgentDebugState)),
+    getAgentDebugState().catch(() => ({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] } satisfies AgentDebugState)),
     getWorkItems().catch(() => [] as WorkItem[]),
   ]);
   const nextState = applyWorkItemsToState(
@@ -1910,7 +1996,7 @@ export async function bootstrapAppState() {
     workItems,
   );
   appState.set(nextState);
-  await persistChangedWorkLayoutEntries(layout, nextState.layout.entries);
+  await persistChangedWorkLayoutEntries(layout, nextState.layout.entries, workItems);
   const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const viewportHeight = typeof window !== 'undefined' ? window.innerHeight - 54 : 720;
   fitCanvasToActiveTab(viewportWidth, viewportHeight);
@@ -1921,12 +2007,12 @@ export async function refreshWorkItems(sessionId?: string | null) {
   const previousState = get(appState);
   const nextState = applyWorkItemsToState(previousState, items);
   appState.set(nextState);
-  await persistChangedWorkLayoutEntries(previousState.layout.entries, nextState.layout.entries);
+  await persistChangedWorkLayoutEntries(previousState.layout.entries, nextState.layout.entries, items);
 }
 
 export async function refreshAgentDebugState() {
   const debugState = await getAgentDebugState().catch(
-    () => ({ agents: [], topics: [], chatter: [], agent_logs: [], connections: [] } satisfies AgentDebugState),
+    () => ({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] } satisfies AgentDebugState),
   );
   appState.update((state) => applyAgentDebugStateToState(state, debugState));
 }
@@ -1937,8 +2023,8 @@ export function applyTmuxSnapshot(snapshot: TmuxSnapshot) {
   appState.set(nextState);
 
   const changedEntries = collectChangedLayoutEntries(previousState.layout.entries, nextState.layout.entries);
-  for (const [windowId, entry] of changedEntries) {
-    void saveLayoutState(windowId, entry.x, entry.y, entry.width, entry.height);
+  for (const [entryId, entry] of changedEntries) {
+    void saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height);
   }
 }
 
@@ -2137,11 +2223,16 @@ export function registerPaneDriverHandle(paneId: string, handle: PaneDriverHandl
 function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo | null {
   const pane = state.tmux.panes[paneId];
   const window = pane ? state.tmux.windows[pane.window_id] : null;
-  const entry = window ? state.layout.entries[window.id] : null;
-  const agent = Object.values(state.agents).find((item) => item.tile_id === paneId) ?? null;
-  if (!pane || !window || !entry) return null;
+  const tileId = pane ? paneTileId(state, pane.id) : null;
+  const entry = tileId ? state.layout.entries[tileId] : null;
+  const kind = pane ? paneKindForPane(state, pane.id) : 'regular';
+  const agent = tileId && (kind === 'claude' || kind === 'root_agent')
+    ? activeSessionAgentsInState(state).find((item) => item.tile_id === tileId) ?? null
+    : null;
+  if (!pane || !window || !tileId || !entry) return null;
   return {
     id: pane.id,
+    tileId,
     paneId: pane.id,
     windowId: window.id,
     parentWindowId: window.parent_window_id ?? null,
@@ -2155,7 +2246,7 @@ function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo 
     title: defaultWindowTitle(window, pane),
     command: pane.command,
     readOnly: pane.readOnly,
-    kind: paneKindForPane(state, pane.id),
+    kind,
     agentId: agent?.agent_id ?? null,
   };
 }
@@ -2207,10 +2298,16 @@ function buildDefaultWorkLayoutEntry(
   const baseY = Number.isFinite(minY) ? minY : 80;
   const workIndex = workItems.findIndex((item) => item.work_id === workId);
   const desiredY = baseY + Math.max(0, workIndex) * (WORK_CARD_HEIGHT + GAP);
+  const currentWorkItem = workItems.find((item) => item.work_id === workId) ?? null;
 
   const occupiedIds = [
-    ...state.tmux.windowOrder.filter((windowId) => state.tmux.windows[windowId]?.session_id === state.tmux.activeSessionId),
-    ...workItems.map((item) => workLayoutKey(item.work_id)).filter((entryId) => entryId !== workLayoutKey(workId)),
+    ...state.tmux.windowOrder
+      .filter((windowId) => state.tmux.windows[windowId]?.session_id === state.tmux.activeSessionId)
+      .map((windowId) => windowTileId(state.tmux.windows[windowId]))
+      .filter((entryId): entryId is string => Boolean(entryId)),
+    ...workItems
+      .map((item) => item.tile_id)
+      .filter((entryId) => entryId !== currentWorkItem?.tile_id),
   ];
 
   return findOpenPosition(baseX, desiredY, WORK_CARD_WIDTH, WORK_CARD_HEIGHT, occupiedIds, entries);
@@ -2219,9 +2316,18 @@ function buildDefaultWorkLayoutEntry(
 function ensureWorkLayoutEntries(state: AppStateTree, workItems: WorkItem[]): Record<string, LayoutEntry> {
   let changed = false;
   const nextEntries = { ...state.layout.entries };
+  const workTileIds = workTileIdSet(workItems);
+
+  for (const entryId of Object.keys(nextEntries)) {
+    const trackedWindow = Object.values(state.tmux.windows).some((window) => windowTileId(window) === entryId);
+    if (!trackedWindow && !workTileIds.has(entryId)) {
+      delete nextEntries[entryId];
+      changed = true;
+    }
+  }
 
   for (const item of workItems) {
-    const entryId = workLayoutKey(item.work_id);
+    const entryId = item.tile_id;
     if (nextEntries[entryId]) {
       continue;
     }
@@ -2232,9 +2338,14 @@ function ensureWorkLayoutEntries(state: AppStateTree, workItems: WorkItem[]): Re
   return changed ? nextEntries : state.layout.entries;
 }
 
-function removeWorkLayoutEntry(entries: Record<string, LayoutEntry>, workId: string): Record<string, LayoutEntry> {
-  const entryId = workLayoutKey(workId);
-  if (!(entryId in entries)) {
+function removeWorkLayoutEntry(
+  state: AppStateTree,
+  entries: Record<string, LayoutEntry>,
+  workId: string,
+): Record<string, LayoutEntry> {
+  const item = state.work.items[workId];
+  const entryId = item?.tile_id ?? null;
+  if (!entryId || !(entryId in entries)) {
     return entries;
   }
   const nextEntries = { ...entries };
@@ -2245,9 +2356,11 @@ function removeWorkLayoutEntry(entries: Record<string, LayoutEntry>, workId: str
 async function persistChangedWorkLayoutEntries(
   previousEntries: Record<string, LayoutEntry>,
   nextEntries: Record<string, LayoutEntry>,
+  workItems: WorkItem[],
 ) {
+  const workTileIds = workTileIdSet(workItems);
   const changedEntries = collectChangedLayoutEntries(previousEntries, nextEntries)
-    .filter(([entryId]) => isWorkLayoutKey(entryId));
+    .filter(([entryId]) => workTileIds.has(entryId));
   if (changedEntries.length === 0) {
     return;
   }
@@ -2273,6 +2386,9 @@ export function applyAgentDebugStateToState(state: AppStateTree, debugState: Age
   const agentLogs = activeSessionId
     ? debugState.agent_logs.filter((entry) => entry.session_id === activeSessionId)
     : debugState.agent_logs;
+  const tileMessageLogs = activeSessionId
+    ? debugState.tile_message_logs.filter((entry) => entry.session_id === activeSessionId)
+    : debugState.tile_message_logs;
   const nextDebugTab =
     state.ui.debugTab === 'logs' && chatter.length > 0
       ? 'chatter'
@@ -2283,6 +2399,7 @@ export function applyAgentDebugStateToState(state: AppStateTree, debugState: Age
     topics: buildTopicRecord(topics),
     chatter,
     agentLogs,
+    tileMessageLogs,
     network: {
       connections: debugState.connections.filter(
         (connection) => !activeSessionId || connection.session_id === activeSessionId,
@@ -2328,11 +2445,41 @@ export function applyWorkItemsToState(state: AppStateTree, workItems: WorkItem[]
   };
 }
 
-export function buildAgentActivityEntries(state: AppStateTree, paneId: string): AgentActivityEntry[] {
-  const agent = Object.values(state.agents).find((item) => item.tile_id === paneId);
-  if (!agent) return [];
+function tileMessageLogKind(layer: TileMessageLogEntry['layer']): TileActivityEntry['kind'] {
+  switch (layer) {
+    case 'network':
+      return 'network_log';
+    case 'message':
+      return 'message_log';
+    default:
+      return 'socket_log';
+  }
+}
 
-  const chatterEntries = state.chatter.flatMap<AgentActivityEntry>((entry) => {
+function tileMessageLogRelatesToTile(entry: TileMessageLogEntry, tileId: string) {
+  return entry.caller_tile_id === tileId
+    || entry.target_id === tileId
+    || entry.related_tile_ids.includes(tileId);
+}
+
+function formatTileMessageActivityText(entry: TileMessageLogEntry, tileId: string) {
+  const prefix = `[${entry.layer.toUpperCase()}/${entry.channel.toUpperCase()}]`;
+  const outcome = entry.outcome === 'ok' ? '' : ` ${entry.outcome.toUpperCase()}`;
+  const error = entry.error ? ` ${entry.error}` : '';
+  if (entry.caller_tile_id === tileId && entry.target_id !== tileId) {
+    return `${prefix} send ${entry.wrapper_command} -> ${entry.target_kind}:${entry.target_id}${outcome}${error}`;
+  }
+  if (entry.target_id === tileId) {
+    const caller = entry.caller_tile_id ? ` <- ${entry.caller_tile_id}` : '';
+    return `${prefix} recv ${entry.message_name}${caller}${outcome}${error}`;
+  }
+  return `${prefix} ${entry.wrapper_command}${outcome}${error}`;
+}
+
+export function buildTileActivityEntries(state: AppStateTree, tileId: string): TileActivityEntry[] {
+  const agent = Object.values(state.agents).find((item) => item.tile_id === tileId);
+
+  const chatterEntries = agent ? state.chatter.flatMap<TileActivityEntry>((entry) => {
     if (entry.kind === 'direct') {
       if (entry.to_agent_id === agent.agent_id) {
         return [{ kind: 'incoming_dm' as const, text: entry.display_text, timestamp_ms: entry.timestamp_ms }];
@@ -2365,17 +2512,26 @@ export function buildAgentActivityEntries(state: AppStateTree, paneId: string): 
     }
 
     return [];
-  });
+  }) : [];
 
-  const logEntries = state.agentLogs
-    .filter((entry) => entry.tile_id === paneId)
-    .map<AgentActivityEntry>((entry) => ({
+  const agentLogEntries = state.agentLogs
+    .filter((entry) => entry.tile_id === tileId)
+    .map<TileActivityEntry>((entry) => ({
       kind: entry.kind,
       text: entry.text,
       timestamp_ms: entry.timestamp_ms,
     }));
 
-  return [...chatterEntries, ...logEntries].sort((left, right) => left.timestamp_ms - right.timestamp_ms);
+  const tileMessageEntries = state.tileMessageLogs
+    .filter((entry) => tileMessageLogRelatesToTile(entry, tileId))
+    .map<TileActivityEntry>((entry) => ({
+      kind: tileMessageLogKind(entry.layer),
+      text: formatTileMessageActivityText(entry, tileId),
+      timestamp_ms: entry.timestamp_ms,
+    }));
+
+  return [...chatterEntries, ...agentLogEntries, ...tileMessageEntries]
+    .sort((left, right) => left.timestamp_ms - right.timestamp_ms);
 }
 
 export const terminals = derived(appState, ($state) =>
@@ -2402,10 +2558,11 @@ export function buildCanvasWorkCards(state: AppStateTree): WorkCanvasCard[] {
   if (workItems.length === 0) return [];
 
   return workItems.flatMap((item) => {
-    const entry = state.layout.entries[workLayoutKey(item.work_id)];
+    const entry = state.layout.entries[item.tile_id];
     if (!entry) return [];
     return [{
       workId: item.work_id,
+      tileId: item.tile_id,
       x: entry.x,
       y: entry.y,
       width: entry.width,
@@ -2434,6 +2591,7 @@ export interface RenderedNetworkConnection {
   fromPort: 'left' | 'top' | 'right' | 'bottom';
   toTileId: string;
   toPort: 'left' | 'top' | 'right' | 'bottom';
+  wireMode: 'read_only' | 'full_duplex';
   x1: number;
   y1: number;
   x2: number;
@@ -2445,21 +2603,22 @@ export interface RenderedNetworkConnection {
 }
 
 export function portModeForTileKind(kind: NetworkTileKind, port: TilePort): PortMode {
-  if ((kind === 'work' || kind === 'browser') && port !== 'left') {
+  if (kind === 'work' && port !== 'left') {
     return 'read';
   }
   return 'read_write';
 }
 
 function tileKindForTileId(state: AppStateTree, tileId: string): NetworkTileKind | null {
-  if (tileId.startsWith('work:')) {
+  if (workItemForTileId(state, tileId)) {
     return 'work';
   }
-  const pane = state.tmux.panes[tileId];
+  const paneId = paneIdForTileId(state, tileId);
+  const pane = paneId ? state.tmux.panes[paneId] : null;
   if (!pane) {
     return null;
   }
-  const kind = paneKindForPane(state, tileId);
+  const kind = paneKindForPane(state, pane.id);
   switch (kind) {
     case 'claude':
       return 'agent';
@@ -2467,8 +2626,6 @@ function tileKindForTileId(state: AppStateTree, tileId: string): NetworkTileKind
       return 'root_agent';
     case 'browser':
       return 'browser';
-    case 'output':
-      return 'output';
     default:
       return 'shell';
   }
@@ -2480,6 +2637,23 @@ function networkConnectionKey(connection: NetworkConnection): string {
 
 function renderedNetworkConnectionKey(connection: RenderedNetworkConnection): string {
   return `${connection.fromTileId}:${connection.fromPort}-${connection.toTileId}:${connection.toPort}`;
+}
+
+function renderedNetworkConnectionMode(
+  state: AppStateTree,
+  connection: NetworkConnection,
+): 'read_only' | 'full_duplex' {
+  const fromKind = tileKindForTileId(state, connection.from_tile_id);
+  const toKind = tileKindForTileId(state, connection.to_tile_id);
+  if (!fromKind || !toKind) {
+    return 'full_duplex';
+  }
+  return (
+    portModeForTileKind(fromKind, connection.from_port) === 'read_write'
+    && portModeForTileKind(toKind, connection.to_port) === 'read_write'
+  )
+    ? 'full_duplex'
+    : 'read_only';
 }
 
 function oppositeConnectionEndpoint(
@@ -2582,7 +2756,7 @@ function activeSessionTileRects(state: AppStateTree): Map<string, TileRect> {
     if (!paneId) continue;
     const terminal = terminalInfoForPane(state, paneId);
     if (terminal) {
-      tileRects.set(paneId, {
+      tileRects.set(terminal.tileId, {
         x: terminal.x,
         y: terminal.y,
         width: terminal.width,
@@ -2592,7 +2766,7 @@ function activeSessionTileRects(state: AppStateTree): Map<string, TileRect> {
   }
 
   for (const card of buildCanvasWorkCards(state)) {
-    tileRects.set(`work:${card.workId}`, {
+    tileRects.set(card.tileId, {
       x: card.x,
       y: card.y,
       width: card.width,
@@ -2860,6 +3034,7 @@ export function buildRenderedNetworkConnections(state: AppStateTree): RenderedNe
         fromPort: connection.from_port,
         toTileId: connection.to_tile_id,
         toPort: connection.to_port,
+        wireMode: renderedNetworkConnectionMode(state, connection),
         x1: fromPoint.x,
         y1: fromPoint.y,
         x2: toPoint.x,
@@ -3021,12 +3196,21 @@ export async function completeNetworkPortDrag(targetTileId?: string, targetPort?
   }
 }
 
-export const agentActivityByPaneId = derived(appState, ($state) => {
-  const record: Record<string, AgentActivityEntry[]> = {};
-  for (const paneId of Object.keys($state.tmux.panes)) {
-    const entries = buildAgentActivityEntries($state, paneId);
+export const tileActivityById = derived(appState, ($state) => {
+  const record: Record<string, TileActivityEntry[]> = {};
+  for (const windowId of $state.tmux.windowOrder) {
+    const paneId = $state.tmux.windows[windowId]?.pane_ids[0];
+    const terminal = paneId ? terminalInfoForPane($state, paneId) : null;
+    if (!terminal) continue;
+    const entries = buildTileActivityEntries($state, terminal.tileId);
     if (entries.length > 0) {
-      record[paneId] = entries;
+      record[terminal.tileId] = entries;
+    }
+  }
+  for (const item of $state.work.order.map((workId) => $state.work.items[workId]).filter(Boolean) as WorkItem[]) {
+    const entries = buildTileActivityEntries($state, item.tile_id);
+    if (entries.length > 0) {
+      record[item.tile_id] = entries;
     }
   }
   return record;
@@ -3159,11 +3343,13 @@ export function selectAgentItem(agentId: string) {
   appState.update((state) => {
     const agent = state.agents[agentId];
     if (!agent) return state;
+    const paneId = paneIdForTileId(state, agent.tile_id);
+    if (!paneId) return state;
     return {
       ...state,
       ui: {
         ...state.ui,
-        selectedPaneId: agent.tile_id,
+        selectedPaneId: paneId,
         selectedWorkId: null,
         sidebarSection: 'agents',
       },
@@ -3207,6 +3393,77 @@ export async function resizeTileTo(
   }
 }
 
+function projectSidebarItems(state: AppStateTree): TestDriverProjection['sidebar']['items'] {
+  return buildSidebarItems(state).map((item) => ({
+    type: item.type === 'pane' ? 'tile' : item.type,
+    label: item.label,
+    indent: item.indent,
+    sessionId: item.sessionId,
+    windowId: item.windowId,
+    tileId: item.paneId ? (paneTileId(state, item.paneId) ?? undefined) : undefined,
+    command: item.command,
+    dead: item.dead,
+  }));
+}
+
+function projectClosePaneConfirmation(
+  state: AppStateTree,
+): TestDriverProjection['close_pane_confirmation'] {
+  const confirmation = state.ui.closePaneConfirmation;
+  if (!confirmation) {
+    return null;
+  }
+  const tileId = paneTileId(state, confirmation.paneId);
+  if (!tileId) {
+    return null;
+  }
+  return {
+    tileId,
+    title: confirmation.title,
+    message: confirmation.message,
+    confirmLabel: confirmation.confirmLabel,
+  };
+}
+
+function projectContextMenu(state: AppStateTree): TestDriverProjection['context_menu'] {
+  if (!state.ui.contextMenu) {
+    return null;
+  }
+  return {
+    target: state.ui.contextMenu.target === 'pane' ? 'tile' : 'canvas',
+    tile_id: state.ui.contextMenu.paneId ? paneTileId(state, state.ui.contextMenu.paneId) : null,
+    client_x: state.ui.contextMenu.clientX,
+    client_y: state.ui.contextMenu.clientY,
+    world_x: state.ui.contextMenu.worldX,
+    world_y: state.ui.contextMenu.worldY,
+    claude_commands: state.ui.contextMenu.claudeCommands,
+    claude_skills: state.ui.contextMenu.claudeSkills,
+    loading_claude_commands: state.ui.contextMenu.loadingClaudeCommands,
+    claude_commands_error: state.ui.contextMenu.claudeCommandsError,
+    items: buildContextMenuItems(state),
+  };
+}
+
+function projectTerminalInfo(terminal: TerminalInfo): TestDriverProjection['active_tab_terminals'][number] {
+  return {
+    id: terminal.tileId,
+    windowId: terminal.windowId,
+    parentWindowId: terminal.parentWindowId,
+    parentWindowSource: terminal.parentWindowSource,
+    sessionId: terminal.sessionId,
+    tabId: terminal.tabId,
+    x: terminal.x,
+    y: terminal.y,
+    width: terminal.width,
+    height: terminal.height,
+    title: terminal.title,
+    command: terminal.command,
+    readOnly: terminal.readOnly,
+    kind: terminal.kind,
+    agentId: terminal.agentId,
+  };
+}
+
 export function buildTestDriverProjection(
   state: AppStateTree,
   status: TestDriverStatus,
@@ -3222,35 +3479,31 @@ export function buildTestDriverProjection(
       open: state.ui.sidebarOpen,
       section: state.ui.sidebarSection,
       selected_index: state.ui.sidebarSelectedIdx,
-      items: buildSidebarItems(state),
+      items: projectSidebarItems(state),
     },
     close_tab_confirmation: state.ui.closeTabConfirmation,
-    close_pane_confirmation: state.ui.closePaneConfirmation,
-    context_menu: state.ui.contextMenu
-      ? {
-        target: state.ui.contextMenu.target,
-        pane_id: state.ui.contextMenu.paneId,
-        client_x: state.ui.contextMenu.clientX,
-        client_y: state.ui.contextMenu.clientY,
-        world_x: state.ui.contextMenu.worldX,
-        world_y: state.ui.contextMenu.worldY,
-        claude_commands: state.ui.contextMenu.claudeCommands,
-        claude_skills: state.ui.contextMenu.claudeSkills,
-        loading_claude_commands: state.ui.contextMenu.loadingClaudeCommands,
-        claude_commands_error: state.ui.contextMenu.claudeCommandsError,
-        items: buildContextMenuItems(state),
-      }
-      : null,
-    selected_pane_id: state.ui.selectedPaneId,
+    close_pane_confirmation: projectClosePaneConfirmation(state),
+    context_menu: projectContextMenu(state),
+    selected_tile_id: state.ui.selectedPaneId ? paneTileId(state, state.ui.selectedPaneId) : null,
     selected_work_id: state.ui.selectedWorkId,
     debug_tab: state.ui.debugTab,
     agents: Object.values(state.agents),
     topics: Object.values(state.topics),
     chatter: state.chatter,
     agent_logs: state.agentLogs,
-    agent_activity_by_pane: Object.fromEntries(
-      Object.keys(state.tmux.panes)
-        .map((paneId) => [paneId, buildAgentActivityEntries(state, paneId)])
+    tile_message_logs: state.tileMessageLogs,
+    tile_activity_by_id: Object.fromEntries(
+      [
+        ...state.tmux.windowOrder
+          .map((windowId) => state.tmux.windows[windowId]?.pane_ids[0])
+          .filter((paneId): paneId is string => Boolean(paneId))
+          .map((paneId) => paneTileId(state, paneId))
+          .filter((tileId): tileId is string => Boolean(tileId)),
+        ...state.work.order
+          .map((workId) => state.work.items[workId]?.tile_id)
+          .filter((tileId): tileId is string => Boolean(tileId)),
+      ]
+        .map((tileId) => [tileId, buildTileActivityEntries(state, tileId)])
         .filter(([, entries]) => entries.length > 0),
     ),
     work_items: state.work.order
@@ -3274,7 +3527,8 @@ export function buildTestDriverProjection(
         const paneId = state.tmux.windows[windowId]?.pane_ids[0];
         return paneId ? terminalInfoForPane(state, paneId) : null;
       })
-      .filter((term): term is TerminalInfo => Boolean(term)),
+      .filter((term): term is TerminalInfo => Boolean(term))
+      .map((term) => projectTerminalInfo(term)),
     active_tab_connections: buildCanvasConnections(state).map((connection) => ({
       child_window_id: connection.childWindowId,
       parent_window_id: connection.parentWindowId,
@@ -3374,15 +3628,15 @@ export function setSelectedPane(paneId: string | null) {
 
 export function updatePaneLayout(paneId: string, updates: Partial<LayoutEntry>) {
   appState.update((state) => {
-    const windowId = state.tmux.panes[paneId]?.window_id;
-    const entry = windowId ? state.layout.entries[windowId] : null;
-    if (!windowId || !entry) return state;
+    const tileId = paneTileId(state, paneId);
+    const entry = tileId ? state.layout.entries[tileId] : null;
+    if (!tileId || !entry) return state;
     return {
       ...state,
       layout: {
         entries: {
           ...state.layout.entries,
-          [windowId]: { ...entry, ...updates },
+          [tileId]: { ...entry, ...updates },
         },
       },
     };
@@ -3390,10 +3644,10 @@ export function updatePaneLayout(paneId: string, updates: Partial<LayoutEntry>) 
 }
 
 export function updateWorkCardLayout(workId: string, updates: Partial<LayoutEntry>) {
-  const entryId = workLayoutKey(workId);
   appState.update((state) => {
-    const entry = state.layout.entries[entryId];
-    if (!entry) return state;
+    const entryId = workLayoutKey(state, workId);
+    const entry = entryId ? state.layout.entries[entryId] : null;
+    if (!entryId || !entry) return state;
     return {
       ...state,
       layout: {
@@ -3435,23 +3689,24 @@ export async function applyRemoteLayoutEntry(
 
 export async function persistPaneLayout(paneId: string) {
   const state = get(appState);
-  const windowId = state.tmux.panes[paneId]?.window_id;
-  const entry = windowId ? state.layout.entries[windowId] : null;
-  if (!windowId || !entry) return;
-  await saveLayoutState(windowId, entry.x, entry.y, entry.width, entry.height);
+  const tileId = paneTileId(state, paneId);
+  const entry = tileId ? state.layout.entries[tileId] : null;
+  if (!tileId || !entry) return;
+  await saveLayoutState(tileId, entry.x, entry.y, entry.width, entry.height);
 }
 
 export async function persistWorkCardLayout(workId: string) {
   const state = get(appState);
-  const entryId = workLayoutKey(workId);
-  const entry = state.layout.entries[entryId];
-  if (!entry) return;
+  const entryId = workLayoutKey(state, workId);
+  const entry = entryId ? state.layout.entries[entryId] : null;
+  if (!entryId || !entry) return;
   await saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height);
 }
 
 export async function dragWorkCardBy(workId: string, dx: number, dy: number, persist = true) {
   const state = get(appState);
-  const entry = state.layout.entries[workLayoutKey(workId)];
+  const entryId = workLayoutKey(state, workId);
+  const entry = entryId ? state.layout.entries[entryId] : null;
   if (!entry) return;
   updateWorkCardLayout(workId, { x: entry.x + dx, y: entry.y + dy });
   if (persist) {
@@ -3464,7 +3719,7 @@ export async function deleteWorkCard(workId: string, sessionId: string) {
   appState.update((state) => ({
     ...state,
     layout: {
-      entries: removeWorkLayoutEntry(state.layout.entries, workId),
+      entries: removeWorkLayoutEntry(state, state.layout.entries, workId),
     },
   }));
   await refreshWorkItems(sessionId);
@@ -3793,7 +4048,17 @@ function applyArrangementPattern(
     ? selectedWindowId
     : windowIds[0];
   const orderedWindowIds = arrangementOrder(windowIds, anchorWindowId);
-  const anchorEntry = state.layout.entries[anchorWindowId] ?? {
+  const anchorEntryId = windowTileId(state.tmux.windows[anchorWindowId]);
+  if (!anchorEntryId) {
+    return { state, arrangedEntries: {} };
+  }
+  const orderedEntryIds = orderedWindowIds
+    .map((windowId) => windowTileId(state.tmux.windows[windowId]))
+    .filter((entryId): entryId is string => Boolean(entryId));
+  if (orderedEntryIds.length === 0) {
+    return { state, arrangedEntries: {} };
+  }
+  const anchorEntry = state.layout.entries[anchorEntryId] ?? {
     x: 100,
     y: 100,
     width: DEFAULT_TILE_WIDTH,
@@ -3802,26 +4067,26 @@ function applyArrangementPattern(
 
   const arrangedEntries: Record<string, LayoutEntry> = {};
   const entries = { ...state.layout.entries };
-  arrangedEntries[anchorWindowId] = {
+  arrangedEntries[anchorEntryId] = {
     ...anchorEntry,
-    width: entries[anchorWindowId]?.width ?? anchorEntry.width,
-    height: entries[anchorWindowId]?.height ?? anchorEntry.height,
+    width: entries[anchorEntryId]?.width ?? anchorEntry.width,
+    height: entries[anchorEntryId]?.height ?? anchorEntry.height,
   };
-  entries[anchorWindowId] = arrangedEntries[anchorWindowId];
+  entries[anchorEntryId] = arrangedEntries[anchorEntryId];
 
-  const siblingCount = orderedWindowIds.length - 1;
-  orderedWindowIds.slice(1).forEach((windowId, index) => {
-    const width = entries[windowId]?.width ?? DEFAULT_TILE_WIDTH;
-    const height = entries[windowId]?.height ?? DEFAULT_TILE_HEIGHT;
+  const siblingCount = orderedEntryIds.length - 1;
+  orderedEntryIds.slice(1).forEach((entryId, index) => {
+    const width = entries[entryId]?.width ?? DEFAULT_TILE_WIDTH;
+    const height = entries[entryId]?.height ?? DEFAULT_TILE_HEIGHT;
     const position = arrangedPositionForIndex(
       pattern,
-      arrangedEntries[anchorWindowId],
+      arrangedEntries[anchorEntryId],
       width,
       height,
       index,
       siblingCount,
     );
-    arrangedEntries[windowId] = findOpenPosition(
+    arrangedEntries[entryId] = findOpenPosition(
       position.x,
       position.y,
       width,
@@ -3829,7 +4094,7 @@ function applyArrangementPattern(
       Object.keys(arrangedEntries),
       arrangedEntries,
     );
-    entries[windowId] = arrangedEntries[windowId];
+    entries[entryId] = arrangedEntries[entryId];
   });
 
   const nextPatternIndex = (arrangementIndex(pattern) + 1) % AUTO_ARRANGE_PATTERNS.length;
@@ -3862,8 +4127,8 @@ export async function autoArrange(sessionId: string | null) {
   appState.set(next.state);
 
   await Promise.all(
-    Object.entries(next.arrangedEntries).map(([windowId, entry]) =>
-      saveLayoutState(windowId, entry.x, entry.y, entry.width, entry.height),
+    Object.entries(next.arrangedEntries).map(([entryId, entry]) =>
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height),
     ),
   );
 }

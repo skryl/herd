@@ -153,10 +153,9 @@ async function waitForActiveTab(client: HerdTestClient, sessionId: string) {
 async function spawnWorkerShellInActiveTab(client: HerdTestClient): Promise<string> {
   const before = await client.getProjection();
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
-  await client.sendCommand({
-    command: 'shell_create',
-    parent_session_id: before.active_tab_id,
-    parent_pane_id: before.selected_pane_id,
+  await client.tileCreate('shell', {
+    parentSessionId: before.active_tab_id,
+    parentTileId: before.selected_tile_id,
   });
   const projection = await waitFor(
     'worker shell create in active tab',
@@ -172,6 +171,29 @@ async function spawnWorkerShellInActiveTab(client: HerdTestClient): Promise<stri
   return created.id;
 }
 
+async function spawnBrowserInActiveTab(client: HerdTestClient): Promise<string> {
+  const before = await client.getProjection();
+  const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
+  await client.tileCreate('browser', {
+    parentSessionId: before.active_tab_id,
+    parentTileId: before.selected_tile_id,
+  });
+  const projection = await waitFor(
+    'browser create in active tab',
+    () => client.getProjection(),
+    (nextProjection) => nextProjection.active_tab_terminals.some((terminal) => !knownPaneIds.has(terminal.id) && terminal.kind === 'browser'),
+    30_000,
+    150,
+  );
+  const created = projection.active_tab_terminals.find(
+    (terminal) => !knownPaneIds.has(terminal.id) && terminal.kind === 'browser',
+  );
+  if (!created) {
+    throw new Error('failed to locate spawned browser pane');
+  }
+  return created.id;
+}
+
 async function spawnWorkerAgentInActiveTab(client: HerdTestClient): Promise<{ paneId: string; agentId: string }> {
   const before = await waitFor(
     'live root agent before worker agent create',
@@ -182,14 +204,15 @@ async function spawnWorkerAgentInActiveTab(client: HerdTestClient): Promise<{ pa
   );
   const root = rootAgentForProjection(before);
   if (!root) {
-    throw new Error('no live root agent available for agent_create');
+    throw new Error('no live root agent available for tile_create');
   }
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
   const knownAgentIds = new Set(before.agents.map((agent) => agent.agent_id));
-  await client.sendCommand({
-    command: 'agent_create',
-    parent_session_id: before.active_tab_id,
-    parent_pane_id: root.tile_id,
+  await client.tileCreate('agent', {
+    parentSessionId: before.active_tab_id,
+    parentTileId: root.tile_id,
+    senderTileId: root.tile_id,
+    senderAgentId: root.agent_id,
   });
   const projection = await waitFor(
     'worker agent create in active tab',
@@ -254,9 +277,19 @@ describe.sequential('worker/root mcp and permissions', () => {
 
     const newTabProjection = await createIsolatedTab(client, 'root-agent-tab');
     const sessionId = newTabProjection.active_tab_id!;
-    const sessionProjection = await waitForActiveTab(client, sessionId);
+    const sessionProjection = await waitFor(
+      'new session boots with a single visible root tile',
+      () => waitForActiveTab(client, sessionId),
+      (projection) =>
+        projection.active_tab_id === sessionId
+        && projection.active_tab_terminals.length === 1
+        && projection.active_tab_terminals[0]?.kind === 'root_agent',
+      60_000,
+      250,
+    );
     const sessionRoot = rootAgentForProjection(sessionProjection);
     expect(sessionRoot?.agent_id).toBe(`root:${sessionId}`);
+    expect(sessionProjection.active_tab_terminals[0]?.kind).toBe('root_agent');
 
     await client.sendCommand({ command: 'agent_unregister', agent_id: sessionRoot!.agent_id });
     const repaired = await waitFor(
@@ -286,12 +319,12 @@ describe.sequential('worker/root mcp and permissions', () => {
     const root = rootAgentForProjection(projection);
     expect(root).toBeTruthy();
 
-    await client.tileClose(root!.tile_id);
+    await client.driverTileClose(root!.tile_id);
     const confirmProjection = await waitFor(
       'root close confirmation dialog',
       () => client.getProjection(),
       (nextProjection) =>
-        nextProjection.close_pane_confirmation?.paneId === root!.tile_id
+        nextProjection.close_pane_confirmation?.tileId === root!.tile_id
         && nextProjection.close_pane_confirmation.confirmLabel === 'Close Root Agent',
       30_000,
       150,
@@ -356,7 +389,7 @@ describe.sequential('worker/root mcp and permissions', () => {
     expect(restarted.active_tab_terminals.filter((terminal) => terminal.kind === 'root_agent')).toHaveLength(1);
   });
 
-  it('creates actual worker agents through agent_create instead of plain shells', async () => {
+  it('creates actual worker agents through tile_create instead of plain shells', async () => {
     const created = await spawnWorkerAgentInActiveTab(client);
     const projection = await client.getProjection();
     const terminal = projection.active_tab_terminals.find((candidate) => candidate.id === created.paneId);
@@ -371,77 +404,541 @@ describe.sequential('worker/root mcp and permissions', () => {
     ).toBe(false);
   });
 
-  it('enforces worker message-only permissions at the backend', async () => {
+  it('registers tile-backed agents by tile_id', async () => {
+    const projection = await createIsolatedTab(client, 'agent-register');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in agent-register tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const shellTile = await client.tileCreate('shell', {
+      parentSessionId: sessionId,
+      parentTileId: rootAgent.tile_id,
+      senderTileId: rootAgent.tile_id,
+      senderAgentId: rootAgent.agent_id,
+    });
+    const paneId = shellTile.tile_id;
+    const agentId = 'agent-register-live';
+
+    const registration = await client.agentRegister(agentId, paneId, 'Registered Agent');
+    expect(registration.agent.tile_id).toBe(paneId);
+
+    const pingAck = await client.agentPingAck(agentId);
+    expect(pingAck.agent.alive).toBe(true);
+
+    const liveProjection = await waitFor(
+      'registered agent becomes alive',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_id === sessionId
+        && nextProjection.agents.some(
+          (agent) => agent.agent_id === agentId && agent.tile_id === paneId && agent.alive,
+        ),
+      30_000,
+      150,
+    );
+    expect(liveProjection.agents.find((agent) => agent.agent_id === agentId)?.alive).toBe(true);
+  });
+
+  it('enforces worker local-network permissions at the backend', async () => {
     const projection = await createIsolatedTab(client, 'worker-perms');
-    const workerPaneId = await spawnWorkerShellInActiveTab(client);
-    await client.agentRegister('agent-worker-perms', workerPaneId, 'Worker Perms');
-    const workerSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-worker-perms');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in worker-perms tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const observer = await spawnWorkerAgentInActiveTab(client);
+    const shellPaneId = await spawnWorkerShellInActiveTab(client);
+    const browserPaneId = await spawnBrowserInActiveTab(client);
+    const foreignPaneId = await spawnWorkerShellInActiveTab(client);
 
-    try {
-      await expect(
-        client.sendCommand({
-          command: 'agent_list',
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await client.networkConnect(worker.paneId, 'left', shellPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(worker.paneId, 'right', browserPaneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(observer.paneId, 'left', browserPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
 
-      await expect(
-        client.sendCommand({
-          command: 'shell_list',
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await expect(
+      client.sendCommand({
+        command: 'agent_list',
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/unknown variant/i);
 
-      await expect(
-        client.sendCommand({
-          command: 'work_list',
-          agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await expect(
+      client.sendCommand({
+        command: 'shell_list',
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/unknown variant/i);
 
-      await expect(
-        client.sendCommand({
-          command: 'session_list',
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await expect(
+      client.sendCommand({
+        command: 'tile_list',
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/root/i);
 
-      await expect(
-        client.sendCommand({
-          command: 'tile_list',
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await expect(
+      client.sendCommand({
+        command: 'work_list',
+        agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/unknown variant/i);
 
-      await expect(
-        client.sendCommand({
-          command: 'tile_move',
-          tile_id: workerPaneId,
-          x: 500,
-          y: 200,
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
-        }),
-      ).rejects.toThrow(/root/i);
+    await expect(
+      client.sendCommand({
+        command: 'session_list',
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/unknown variant/i);
 
-      await expect(
-        client.sendCommand({
-          command: 'message_public',
-          message: 'worker public message',
-          sender_agent_id: 'agent-worker-perms',
-          sender_pane_id: workerPaneId,
+    await expect(
+      client.sendCommand({
+        command: 'tile_move',
+        tile_id: worker.paneId,
+        x: 500,
+        y: 200,
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).rejects.toThrow(/root/i);
+
+    const visibleNetwork = await client.listNetwork(worker.paneId, worker.agentId);
+    expect((visibleNetwork as any).sender_tile_id).toBe(worker.paneId);
+    expect(visibleNetwork.tiles.map((tile) => tile.tile_id)).toContain(browserPaneId);
+    expect(visibleNetwork.tiles.find((tile) => tile.tile_id === shellPaneId)?.responds_to).toEqual([
+      'get',
+      'call',
+      'output_read',
+      'input_send',
+      'exec',
+      'role_set',
+    ]);
+    expect(visibleNetwork.tiles.find((tile) => tile.tile_id === browserPaneId)?.responds_to).toEqual([
+      'get',
+      'call',
+      'navigate',
+      'load',
+      'drive',
+    ]);
+
+    const shellTile = await client.networkGet(shellPaneId, worker.paneId, worker.agentId);
+    expect(shellTile.tile_id).toBe(shellPaneId);
+    expect(shellTile.responds_to).toEqual([
+      'get',
+      'call',
+      'output_read',
+      'input_send',
+      'exec',
+      'role_set',
+    ]);
+
+    const browserTile = await client.networkGet(browserPaneId, worker.paneId, worker.agentId);
+    expect(browserTile.tile_id).toBe(browserPaneId);
+    expect(browserTile.message_api).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'navigate',
+          args: [
+            {
+              name: 'url',
+              type: 'string',
+              required: true,
+              description: 'Absolute URL to load in the browser tile.',
+            },
+          ],
         }),
-      ).resolves.toBeNull();
-    } finally {
-      workerSubscription.close();
-    }
+        expect.objectContaining({
+          name: 'load',
+          args: [
+            {
+              name: 'path',
+              type: 'string',
+              required: true,
+              description: 'Absolute or repo-relative file path to load.',
+            },
+          ],
+        }),
+        expect.objectContaining({
+          name: 'drive',
+          args: [
+            {
+              name: 'action',
+              type: 'string',
+              required: true,
+              description: 'Browser drive subcommand to execute.',
+              enum_values: ['click', 'type', 'dom_query', 'eval'],
+            },
+            {
+              name: 'args',
+              type: 'object',
+              required: false,
+              description: 'Nested args for the selected browser drive subcommand.',
+            },
+          ],
+          subcommands: expect.arrayContaining([
+            expect.objectContaining({
+              name: 'click',
+              args: [
+                {
+                  name: 'selector',
+                  type: 'string',
+                  required: true,
+                  description: 'CSS selector for the target element.',
+                },
+              ],
+            }),
+            expect.objectContaining({
+              name: 'type',
+              args: [
+                {
+                  name: 'selector',
+                  type: 'string',
+                  required: true,
+                  description: 'CSS selector for the target element.',
+                },
+                {
+                  name: 'text',
+                  type: 'string',
+                  required: true,
+                  description: 'Text to insert into the target element.',
+                },
+                {
+                  name: 'clear',
+                  type: 'boolean',
+                  required: false,
+                  description: 'Whether to clear the existing value first. Defaults to true.',
+                },
+              ],
+            }),
+            expect.objectContaining({
+              name: 'dom_query',
+              args: [
+                {
+                  name: 'js',
+                  type: 'string',
+                  required: true,
+                  description: 'JavaScript expression to evaluate in the browser DOM.',
+                },
+              ],
+            }),
+            expect.objectContaining({
+              name: 'eval',
+              args: [
+                {
+                  name: 'js',
+                  type: 'string',
+                  required: true,
+                  description: 'JavaScript source to execute in the browser DOM.',
+                },
+              ],
+            }),
+          ]),
+        }),
+      ]),
+    );
+
+    const observerVisibleNetwork = await client.listNetwork(observer.paneId, observer.agentId);
+    expect(observerVisibleNetwork.tiles.find((tile) => tile.tile_id === browserPaneId)?.responds_to).toEqual([
+      'get',
+      'call',
+      'navigate',
+      'load',
+      'drive',
+    ]);
+    expect(observerVisibleNetwork.tiles.find((tile) => tile.tile_id === shellPaneId)?.responds_to).toEqual([
+      'get',
+      'call',
+      'output_read',
+    ]);
+
+    const observerBrowserTile = await client.networkGet(browserPaneId, observer.paneId, observer.agentId);
+    expect(observerBrowserTile.responds_to).toEqual(browserTile.responds_to);
+    expect(observerBrowserTile.message_api).toEqual(browserTile.message_api);
+
+    const observerShellTile = await client.networkGet(shellPaneId, observer.paneId, observer.agentId);
+    expect(observerShellTile.responds_to).toEqual([
+      'get',
+      'call',
+      'output_read',
+    ]);
+
+    await expect(client.networkGet(foreignPaneId, worker.paneId, worker.agentId)).rejects.toThrow(/sender network/i);
+    await expect(
+      client.networkCall(foreignPaneId, 'output_read', {}, worker.paneId, worker.agentId),
+    ).rejects.toThrow(/sender network/i);
+    await expect(
+      client.tileCall(foreignPaneId, 'output_read', {}, worker.paneId, worker.agentId),
+    ).rejects.toThrow(/sender network/i);
+
+    await client.networkCall(
+      shellPaneId,
+      'input_send',
+      { input: "printf 'worker-network-ok\\n'\n" },
+      worker.paneId,
+      worker.agentId,
+    );
+    const shellRead = await waitFor(
+      'worker network_call shell output',
+      () => client.networkCall<{ output: string }>(shellPaneId, 'output_read', {}, worker.paneId, worker.agentId),
+      (response) => response.result.output.includes('worker-network-ok'),
+      30_000,
+      150,
+    );
+    expect(shellRead.result.output).toContain('worker-network-ok');
+
+    await client.networkCall(
+      shellPaneId,
+      'exec',
+      { command: "printf 'worker-network-exec-ok\\n'" },
+      worker.paneId,
+      worker.agentId,
+    );
+    const shellExecRead = await waitFor(
+      'worker network_call shell exec output',
+      () => client.networkCall<{ output: string }>(shellPaneId, 'output_read', {}, worker.paneId, worker.agentId),
+      (response) => response.result.output.includes('worker-network-exec-ok'),
+      30_000,
+      150,
+    );
+    expect(shellExecRead.result.output).toContain('worker-network-exec-ok');
+
+    await client.networkCall(
+      shellPaneId,
+      'input_send',
+      { input: "printf 'worker-network-after-exec\\n'\n" },
+      worker.paneId,
+      worker.agentId,
+    );
+    const shellAfterExecRead = await waitFor(
+      'worker network_call shell remains usable after exec',
+      () => client.networkCall<{ output: string }>(shellPaneId, 'output_read', {}, worker.paneId, worker.agentId),
+      (response) => response.result.output.includes('worker-network-after-exec'),
+      30_000,
+      150,
+    );
+    expect(shellAfterExecRead.result.output).toContain('worker-network-after-exec');
+
+    const browserLoad = await client.networkCall<{ currentUrl?: string; current_url?: string }>(
+      browserPaneId,
+      'load',
+      { path: 'README.md' },
+      worker.paneId,
+      worker.agentId,
+    );
+    const browserUrl = browserLoad.result.current_url ?? browserLoad.result.currentUrl ?? '';
+    expect(browserUrl.startsWith('file://')).toBe(true);
+
+    const browserDrive = await client.networkCall<string>(
+      browserPaneId,
+      'drive',
+      { action: 'dom_query', args: { js: 'document.body ? "browser-drive-ok" : ""' } },
+      worker.paneId,
+      worker.agentId,
+    );
+    expect(browserDrive.result).toBe('browser-drive-ok');
+
+    await client.networkCall(
+      shellPaneId,
+      'input_send',
+      { input: "printf 'observer-read-ok\\n'\n" },
+      worker.paneId,
+      worker.agentId,
+    );
+    const observerRead = await waitFor(
+      'observer network_call shell output',
+      () => client.networkCall<{ output: string }>(shellPaneId, 'output_read', {}, observer.paneId, observer.agentId),
+      (response) => response.result.output.includes('observer-read-ok'),
+      30_000,
+      150,
+    );
+    expect(observerRead.result.output).toContain('observer-read-ok');
+
+    await expect(
+      client.networkCall(shellPaneId, 'input_send', { input: "printf 'observer-should-fail\\n'\n" }, observer.paneId, observer.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
+    const observerBrowserLoad = await client.networkCall<{ currentUrl?: string; current_url?: string }>(
+      browserPaneId,
+      'load',
+      { path: 'README.md' },
+      observer.paneId,
+      observer.agentId,
+    );
+    const observerBrowserUrl = observerBrowserLoad.result.current_url ?? observerBrowserLoad.result.currentUrl ?? '';
+    expect(observerBrowserUrl.startsWith('file://')).toBe(true);
+    const observerBrowserDrive = await client.networkCall<string>(
+      browserPaneId,
+      'drive',
+      { action: 'dom_query', args: { js: 'document.body ? "observer-browser-ok" : ""' } },
+      observer.paneId,
+      observer.agentId,
+    );
+    expect(observerBrowserDrive.result).toBe('observer-browser-ok');
+
+    await expect(
+      client.tileCall(browserPaneId, 'destroy', {}, worker.paneId, worker.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
+    await expect(
+      client.tileCall(shellPaneId, 'input_send', { input: "printf 'observer-bypass\\n'\n" }, observer.paneId, observer.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
+    await expect(
+      client.tileCall(`work:work-s1-001`, 'output_read', {}, worker.paneId, worker.agentId),
+    ).rejects.toThrow(/sender network|not allowed|unknown tile/i);
+
+    const projectionWithNetworkLogs = await waitFor(
+      'network_call layered logs appear',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.layer === 'network'
+            && entry.wrapper_command === 'network_call'
+            && entry.target_kind === 'network'
+            && entry.target_id === shellPaneId,
+        )
+        && nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.layer === 'message'
+            && entry.wrapper_command === 'network_call'
+            && entry.target_id === shellPaneId
+            && entry.related_tile_ids.includes(worker.paneId),
+        ),
+      30_000,
+      150,
+    );
+
+    expect(
+      projectionWithNetworkLogs.tile_message_logs
+        .filter((entry) => entry.wrapper_command === 'network_call' && entry.target_id === shellPaneId)
+        .map((entry) => entry.layer),
+    ).toEqual(expect.arrayContaining(['network', 'message']));
+
+    await expect(
+      client.sendCommand({
+        command: 'message_public',
+        message: 'worker public message',
+        sender_agent_id: worker.agentId,
+        sender_tile_id: worker.paneId,
+      }),
+    ).resolves.toBeNull();
 
     expect(projection.active_tab_id).toBeTruthy();
+  });
+
+  it('allows shared shell access from multiple workers on one local network', async () => {
+    const projection = await createIsolatedTab(client, 'worker-shared-tools');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in worker-shared-tools tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const workerA = await spawnWorkerAgentInActiveTab(client);
+    const workerB = await spawnWorkerAgentInActiveTab(client);
+    const shellPaneId = await spawnWorkerShellInActiveTab(client);
+
+    await client.networkConnect(workerA.paneId, 'left', shellPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(workerB.paneId, 'left', shellPaneId, 'top', rootAgent.tile_id, rootAgent.agent_id);
+
+    await client.tileCall(
+      shellPaneId,
+      'input_send',
+      { input: "printf 'shared-worker-a\\n'\n" },
+      workerA.paneId,
+      workerA.agentId,
+    );
+    await client.tileCall(
+      shellPaneId,
+      'input_send',
+      { input: "printf 'shared-worker-b\\n'\n" },
+      workerB.paneId,
+      workerB.agentId,
+    );
+
+    const shellRead = await waitFor(
+      'shared shell output after worker writes',
+      () => client.tileCall<{ output: string }>(shellPaneId, 'output_read', {}, workerA.paneId, workerA.agentId),
+      (response) =>
+        response.result.output.includes('shared-worker-a')
+        && response.result.output.includes('shared-worker-b'),
+      30_000,
+      150,
+    );
+    expect(shellRead.result.output).toContain('shared-worker-a');
+    expect(shellRead.result.output).toContain('shared-worker-b');
+  });
+
+  it('keeps agent tiles read-only over direct worker network connections', async () => {
+    const projection = await createIsolatedTab(client, 'worker-agent-read-only');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in worker-agent-read-only tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const workerA = await spawnWorkerAgentInActiveTab(client);
+    const workerB = await spawnWorkerAgentInActiveTab(client);
+
+    await client.networkConnect(workerA.paneId, 'left', workerB.paneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(workerA.paneId, 'top', rootAgent.tile_id, 'bottom', rootAgent.tile_id, rootAgent.agent_id);
+
+    const visibleNetwork = await client.listNetwork(workerA.paneId, workerA.agentId);
+    const workerBTile = visibleNetwork.tiles.find((tile) => tile.tile_id === workerB.paneId);
+    const rootTile = visibleNetwork.tiles.find((tile) => tile.tile_id === rootAgent.tile_id);
+
+    expect(workerBTile?.responds_to).toEqual(['get', 'call', 'output_read']);
+    expect(rootTile?.responds_to).toEqual(['get', 'call', 'output_read']);
+
+    const workerBGet = await client.networkGet(workerB.paneId, workerA.paneId, workerA.agentId);
+    expect(workerBGet.responds_to).toEqual(['get', 'call', 'output_read']);
+    expect(workerBGet.message_api.map((message) => message.name)).toEqual(['get', 'call', 'output_read']);
+    expect(workerBGet.message_api.find((message) => message.name === 'call')?.args).toEqual([
+      {
+        name: 'action',
+        type: 'string',
+        required: true,
+        description: 'Message name to invoke on this tile.',
+        enum_values: ['get', 'output_read'],
+      },
+      {
+        name: 'args',
+        type: 'object',
+        required: false,
+        description: 'Optional message-specific argument object.',
+      },
+    ]);
+
+    const rootGet = await client.networkGet(rootAgent.tile_id, workerA.paneId, workerA.agentId);
+    expect(rootGet.responds_to).toEqual(['get', 'call', 'output_read']);
+
+    await expect(
+      client.networkCall(workerB.paneId, 'input_send', { input: "printf 'should-not-run\\n'\n" }, workerA.paneId, workerA.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
+    await expect(
+      client.networkCall(workerB.paneId, 'exec', { command: "printf 'should-not-run\\n'" }, workerA.paneId, workerA.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
+    await expect(
+      client.networkCall(rootAgent.tile_id, 'role_set', { role: 'observer' }, workerA.paneId, workerA.agentId),
+    ).rejects.toThrow(/not supported|not allowed/i);
   });
 
   it('lists current-session tiles for root and supports tile-type filters', async () => {
@@ -456,13 +953,18 @@ describe.sequential('worker/root mcp and permissions', () => {
     );
     const rootAgent = rootAgentForProjection(rootProjection)!;
     const workerPaneId = await spawnWorkerShellInActiveTab(client);
-    const work = await client.workCreate('Session list work', rootAgent.tile_id);
+    const work = await client.tileCreate('work', {
+      title: 'Session list work',
+      parentTileId: rootAgent.tile_id,
+      senderTileId: rootAgent.tile_id,
+      senderAgentId: rootAgent.agent_id,
+    });
+    const workDetails = work.details as { work_id: string; topic: string };
 
-    const full = await client.sessionList(rootAgent.tile_id, rootAgent.agent_id);
+    const full = await client.tileList(rootAgent.tile_id, rootAgent.agent_id);
     expect(full.session_id).toBe(sessionId);
     expect(full.tiles.find((tile) => tile.tile_id === rootAgent.tile_id)).toMatchObject({
       kind: 'root_agent',
-      pane_id: rootAgent.tile_id,
       details: {
         agent_id: rootAgent.agent_id,
         agent_role: 'root',
@@ -470,20 +972,20 @@ describe.sequential('worker/root mcp and permissions', () => {
       },
     });
     expect(full.tiles.some((tile) => tile.tile_id === workerPaneId && tile.kind === 'shell')).toBe(true);
-    expect(full.tiles.some((tile) => tile.tile_id === `work:${work.work_id}` && tile.kind === 'work')).toBe(true);
+    expect(full.tiles.some((tile) => tile.tile_id === work.tile_id && tile.kind === 'work')).toBe(true);
 
-    const workOnly = await client.sessionList(rootAgent.tile_id, rootAgent.agent_id, 'work');
+    const workOnly = await client.tileList(rootAgent.tile_id, rootAgent.agent_id, 'work');
     expect(workOnly.tiles).toHaveLength(1);
     expect(workOnly.tiles[0]).toMatchObject({
-      tile_id: `work:${work.work_id}`,
+      tile_id: work.tile_id,
       session_id: sessionId,
       kind: 'work',
       title: work.title,
       width: expect.any(Number),
       height: expect.any(Number),
       details: {
-        work_id: work.work_id,
-        topic: work.topic,
+        work_id: workDetails.work_id,
+        topic: workDetails.topic,
       },
     });
   });
@@ -500,18 +1002,23 @@ describe.sequential('worker/root mcp and permissions', () => {
     );
     const rootAgent = rootAgentForProjection(rootProjection)!;
     const workerPaneId = await spawnWorkerShellInActiveTab(client);
-    const work = await client.workCreate('Tile api work', rootAgent.tile_id);
+    const work = await client.tileCreate('work', {
+      title: 'Tile api work',
+      parentTileId: rootAgent.tile_id,
+      senderTileId: rootAgent.tile_id,
+      senderAgentId: rootAgent.agent_id,
+    });
+    const workDetails = work.details as { work_id: string };
 
-    const tiles = await client.tileList(rootAgent.tile_id, rootAgent.agent_id);
+    const tiles = (await client.tileList(rootAgent.tile_id, rootAgent.agent_id)).tiles;
     const workerTile = tiles.find((tile) => tile.tile_id === workerPaneId);
-    const workTileId = `work:${work.work_id}`;
+    const workTileId = work.tile_id;
     const workTile = tiles.find((tile) => tile.tile_id === workTileId);
 
     expect(workerTile).toMatchObject({
       tile_id: workerPaneId,
       session_id: sessionId,
       kind: 'shell',
-      pane_id: workerPaneId,
       x: expect.any(Number),
       y: expect.any(Number),
       width: expect.any(Number),
@@ -526,8 +1033,8 @@ describe.sequential('worker/root mcp and permissions', () => {
       width: expect.any(Number),
       height: expect.any(Number),
       details: {
-        work_id: work.work_id,
-        topic: work.topic,
+        work_id: workDetails.work_id,
+        topic: (work.details as { topic: string }).topic,
       },
     });
 
@@ -536,7 +1043,6 @@ describe.sequential('worker/root mcp and permissions', () => {
       tile_id: rootAgent.tile_id,
       session_id: sessionId,
       kind: 'root_agent',
-      pane_id: rootAgent.tile_id,
       window_id: rootAgent.window_id,
       details: {
         agent_id: rootAgent.agent_id,
@@ -587,9 +1093,172 @@ describe.sequential('worker/root mcp and permissions', () => {
       width: 420,
       height: 340,
       details: {
-        work_id: work.work_id,
+        work_id: workDetails.work_id,
       },
     });
+
+    await client.tileCall(
+      workerPaneId,
+      'input_send',
+      { input: "printf 'root-send-ok\\n'\n" },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    const shellRead = await waitFor(
+      'root tile_call reaches any session tile',
+      () => client.tileCall<{ output: string }>(workerPaneId, 'output_read', {}, rootAgent.tile_id, rootAgent.agent_id),
+      (response) => response.result.output.includes('root-send-ok'),
+      30_000,
+      150,
+    );
+    expect(shellRead.result.output).toContain('root-send-ok');
+
+    const projectionWithLogs = await waitFor(
+      'tile message logs include socket tile_call entries',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.channel === 'socket'
+            && entry.target_id === workerPaneId
+            && entry.wrapper_command === 'tile_call'
+            && entry.message_name === 'input_send',
+        )
+        && nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.channel === 'socket'
+            && entry.target_id === workerPaneId
+            && entry.wrapper_command === 'tile_call'
+            && entry.message_name === 'output_read',
+        ),
+      30_000,
+      150,
+    );
+    expect(
+      projectionWithLogs.tile_message_logs.filter((entry) => entry.target_id === workerPaneId).map((entry) => entry.channel),
+    ).toContain('socket');
+  });
+
+  it('routes session-scoped socket commands through the session receiver', async () => {
+    const projection = await createIsolatedTab(client, 'session-receiver');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in session-receiver tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+
+    const shellToDestroy = await spawnWorkerShellInActiveTab(client);
+    const browserToDestroy = await spawnBrowserInActiveTab(client);
+    const worker = await spawnWorkerAgentInActiveTab(client);
+
+    const registeredPaneId = await spawnWorkerShellInActiveTab(client);
+    const registeredAgentId = 'agent-session-route';
+    await client.agentRegister(registeredAgentId, registeredPaneId, 'Session Route');
+    await client.agentPingAck(registeredAgentId);
+
+    await client.messageTopicSubscribe('#session-route', worker.agentId);
+    const topics = await client.messageTopicList(rootAgent.tile_id);
+    expect(topics.some((topic) => topic.name === '#session-route')).toBe(true);
+
+    await client.tileList(rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(worker.paneId, 'left', rootAgent.tile_id, 'left', rootAgent.tile_id, rootAgent.agent_id);
+
+    const visibleNetwork = await client.listNetwork(worker.paneId, worker.agentId);
+    expect(visibleNetwork.tiles.map((tile) => tile.tile_id)).toContain(rootAgent.tile_id);
+
+    await client.sendCommand({
+      command: 'message_direct',
+      to_agent_id: rootAgent.agent_id,
+      message: 'session receiver direct',
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+    await client.sendCommand({
+      command: 'message_public',
+      message: 'session receiver public',
+      topics: ['#session-route'],
+      mentions: [],
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+    await client.sendCommand({
+      command: 'message_network',
+      message: 'session receiver network',
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+    await client.sendCommand({
+      command: 'message_root',
+      message: 'session receiver root',
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+
+    await client.networkDisconnect(worker.paneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
+    await client.messageTopicUnsubscribe('#session-route', worker.agentId);
+    await client.sendCommand({
+      command: 'agent_unregister',
+      agent_id: registeredAgentId,
+    });
+    await client.tileDestroy(shellToDestroy, rootAgent.tile_id, rootAgent.agent_id);
+    await client.tileDestroy(browserToDestroy, rootAgent.tile_id, rootAgent.agent_id);
+
+    const expectedWrappers = [
+      'tile_create',
+      'tile_destroy',
+      'agent_register',
+      'agent_ping_ack',
+      'message_topic_list',
+      'network_list',
+      'tile_list',
+      'network_connect',
+      'network_disconnect',
+      'message_direct',
+      'message_public',
+      'message_network',
+      'message_root',
+      'message_topic_subscribe',
+      'message_topic_unsubscribe',
+      'agent_unregister',
+    ];
+
+    const projectionWithSessionLogs = await waitFor(
+      'session-scoped wrapper commands appear in session-targeted message logs',
+      () => client.getProjection(),
+      (nextProjection) =>
+        expectedWrappers.every((wrapperCommand) =>
+          nextProjection.tile_message_logs.some(
+            (entry) =>
+              entry.channel === 'socket'
+              && entry.layer === 'socket'
+              && entry.target_kind === 'session'
+              && entry.target_id === sessionId
+              && entry.wrapper_command === wrapperCommand
+              && entry.message_name === wrapperCommand,
+          )
+          && nextProjection.tile_message_logs.some(
+            (entry) =>
+              entry.channel === 'socket'
+              && entry.layer === 'message'
+              && entry.target_kind === 'session'
+              && entry.target_id === sessionId
+              && entry.wrapper_command === wrapperCommand
+              && entry.message_name === wrapperCommand,
+          )
+        ),
+      60_000,
+      200,
+    );
+
+    expect(
+      projectionWithSessionLogs.tile_message_logs
+        .filter((entry) => entry.target_kind === 'session' && entry.target_id === sessionId)
+        .map((entry) => entry.wrapper_command),
+    ).toEqual(expect.arrayContaining(expectedWrappers));
   });
 
   it('routes message_root and message_network inside the sender session', async () => {
@@ -628,7 +1297,7 @@ describe.sequential('worker/root mcp and permissions', () => {
         command: 'message_root',
         message: 'need session help',
         sender_agent_id: 'agent-network-a',
-        sender_pane_id: firstWorkerPane,
+        sender_tile_id: firstWorkerPane,
       });
       const rootEvents = await collectAgentEvents(
         rootSubscription,
@@ -649,7 +1318,7 @@ describe.sequential('worker/root mcp and permissions', () => {
         command: 'message_network',
         message: 'network sync',
         sender_agent_id: 'agent-network-a',
-        sender_pane_id: firstWorkerPane,
+        sender_tile_id: firstWorkerPane,
       });
       const networkEvents = await collectAgentEvents(
         secondWorkerSubscription,
@@ -685,6 +1354,128 @@ describe.sequential('worker/root mcp and permissions', () => {
       firstWorkerSubscription.close();
       secondWorkerSubscription.close();
     }
+  });
+
+  it('drives browser tiles through browser_drive', async () => {
+    const projection = await createIsolatedTab(client, 'browser-drive');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-drive tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const browserPaneId = await spawnBrowserInActiveTab(client);
+    const foreignBrowserPaneId = await spawnBrowserInActiveTab(client);
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserPaneId,
+      path: 'tests/fixtures/browser-drive.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: foreignBrowserPaneId,
+      path: 'tests/fixtures/browser-drive.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    const rootTitle = await waitFor(
+      'root browser_drive title read',
+      () => client.browserDrive<string>(
+        browserPaneId,
+        'dom_query',
+        { js: 'document.title' },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result === 'browser-drive-fixture',
+      30_000,
+      150,
+    );
+    expect(rootTitle.result).toBe('browser-drive-fixture');
+
+    await client.networkConnect(worker.paneId, 'left', browserPaneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
+
+    await expect(
+      client.browserDrive(
+        foreignBrowserPaneId,
+        'dom_query',
+        { js: 'document.title' },
+        worker.paneId,
+        worker.agentId,
+      ),
+    ).rejects.toThrow(/sender network/i);
+
+    const visibleBrowserNetwork = await waitFor(
+      'worker visible browser on local network',
+      () => client.listNetwork(worker.paneId, worker.agentId, 'browser'),
+      (component) => component.tiles.some((tile) => tile.tile_id === browserPaneId),
+      30_000,
+      150,
+    );
+    expect(visibleBrowserNetwork.sender_tile_id).toBe(worker.paneId);
+
+    const typed = await client.browserDrive<{ value: string }>(
+      browserPaneId,
+      'type',
+      { selector: '#name', text: 'Shenzhen', clear: true },
+      worker.paneId,
+      worker.agentId,
+    );
+    expect(typed.result.value).toBe('Shenzhen');
+
+    const clicked = await client.browserDrive<{ clicked: boolean }>(
+      browserPaneId,
+      'click',
+      { selector: '#apply' },
+      worker.paneId,
+      worker.agentId,
+    );
+    expect(clicked.result.clicked).toBe(true);
+
+    const query = await waitFor(
+      'worker browser_drive dom_query result',
+      () => client.browserDrive<{ result: string; clicks: string }>(
+        browserPaneId,
+        'dom_query',
+        {
+          js: `({
+            result: document.querySelector('#result')?.textContent ?? '',
+            clicks: document.querySelector('#counter')?.textContent ?? ''
+          })`,
+        },
+        worker.paneId,
+        worker.agentId,
+      ),
+      (response) => response.result.result === 'hello Shenzhen' && response.result.clicks === '1',
+      30_000,
+      150,
+    );
+    expect(query.result).toEqual({
+      result: 'hello Shenzhen',
+      clicks: '1',
+    });
+
+    const evalResult = await client.browserDrive<string>(
+      browserPaneId,
+      'eval',
+      {
+        js: `
+document.body.dataset.driven = 'yes';
+return document.body.dataset.driven;
+`,
+      },
+      worker.paneId,
+      worker.agentId,
+    );
+    expect(evalResult.result).toBe('yes');
   });
 
   it('routes command-bar sudo, dm, and cm messages from User', async () => {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { approveWorkItem, improveWorkItem, readWorkStagePreview } from './tauri';
+  import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import {
     agentInfos,
@@ -10,6 +11,7 @@
     refreshWorkItems,
     selectedWorkId,
     selectWorkItem,
+    tileActivityById,
     updateWorkCardLayout,
   } from './stores/appState';
   import type { WorkCanvasCard, WorkItem } from './types';
@@ -28,11 +30,13 @@
   let dragStartY = 0;
   let originX = 0;
   let originY = 0;
+  let activityOpen = $state(false);
 
   const currentStage = $derived(item.stages.find((stage) => stage.stage === item.current_stage) ?? null);
   const needsReview = $derived(currentStage?.status === 'completed');
   const isSelected = $derived($selectedWorkId === item.work_id);
   const ownerName = $derived(labelForAgent(item.owner_agent_id));
+  const activityEntries = $derived($tileActivityById[item.tile_id] ?? []);
   const previewText = $derived.by(() => {
     const lines = preview.trimEnd().split('\n');
     if (lines.length <= 16) {
@@ -46,8 +50,8 @@
     return $agentInfos.find((agent) => agent.agent_id === agentId)?.display_name ?? agentId;
   }
 
-  function fileName(path: string) {
-    return path.split('/').at(-1) ?? path;
+  function stageDocumentName(stage: WorkItem['stages'][number]['stage']) {
+    return `${stage}.md`;
   }
 
   async function loadPreview() {
@@ -168,7 +172,7 @@
   }}
   onwheel={(event) => event.stopPropagation()}
 >
-  <TilePorts tileId={`work:${item.work_id}`} />
+  <TilePorts tileId={item.tile_id} />
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="work-card-titlebar" onmousedown={handleTitlebarMouseDown}>
     <div class="work-card-header">
@@ -205,7 +209,7 @@
     {#each item.stages as stage (stage.stage)}
       <div class="file-chip" class:active-file={stage.stage === item.current_stage}>
         <span>{stage.stage}</span>
-        <span>{fileName(stage.file_path)}</span>
+        <span>{stageDocumentName(stage.stage)}</span>
       </div>
     {/each}
   </div>
@@ -251,6 +255,31 @@
       </div>
     </div>
   {/if}
+
+  {#if activityOpen}
+    <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
+  {/if}
+
+  <div class="work-card-footer">
+    <span class="footer-label">TILE:{item.tile_id}</span>
+    <div class="footer-actions">
+      <button
+        class="activity-toggle-btn"
+        class:active={activityOpen}
+        type="button"
+        title={activityOpen ? 'Hide activity log' : 'Show activity log'}
+        aria-label={activityOpen ? 'Hide activity log' : 'Show activity log'}
+        onmousedown={(event) => event.stopPropagation()}
+        onclick={(event) => {
+          event.stopPropagation();
+          activityOpen = !activityOpen;
+        }}
+      >
+        ACT {activityEntries.length}
+      </button>
+      <span class="footer-label">{currentStage?.status ?? 'unknown'}</span>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -268,6 +297,12 @@
     overflow: hidden;
     cursor: pointer;
     --tile-port-contour: rgba(110, 188, 255, 0.22);
+    --activity-border: rgba(110, 188, 255, 0.22);
+    --activity-border-soft: rgba(110, 188, 255, 0.16);
+    --activity-accent: #6ebcff;
+    --activity-text: var(--silk-dim);
+    --activity-empty: rgba(110, 188, 255, 0.62);
+    --activity-bg: rgba(7, 12, 17, 0.98);
   }
 
   .work-card.selected-work-card {
@@ -488,5 +523,50 @@
   .review-button:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+
+  .work-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 -12px -12px;
+    padding: 6px 12px;
+    border-top: 1px solid rgba(110, 188, 255, 0.16);
+    background: rgba(8, 14, 20, 0.92);
+    flex-shrink: 0;
+  }
+
+  .footer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .activity-toggle-btn {
+    height: 18px;
+    padding: 0 6px;
+    border: 1px solid var(--activity-border);
+    background: rgba(0, 0, 0, 0.18);
+    color: var(--activity-accent);
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.6px;
+    cursor: pointer;
+  }
+
+  .activity-toggle-btn.active,
+  .activity-toggle-btn:hover {
+    border-color: var(--activity-accent);
+    background: color-mix(in srgb, var(--activity-accent) 10%, rgba(0, 0, 0, 0.18));
+  }
+
+  .footer-label {
+    font-size: 8px;
+    color: var(--silk-dim);
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
   }
 </style>

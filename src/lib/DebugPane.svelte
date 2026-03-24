@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { clearDebugLogs } from './tauri';
   import {
     activeArrangementMode,
     chatterEntries,
@@ -8,6 +9,7 @@
     debugPaneOpen,
     debugTab,
     dispatchIntent,
+    refreshAgentDebugState,
   } from './stores/appState';
   import { mode } from './stores/mode';
   import { selectedTerminalId, terminals } from './stores/terminals';
@@ -85,6 +87,14 @@
 
   async function restartTmux() {
     await invoke('tmux_restart').catch(() => undefined);
+  }
+
+  async function handleClearLogs() {
+    await clearDebugLogs().catch(() => undefined);
+    logLines = [];
+    lastSocketSize = 0;
+    lastCcSize = 0;
+    await refreshAgentDebugState();
   }
 
   function reloadWebview() {
@@ -174,6 +184,7 @@
         <span></span>
       </div>
       <div class="debug-header-right">
+        <button class="debug-btn" data-debug-action="clear-logs" onclick={handleClearLogs}>CLEAR LOGS</button>
         <button class="debug-btn" onclick={redrawAll}>REDRAW ALL</button>
         <button class="debug-btn" onclick={restartTmux}>RESTART TMUX</button>
         <button class="debug-btn warn" onclick={reloadWebview}>RELOAD VIEW</button>

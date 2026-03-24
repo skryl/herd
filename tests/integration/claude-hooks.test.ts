@@ -7,6 +7,7 @@ import path from 'node:path';
 import { HerdTestClient } from './client';
 import {
   accumulatePaneOutput,
+  backingPaneIdForTile,
   createIsolatedTab,
   runConfiguredPreToolUseHook,
   runTmux,
@@ -74,7 +75,8 @@ describe.sequential('Claude hook integration coverage', () => {
 
   it('spawns a normal agent tile and launches the tmux-style Claude child command', async () => {
     const projection = await createIsolatedTab(client, 'hook-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -133,7 +135,7 @@ sleep 30
     const activeWindowLines = runTmux(runtime, [
       'list-windows',
       '-t',
-      withChild.active_tab_id,
+      withChild.active_tab_id!,
       '-F',
       '#{window_id}\t#{window_active}',
     ]).split('\n');
@@ -158,7 +160,8 @@ sleep 30
 
   it('spawns a normal tile for generic Agent payloads and resolves the agent id from the transcript', async () => {
     const projection = await createIsolatedTab(client, 'hook-generic-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -248,7 +251,7 @@ sleep 30
 
     const paneText = await waitFor(
       'generic agent pane output',
-      () => capturePane(runtime, childTile!.id),
+      async () => capturePane(runtime, childTile!.id),
       (text) =>
         text.includes('Waiting for agent session id...')
         && text.includes('__HERD_AGENT_LAUNCH__ generic')
@@ -264,7 +267,8 @@ sleep 30
 
   it('spawns a normal tile for prompt-only Agent payloads without subagent_type', async () => {
     const projection = await createIsolatedTab(client, 'hook-prompt-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -353,7 +357,7 @@ sleep 30
 
     const paneText = await waitFor(
       'prompt-only agent pane output',
-      () => capturePane(runtime, childTile!.id),
+      async () => capturePane(runtime, childTile!.id),
       (text) =>
         text.includes('Waiting for agent session id...')
         && text.includes('__HERD_AGENT_LAUNCH__ generic')
@@ -369,7 +373,8 @@ sleep 30
 
   it('streams the output file for background generic Agent payloads instead of attaching to a blank Claude UI', async () => {
     const projection = await createIsolatedTab(client, 'hook-bg-generic-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -479,7 +484,7 @@ exit 99
 
     await waitFor(
       'background generic waiting output',
-      () => capturePane(runtime, childTile!.id),
+      async () => capturePane(runtime, childTile!.id),
       (text) => text.includes('Waiting for agent output file...') && text.includes('Following agent output:'),
       30_000,
       150,
@@ -554,7 +559,7 @@ exit 99
 
     const paneText = await waitFor(
       'background generic tailed output',
-      () => capturePane(runtime, childTile!.id),
+      async () => capturePane(runtime, childTile!.id),
       (text) =>
         text.includes('Prompt: Run the background test command.')
         && text.includes('[Bash] printf "first line\\nsecond line\\n"')
@@ -589,7 +594,8 @@ exit 99
 
   it('retries generic agent attach when the child command exits immediately', async () => {
     const projection = await createIsolatedTab(client, 'hook-retry-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -685,7 +691,7 @@ sleep 30
 
     const paneText = await waitFor(
       'retry pane output',
-      () => capturePane(runtime, childTile!.id),
+      async () => capturePane(runtime, childTile!.id),
       (text) => text.includes('Retrying agent attach...'),
       30_000,
       150,
@@ -698,7 +704,8 @@ sleep 30
 
   it('closes a generic agent tile when Claude emits a completed task notification', async () => {
     const projection = await createIsolatedTab(client, 'hook-complete-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     expect(rootPaneId).toBeTruthy();
 
     const transcriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'herd-complete-agent-'));
@@ -781,7 +788,8 @@ sleep 300
 
   it('closes a generic agent tile when Claude emits a killed task notification', async () => {
     const projection = await createIsolatedTab(client, 'hook-killed-agent');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     expect(rootPaneId).toBeTruthy();
 
     const transcriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'herd-killed-agent-'));
@@ -864,7 +872,8 @@ sleep 300
 
   it('creates a read-only background tool tile and skips foreground Bash hooks', async () => {
     const projection = await createIsolatedTab(client, 'hook-bash');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     const rootWindowId = projection.active_tab_terminals[0]?.windowId;
     expect(rootPaneId).toBeTruthy();
     expect(rootWindowId).toBeTruthy();
@@ -923,7 +932,7 @@ sleep 300
     const activeWindowLines = runTmux(runtime, [
       'list-windows',
       '-t',
-      current.active_tab_id,
+      current.active_tab_id!,
       '-F',
       '#{window_id}\t#{window_active}',
     ]).split('\n');
@@ -936,7 +945,8 @@ sleep 300
 
   it('closes a background Bash tile when Claude emits a completed task notification', async () => {
     const projection = await createIsolatedTab(client, 'hook-bash-complete');
-    const rootPaneId = projection.selected_pane_id;
+    const rootTileId = projection.selected_tile_id;
+    const rootPaneId = rootTileId ? await backingPaneIdForTile(client, rootTileId) : null;
     expect(rootPaneId).toBeTruthy();
 
     const transcriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'herd-bg-complete-'));

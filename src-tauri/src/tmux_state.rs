@@ -4,8 +4,11 @@ use std::process::Output;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
+    agent::AgentRole,
+    network::{self, NetworkTileKind},
     runtime,
     state::{AppState, WindowParentSource},
+    tile_registry::TileRecord,
     tmux,
 };
 
@@ -35,6 +38,8 @@ pub struct TmuxSession {
 #[derive(Debug, Clone, Serialize)]
 pub struct TmuxWindow {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tile_id: Option<String>,
     pub session_id: String,
     pub session_name: String,
     pub index: u32,
@@ -52,6 +57,10 @@ pub struct TmuxWindow {
 #[derive(Debug, Clone, Serialize)]
 pub struct TmuxPane {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub session_id: String,
     pub window_id: String,
     pub window_index: u32,
@@ -62,6 +71,28 @@ pub struct TmuxPane {
     pub command: String,
     pub active: bool,
     pub dead: bool,
+}
+
+fn pane_role_for_record(
+    state: &AppState,
+    record: &TileRecord,
+    window_name: &str,
+    pane_title: &str,
+) -> Result<String, String> {
+    let agent_role = if record.kind == crate::tile_registry::TileRecordKind::Agent
+        && (state.agent_info_by_tile_role(&record.tile_id, AgentRole::Root)?.is_some()
+            || state.agent_info_by_pane_role(&record.pane_id, AgentRole::Root)?.is_some())
+    {
+        Some(AgentRole::Root)
+    } else {
+        None
+    };
+    Ok(match network::network_tile_kind_from_record_kind(record.kind, agent_role, window_name, pane_title) {
+        NetworkTileKind::RootAgent => "root_agent".to_string(),
+        NetworkTileKind::Agent => "claude".to_string(),
+        NetworkTileKind::Browser => "browser".to_string(),
+        NetworkTileKind::Shell | NetworkTileKind::Work => "regular".to_string(),
+    })
 }
 
 fn parse_tmux_id_ordinal(id: &str) -> u32 {
@@ -160,6 +191,7 @@ fn parse_snapshot(
         pane_ids_by_window.entry(id.clone()).or_default();
         windows.push(TmuxWindow {
             id,
+            tile_id: None,
             session_id,
             session_name,
             index: parts[3].parse().unwrap_or_default(),
@@ -191,6 +223,8 @@ fn parse_snapshot(
             .push(id.clone());
         panes.push(TmuxPane {
             id,
+            tile_id: None,
+            role: None,
             session_id,
             window_id,
             window_index: parts[3].parse().unwrap_or_default(),
@@ -671,6 +705,21 @@ pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn pane_pid(pane_id: &str) -> Result<Option<u32>, String> {
+    let output = ensure_success(
+        run_tmux(&["display-message", "-p", "-t", pane_id, "#{pane_pid}"])?,
+        "tmux display-message failed",
+    )?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let pid = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid tmux pane pid for {pane_id}: {error}"))?;
+    Ok(Some(pid))
+}
+
 pub fn snapshot(state: &AppState) -> Result<TmuxSnapshot, String> {
     let sessions_output = ensure_success(
         run_tmux(&["list-sessions", "-F", "#{session_id}\t#{session_name}"])?,
@@ -758,7 +807,40 @@ pub fn emit_snapshot(app: &AppHandle) -> Result<(), String> {
     if normalize_multi_pane_windows(&state)? {
         log::info!("Normalized tmux multi-pane windows back to single-pane windows");
     }
-    let snapshot = snapshot(&state)?;
+    let mut snapshot = snapshot(&state)?;
+    let tile_records = state.tile_records_snapshot()?;
+    let tile_record_by_window = tile_records
+        .iter()
+        .map(|record| (record.window_id.as_str(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let window_name_by_id = snapshot
+        .windows
+        .iter()
+        .map(|window| (window.id.clone(), window.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let tile_id_by_window = tile_records
+        .iter()
+        .map(|record| (record.window_id.as_str(), record.tile_id.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let tile_id_by_pane = tile_records
+        .iter()
+        .map(|record| (record.pane_id.as_str(), record.tile_id.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for window in &mut snapshot.windows {
+        window.tile_id = tile_id_by_window.get(window.id.as_str()).cloned();
+    }
+    for pane in &mut snapshot.panes {
+        pane.tile_id = tile_id_by_pane.get(pane.id.as_str()).cloned();
+        pane.role = tile_record_by_window
+            .get(pane.window_id.as_str())
+            .and_then(|record| {
+                let window_name = window_name_by_id
+                    .get(pane.window_id.as_str())
+                    .map(|name| name.as_str())
+                    .unwrap_or("");
+                pane_role_for_record(&state, record, window_name, &pane.title).ok()
+            });
+    }
     state.set_last_active_session(snapshot.active_session_id.clone());
     app.emit("tmux-state", &snapshot)
         .map_err(|e| format!("emit tmux-state failed: {e}"))
