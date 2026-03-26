@@ -12,6 +12,7 @@ pub struct RuntimeConfig {
     database_path: String,
     dom_result_path: String,
     test_driver_enabled: bool,
+    fixture_agents_enabled: bool,
 }
 
 static CONFIG: OnceLock<RuntimeConfig> = OnceLock::new();
@@ -29,7 +30,17 @@ fn sanitize_runtime_id(value: &str) -> Option<String> {
     }
 }
 
+fn fixture_agents_enabled_from_env(test_driver_enabled: bool, value: Option<&str>) -> bool {
+    test_driver_enabled
+        && matches!(
+            value.map(str::trim).filter(|raw| !raw.is_empty()),
+            Some("fixture")
+        )
+}
+
 fn build_runtime_config() -> RuntimeConfig {
+    let test_driver_enabled = cfg!(debug_assertions)
+        || matches!(std::env::var("HERD_ENABLE_TEST_DRIVER").ok().as_deref(), Some("1" | "true" | "yes"));
     let runtime_id = std::env::var("HERD_RUNTIME_ID")
         .ok()
         .and_then(|value| sanitize_runtime_id(&value));
@@ -57,8 +68,11 @@ fn build_runtime_config() -> RuntimeConfig {
             .to_string_lossy()
             .to_string(),
         dom_result_path: format!("/tmp/{runtime_name}-dom-result.json"),
-        test_driver_enabled: cfg!(debug_assertions)
-            || matches!(std::env::var("HERD_ENABLE_TEST_DRIVER").ok().as_deref(), Some("1" | "true" | "yes")),
+        test_driver_enabled,
+        fixture_agents_enabled: fixture_agents_enabled_from_env(
+            test_driver_enabled,
+            std::env::var("HERD_TEST_AGENT_MODE").ok().as_deref(),
+        ),
     }
 }
 
@@ -156,9 +170,13 @@ pub fn test_driver_enabled() -> bool {
     config().test_driver_enabled
 }
 
+pub fn fixture_agents_enabled() -> bool {
+    config().fixture_agents_enabled
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{database_file_name, detect_project_root_from, looks_like_project_root};
+    use super::{database_file_name, detect_project_root_from, fixture_agents_enabled_from_env, looks_like_project_root};
     use std::fs;
     use std::path::PathBuf;
 
@@ -200,5 +218,13 @@ mod tests {
     fn database_file_name_uses_runtime_suffix() {
         assert_eq!(database_file_name(None), "herd.sqlite");
         assert_eq!(database_file_name(Some("dev")), "herd-dev.sqlite");
+    }
+
+    #[test]
+    fn fixture_agents_only_enable_in_test_driver_mode() {
+        assert!(fixture_agents_enabled_from_env(true, Some("fixture")));
+        assert!(!fixture_agents_enabled_from_env(false, Some("fixture")));
+        assert!(!fixture_agents_enabled_from_env(true, Some("claude")));
+        assert!(!fixture_agents_enabled_from_env(true, None));
     }
 }

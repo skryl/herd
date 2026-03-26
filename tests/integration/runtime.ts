@@ -88,7 +88,13 @@ export interface HerdIntegrationRuntime {
   getLogs: () => string;
 }
 
-export async function startIntegrationRuntime(): Promise<HerdIntegrationRuntime> {
+export interface StartIntegrationRuntimeOptions {
+  fixtureAgents?: boolean;
+}
+
+export async function startIntegrationRuntime(
+  options?: StartIntegrationRuntimeOptions,
+): Promise<HerdIntegrationRuntime> {
   const runtimeId = sanitizeRuntimeId(`itest-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
   const name = runtimeName(runtimeId);
   const socketPath = `/tmp/${name}.sock`;
@@ -117,6 +123,7 @@ export async function startIntegrationRuntime(): Promise<HerdIntegrationRuntime>
       ...process.env,
       HERD_RUNTIME_ID: runtimeId,
       HERD_ENABLE_TEST_DRIVER: '1',
+      ...(options?.fixtureAgents ? { HERD_TEST_AGENT_MODE: 'fixture' } : {}),
       HERD_CLAUDE_MENU_FIXTURE: '{"slash_commands":["clear","model","codex"],"skills":["codex"]}',
       CARGO_TERM_COLOR: 'never',
     },

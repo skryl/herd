@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd Pong</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <label>Room <input id="room-id" value="pong-room" /></label>
+        <label>Name <input id="player-name" value="Player" /></label>
+        <label>
+          Seat
+          <select id="seat">
+            <option value="left">left</option>
+            <option value="right">right</option>
+          </select>
+        </label>
+        <label>Seed <input id="seed" value="pong-seed" /></label>
+        <button id="join" type="button">Join</button>
+        <button id="start" type="button">Start</button>
+      </section>
+      <section class="meta">
+        <div id="status" data-testid="status">No room joined</div>
+        <div id="winner" data-testid="winner"></div>
+        <div id="players" class="players"></div>
+      </section>
+      <section class="controls">
+        <button id="intent-up" type="button">Up</button>
+        <button id="intent-down" type="button">Down</button>
+        <button id="intent-stop" type="button">Stop</button>
+      </section>
+      <pre id="arena" class="arena" data-testid="arena"></pre>
+    </main>
+    <script src="../game-runtime.js"></script>
+    <script src="./logic.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

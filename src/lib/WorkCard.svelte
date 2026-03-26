@@ -12,6 +12,7 @@
     selectedWorkId,
     selectWorkItem,
     tileActivityById,
+    toggleWorkCardMinimized,
     updateWorkCardLayout,
   } from './stores/appState';
   import type { WorkCanvasCard, WorkItem } from './types';
@@ -185,19 +186,33 @@
         <span>{currentStage?.status ?? 'unknown'}</span>
       </div>
     </div>
-    <button
-      class="work-card-close"
-      type="button"
-      aria-label="Delete work item"
-      title="Delete work item"
-      onmousedown={(event) => {
-        event.stopPropagation();
-      }}
-      onclick={handleDelete}
-      disabled={deleteBusy}
-    >
-      ×
-    </button>
+    <div class="work-card-actions">
+      <button
+        class="work-card-minimize"
+        type="button"
+        aria-label="Minimize work item"
+        title="Minimize work item"
+        onmousedown={(event) => {
+          event.stopPropagation();
+        }}
+        onclick={() => toggleWorkCardMinimized(item.work_id)}
+      >
+        _
+      </button>
+      <button
+        class="work-card-close"
+        type="button"
+        aria-label="Delete work item"
+        title="Delete work item"
+        onmousedown={(event) => {
+          event.stopPropagation();
+        }}
+        onclick={handleDelete}
+        disabled={deleteBusy}
+      >
+        ×
+      </button>
+    </div>
   </div>
 
   <div class="work-card-meta">
@@ -383,6 +398,27 @@
     padding: 0;
     margin-top: -1px;
     cursor: pointer;
+  }
+
+  .work-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .work-card-minimize {
+    border: 0;
+    background: transparent;
+    color: var(--silk-dim);
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .work-card-minimize:hover {
+    color: #6ebcff;
   }
 
   .work-card-close:hover:enabled {

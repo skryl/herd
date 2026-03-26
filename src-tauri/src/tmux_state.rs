@@ -582,29 +582,38 @@ pub fn create_window(target_pane: Option<&str>, command: Option<&str>) -> Result
     let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let command = command.unwrap_or(&shell);
+    let mut session_name = None;
 
-    let mut split_args = vec![
-        "split-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-e",
-        &herd_sock,
-    ];
     if let Some(target) = target_pane {
-        split_args.push("-t");
-        split_args.push(target);
+        let session_output = ensure_success(
+            run_tmux(&["display-message", "-p", "-t", target, "#{session_name}"])?,
+            "tmux display-message failed",
+        )?;
+        let resolved = String::from_utf8_lossy(&session_output.stdout).trim().to_string();
+        if resolved.is_empty() {
+            return Err(format!("tmux returned an empty session name for pane {target}"));
+        }
+        session_name = Some(resolved);
     }
-    split_args.push(command);
 
-    let split_output = ensure_success(run_tmux(&split_args)?, "tmux split-window failed")?;
-    let pane_id = String::from_utf8_lossy(&split_output.stdout).trim().to_string();
-    ensure_success(
-        run_tmux(&["break-pane", "-d", "-s", &pane_id])?,
-        "tmux break-pane failed",
-    )?;
-    Ok(pane_id)
+    let mut window_args = vec![
+        "new-window".to_string(),
+        "-d".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{pane_id}".to_string(),
+        "-e".to_string(),
+        herd_sock,
+    ];
+    if let Some(target_session) = session_name.as_ref() {
+        window_args.push("-t".to_string());
+        window_args.push(target_session.clone());
+    }
+    window_args.push(command.to_string());
+    let window_args_refs = window_args.iter().map(|value| value.as_str()).collect::<Vec<_>>();
+
+    let output = ensure_success(run_tmux(&window_args_refs)?, "tmux new-window failed")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn kill_pane(pane_id: &str) -> Result<(), String> {
@@ -617,38 +626,60 @@ pub fn kill_window(window_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn respawn_window(window_id: &str) -> Result<(), String> {
+fn respawn_window_args(window_id: &str) -> Vec<String> {
     let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    vec![
+        "respawn-window".to_string(),
+        "-k".to_string(),
+        "-t".to_string(),
+        window_id.to_string(),
+        "-e".to_string(),
+        herd_sock,
+        shell,
+    ]
+}
+
+pub fn respawn_window(window_id: &str) -> Result<(), String> {
+    let args = respawn_window_args(window_id);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     ensure_success(
-        run_tmux(&[
-            "respawn-window",
-            "-k",
-            "-t",
-            window_id,
-            "-e",
-            &herd_sock,
-            &shell,
-        ])?,
+        run_tmux(&arg_refs)?,
         "tmux respawn-window failed",
     )?;
     Ok(())
 }
 
-pub fn respawn_pane_shell_command(pane_id: &str, command: &str) -> Result<(), String> {
+fn respawn_pane_shell_command_args(pane_id: &str, command: &str, tile_id: Option<&str>) -> Vec<String> {
     let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
+    let mut args = vec![
+        "respawn-pane".to_string(),
+        "-k".to_string(),
+        "-t".to_string(),
+        pane_id.to_string(),
+        "-e".to_string(),
+        herd_sock,
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        command.to_string(),
+    ];
+    if let Some(tile_id) = tile_id {
+        args.splice(
+            6..6,
+            [
+                "-e".to_string(),
+                format!("HERD_TILE_ID={tile_id}"),
+            ],
+        );
+    }
+    args
+}
+
+pub fn respawn_pane_shell_command(pane_id: &str, command: &str, tile_id: Option<&str>) -> Result<(), String> {
+    let args = respawn_pane_shell_command_args(pane_id, command, tile_id);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     ensure_success(
-        run_tmux(&[
-            "respawn-pane",
-            "-k",
-            "-t",
-            pane_id,
-            "-e",
-            &herd_sock,
-            "/bin/bash",
-            "-lc",
-            command,
-        ])?,
+        run_tmux(&arg_refs)?,
         "tmux respawn-pane failed",
     )?;
     Ok(())
@@ -848,7 +879,13 @@ pub fn emit_snapshot(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pane_normalization_plan, parse_snapshot, PaneNormalizationRow};
+    use super::{
+        pane_normalization_plan,
+        parse_snapshot,
+        respawn_pane_shell_command_args,
+        PaneNormalizationRow,
+    };
+    use crate::runtime;
 
     #[test]
     fn parse_snapshot_keeps_sessions_windows_and_panes() {
@@ -936,5 +973,14 @@ mod tests {
                 ("$1".to_string(), "@1".to_string(), "%3".to_string(), "Agent B".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn shell_respawn_args_include_socket_and_tile_env() {
+        let args = respawn_pane_shell_command_args("%42", "printf ready\\n", Some("tile-abc123"));
+        assert_eq!(args[0], "respawn-pane");
+        assert!(args.contains(&format!("HERD_SOCK={}", runtime::socket_path())));
+        assert!(args.contains(&"HERD_TILE_ID=tile-abc123".to_string()));
+        assert!(args.ends_with(&["/bin/bash".to_string(), "-lc".to_string(), "printf ready\\n".to_string()]));
     }
 }

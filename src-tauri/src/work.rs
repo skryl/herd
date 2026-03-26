@@ -771,7 +771,7 @@ mod tests {
             display_name: format!("Agent {agent_id}"),
             alive: true,
             chatter_subscribed: true,
-            topics: Vec::new(),
+            channels: Vec::new(),
             agent_pid: None,
         }
     }

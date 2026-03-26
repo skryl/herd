@@ -13,7 +13,7 @@ import type {
   TestDriverProjection,
   TestDriverRequest,
   TestDriverStatus,
-  TopicInfo,
+  ChannelInfo,
   WorkItem,
 } from '../../src/lib/types';
 
@@ -244,26 +244,31 @@ export class HerdTestClient {
     await this.sendCommand({ command: 'shell_role_set', tile_id: tileId, role });
   }
 
-  async messageTopicList(senderTileId?: string | null): Promise<TopicInfo[]> {
+  async messageChannelList(senderTileId?: string | null, senderAgentId?: string | null): Promise<ChannelInfo[]> {
     return this.sendCommand({
-      command: 'message_topic_list',
+      command: 'message_channel_list',
       sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
     });
   }
 
-  async messageTopicSubscribe(topic: string, agentId?: string | null): Promise<TopicInfo> {
+  async messageChannelSubscribe(channelName: string, agentId?: string | null, senderTileId?: string | null, senderAgentId?: string | null): Promise<ChannelInfo> {
     return this.sendCommand({
-      command: 'message_topic_subscribe',
-      topic,
+      command: 'message_channel_subscribe',
+      channel_name: channelName,
       agent_id: agentId ?? null,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
     });
   }
 
-  async messageTopicUnsubscribe(topic: string, agentId?: string | null): Promise<TopicInfo> {
+  async messageChannelUnsubscribe(channelName: string, agentId?: string | null, senderTileId?: string | null, senderAgentId?: string | null): Promise<ChannelInfo> {
     return this.sendCommand({
-      command: 'message_topic_unsubscribe',
-      topic,
+      command: 'message_channel_unsubscribe',
+      channel_name: channelName,
       agent_id: agentId ?? null,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
     });
   }
 
@@ -299,18 +304,24 @@ export class HerdTestClient {
     });
   }
 
-  async messagePublic(message: string, senderTileId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
+  async messagePublic(message: string, senderTileId?: string | null, mentions?: string[]): Promise<void> {
     await this.sendCommand({
       command: 'message_public',
       message,
       sender_tile_id: senderTileId ?? null,
-      topics: topics ?? [],
       mentions: mentions ?? [],
     });
   }
 
-  async messageChatter(message: string, senderTileId?: string | null, topics?: string[], mentions?: string[]): Promise<void> {
-    await this.messagePublic(message, senderTileId, topics, mentions);
+  async messageChannel(message: string, channelName: string, senderTileId?: string | null, senderAgentId?: string | null, mentions?: string[]): Promise<void> {
+    await this.sendCommand({
+      command: 'message_channel',
+      channel_name: channelName,
+      message,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+      mentions: mentions ?? [],
+    });
   }
 
   async messageNetwork(message: string, senderTileId?: string | null, senderAgentId?: string | null): Promise<void> {
@@ -376,7 +387,7 @@ export class HerdTestClient {
 
   async browserDrive<T = unknown>(
     tileId: string,
-    action: 'click' | 'type' | 'dom_query' | 'eval',
+    action: 'click' | 'select' | 'type' | 'dom_query' | 'eval' | 'screenshot',
     args?: Record<string, unknown>,
     senderTileId?: string | null,
     senderAgentId?: string | null,
@@ -395,6 +406,30 @@ export class HerdTestClient {
     );
   }
 
+  async browserExtensionCall<T = unknown>(
+    tileId: string,
+    method: string,
+    args?: Record<string, unknown>,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+    timeoutMs?: number,
+  ): Promise<{ tile_id: string; action: string; result: T }> {
+    return this.sendCommand(
+      {
+        command: 'network_call',
+        tile_id: tileId,
+        action: 'extension_call',
+        args: {
+          method,
+          args: args ?? {},
+        },
+        sender_tile_id: senderTileId ?? null,
+        sender_agent_id: senderAgentId ?? null,
+      },
+      timeoutMs,
+    );
+  }
+
   async tileCreate(
     tileType: TileTypeFilter,
     options?: {
@@ -406,6 +441,7 @@ export class HerdTestClient {
       parentSessionId?: string | null;
       parentTileId?: string | null;
       browserIncognito?: boolean | null;
+      browserPath?: string | null;
       senderTileId?: string | null;
       senderAgentId?: string | null;
     },
@@ -421,6 +457,7 @@ export class HerdTestClient {
       parent_session_id: options?.parentSessionId ?? null,
       parent_tile_id: options?.parentTileId ?? null,
       browser_incognito: options?.browserIncognito ?? null,
+      browser_path: options?.browserPath ?? null,
       sender_tile_id: options?.senderTileId ?? null,
       sender_agent_id: options?.senderAgentId ?? null,
     });

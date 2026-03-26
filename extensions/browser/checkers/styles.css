@@ -1,0 +1,77 @@
+body {
+  margin: 0;
+  font-family: "Courier Prime", "Courier New", monospace;
+  background: linear-gradient(160deg, #f6efe1, #d0b68d);
+  color: #24170b;
+}
+
+.app {
+  min-height: 100vh;
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.toolbar label {
+  display: grid;
+  gap: 4px;
+}
+
+.toolbar input,
+.toolbar select,
+.toolbar button {
+  font: inherit;
+  padding: 6px 10px;
+}
+
+.meta {
+  display: grid;
+  gap: 8px;
+}
+
+.players {
+  display: flex;
+  gap: 12px;
+}
+
+.player-card {
+  border: 1px solid rgba(36, 23, 11, 0.25);
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.board {
+  width: min(80vw, 480px);
+  aspect-ratio: 1;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  border: 3px solid #4c2b12;
+}
+
+.cell {
+  border: 0;
+  font: inherit;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.cell.light {
+  background: #f1ddbe;
+}
+
+.cell.dark {
+  background: #784421;
+  color: #fff9ef;
+}
+
+.cell[data-selected="true"] {
+  outline: 3px solid #ffd166;
+  outline-offset: -3px;
+}

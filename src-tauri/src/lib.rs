@@ -117,12 +117,15 @@ fn run_gui() {
     tauri::Builder::default()
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
+            browser::browser_extension_pages,
             browser::browser_webview_sync,
             browser::browser_webview_navigate,
+            browser::browser_webview_load,
             browser::browser_webview_reload,
             browser::browser_webview_back,
             browser::browser_webview_forward,
             browser::browser_webview_hide,
+            browser::browser_webview_preview,
             commands::get_tmux_state,
             commands::get_layout_state,
             commands::get_agent_debug_state,

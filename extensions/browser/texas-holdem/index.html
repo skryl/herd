@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd Texas Hold'em</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topline">
+        <div class="brand">
+          <p class="eyebrow">Shared Browser Table</p>
+          <h1>Texas Hold'em</h1>
+          <p class="summary">Public table state, private hole cards, one clean broadcast view.</p>
+        </div>
+
+        <div class="status-banner">
+          <span class="meta-label">Table Status</span>
+          <strong id="status">Claim all four seats to start the match</strong>
+        </div>
+      </header>
+
+      <section class="info-rail">
+        <article class="info-chip">
+          <span class="meta-label">Hand</span>
+          <strong id="hand-number">0</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Phase</span>
+          <strong id="phase">Lobby</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Street</span>
+          <strong id="street">Waiting</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Turn</span>
+          <strong id="turn">Waiting</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Pot</span>
+          <strong id="pot">0</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Blinds</span>
+          <strong id="blinds">Waiting</strong>
+        </article>
+        <article class="info-chip">
+          <span class="meta-label">Commentator</span>
+          <strong id="commentator">none</strong>
+        </article>
+      </section>
+
+      <section class="surface">
+        <section class="table-stage" aria-label="Texas Hold'em table">
+          <div class="table-grid">
+            <div id="seats" class="seats"></div>
+
+            <section class="table-core">
+              <div class="table-rail">
+                <div class="table-felt">
+                  <div class="table-centerline">
+                    <div>
+                      <p class="section-label">Community Board</p>
+                    </div>
+
+                    <div class="center-readout">
+                      <div class="center-stat">
+                        <span class="meta-label">Pot</span>
+                        <strong id="pot-center">0</strong>
+                      </div>
+                      <div class="center-stat">
+                        <span class="meta-label">Button</span>
+                        <strong id="button-seat">Waiting</strong>
+                      </div>
+                      <div class="center-stat">
+                        <span class="meta-label">Current Bet</span>
+                        <strong id="current-bet">0</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div id="board" class="board"></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="sidebar">
+          <section class="panel table-notes">
+            <p class="section-label">Table Notes</p>
+            <p id="table-note" class="table-note">
+              Claim all four chairs to begin the table broadcast.
+            </p>
+
+            <div class="note-grid">
+              <div class="note-card">
+                <span class="meta-label">Blinds</span>
+                <strong id="blinds-panel">Waiting</strong>
+              </div>
+              <div class="note-card">
+                <span class="meta-label">Commentator</span>
+                <strong id="commentator-panel">none</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel commentary-panel">
+            <div class="panel-header">
+              <p class="section-label">Action Log</p>
+              <span class="panel-note">Public table feed</span>
+            </div>
+            <ol id="commentary" class="commentary"></ol>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./logic.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -16,6 +16,7 @@ export interface TerminalInfo {
   readOnly?: boolean;
   kind?: PaneKind;
   agentId?: string | null;
+  minimized?: boolean;
 }
 
 export interface CanvasState {
@@ -26,10 +27,13 @@ export interface CanvasState {
 
 export type PaneKind = 'regular' | 'claude' | 'root_agent' | 'browser' | 'output';
 export type DebugTab = 'info' | 'chatter' | 'logs';
-export type AgentType = 'claude';
+export type AgentType = 'claude' | 'fixture';
 export type AgentRole = 'root' | 'worker';
 export type SidebarSection = 'settings' | 'work' | 'agents' | 'tmux';
-export type TilePort = 'left' | 'top' | 'right' | 'bottom';
+export type TilePortSide = 'left' | 'top' | 'right' | 'bottom';
+export type TilePortSlot = 1 | 2 | 3 | 4;
+export type TilePortCount = 4 | 8 | 12 | 16;
+export type TilePort = TilePortSide | `${TilePortSide}-${Exclude<TilePortSlot, 1>}`;
 export type PortMode = 'read' | 'read_write';
 export type NetworkTileKind = 'agent' | 'root_agent' | 'shell' | 'work' | 'browser';
 export type WindowParentSource = 'hook' | 'manual';
@@ -45,11 +49,11 @@ export interface AgentInfo {
   display_name: string;
   alive: boolean;
   chatter_subscribed: boolean;
-  topics: string[];
+  channels: string[];
   agent_pid?: number | null;
 }
 
-export interface TopicInfo {
+export interface ChannelInfo {
   session_id: string;
   name: string;
   subscriber_count: number;
@@ -137,7 +141,7 @@ export interface AgentTileDetails {
   display_name: string;
   alive: boolean;
   chatter_subscribed: boolean;
-  topics: string[];
+  channels: string[];
   agent_pid?: number | null;
 }
 
@@ -153,6 +157,25 @@ export interface PaneTileDetails {
 
 export interface BrowserTileDetails extends PaneTileDetails {
   current_url?: string | null;
+  extension?: BrowserExtensionInfo | null;
+}
+
+export interface BrowserExtensionPage {
+  label: string;
+  path: string;
+}
+
+export interface BrowserExtensionMethod {
+  name: string;
+  description?: string | null;
+  args?: TileMessageArgSpec[];
+}
+
+export interface BrowserExtensionInfo {
+  extension_id: string;
+  label: string;
+  source_path?: string | null;
+  methods: BrowserExtensionMethod[];
 }
 
 export interface WorkTileDetails {
@@ -223,6 +246,7 @@ export interface ProjectedTerminalInfo {
   readOnly?: boolean;
   kind?: PaneKind;
   agentId?: string | null;
+  minimized?: boolean;
 }
 
 export interface ProjectionSidebarTreeItem {
@@ -266,7 +290,7 @@ export interface TileGraph {
   connections: NetworkConnection[];
 }
 
-export type ChatterKind = 'direct' | 'public' | 'network' | 'root' | 'sign_on' | 'sign_off';
+export type ChatterKind = 'direct' | 'public' | 'channel' | 'network' | 'root' | 'sign_on' | 'sign_off';
 
 export interface ChatterEntry {
   session_id: string;
@@ -276,7 +300,7 @@ export interface ChatterEntry {
   to_agent_id?: string | null;
   to_display_name?: string | null;
   message: string;
-  topics: string[];
+  channels: string[];
   mentions: string[];
   timestamp_ms: number;
   public: boolean;
@@ -289,7 +313,7 @@ export interface TileActivityEntry {
     | 'outgoing_dm'
     | 'outgoing_chatter'
     | 'mention'
-    | 'topic'
+    | 'channel'
     | 'incoming_hook'
     | 'outgoing_call'
     | 'socket_log'
@@ -306,11 +330,12 @@ export interface WorkCanvasCard {
   y: number;
   width: number;
   height: number;
+  minimized?: boolean;
 }
 
 export interface AgentDebugState {
   agents: AgentInfo[];
-  topics: TopicInfo[];
+  channels: ChannelInfo[];
   chatter: ChatterEntry[];
   agent_logs: AgentLogEntry[];
   tile_message_logs: TileMessageLogEntry[];
@@ -358,7 +383,7 @@ export interface PendingSpawnPlacement {
   worldY: number;
 }
 
-export type ArrangementMode = 'circle' | 'snowflake' | 'stack-down' | 'stack-right' | 'spiral';
+export type ArrangementMode = 'circle' | 'snowflake' | 'stack-down' | 'stack-right' | 'spiral' | 'elk';
 
 export type CanvasZoomMode = 'focused' | 'fullscreen';
 
@@ -472,6 +497,7 @@ export interface UiState {
   sidebarOpen: boolean;
   sidebarSection: SidebarSection;
   sidebarSelectedIdx: number;
+  tilePortCount: TilePortCount;
   debugPaneOpen: boolean;
   debugPaneHeight: number;
   debugTab: DebugTab;
@@ -486,6 +512,7 @@ export interface UiState {
   closePaneConfirmation: ClosePaneConfirmation | null;
   contextMenu: ContextMenuState | null;
   pendingSpawnPlacement: PendingSpawnPlacement | null;
+  minimizedTileIdsBySession: Record<string, string[]>;
 }
 
 export interface TmuxStateSlice {
@@ -510,7 +537,8 @@ export interface AppStateTree {
   tmux: TmuxStateSlice;
   layout: LayoutStateSlice;
   agents: Record<string, AgentInfo>;
-  topics: Record<string, TopicInfo>;
+  channels: Record<string, ChannelInfo>;
+  browserExtensionPages: BrowserExtensionPage[];
   chatter: ChatterEntry[];
   agentLogs: AgentLogEntry[];
   tileMessageLogs: TileMessageLogEntry[];
@@ -612,7 +640,7 @@ export interface TestDriverProjection {
   selected_work_id: string | null;
   debug_tab: DebugTab;
   agents: AgentInfo[];
-  topics: TopicInfo[];
+  channels: ChannelInfo[];
   chatter: ChatterEntry[];
   agent_logs: AgentLogEntry[];
   tile_message_logs: TileMessageLogEntry[];
@@ -625,14 +653,15 @@ export interface TestDriverProjection {
   active_tab_connections: Array<{
     child_window_id: string;
     parent_window_id: string;
+    path: string;
+    points: Array<{
+      x: number;
+      y: number;
+    }>;
     x1: number;
     y1: number;
     x2: number;
     y2: number;
-    cx1: number;
-    cy1: number;
-    cx2: number;
-    cy2: number;
   }>;
   active_tab_network_connections: NetworkConnection[];
   active_tab_work_cards: WorkCanvasCard[];

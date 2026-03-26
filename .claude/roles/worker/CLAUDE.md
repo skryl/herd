@@ -30,12 +30,15 @@ Message channel:
   - `message_public` for session-visible updates
   - `message_network` for local connected agents
   - `message_root` when you need Root to inspect or act
-- Use `network_list` or `network_get` before touching a local tool tile.
+- If Root gives you an explicit tile id and an exact `network_call` to execute, do that immediately.
+- In that explicit-dispatch case, do not re-run `network_list` or `network_get` first unless the call fails.
+- Otherwise, use `network_list` or `network_get` before touching a local tool tile.
 - Use `network_call` only for actions explicitly listed in a tile's `responds_to`, and inspect `message_api` for required args.
 
 Operating model:
 - Stay focused on one concrete task at a time.
 - Check local chatter and your local network before asking broad questions.
+- When Root sends a one-shot local action with a concrete tile id and exact call shape, treat it as dispatch, not an invitation to explore.
 - Operate local-network tiles directly only through `network_call` when the action is visible and allowed.
 - If a work item needs ownership changes or other privileged session actions, ask Root.
 - Report measurements, findings, diffs, and blockers clearly.

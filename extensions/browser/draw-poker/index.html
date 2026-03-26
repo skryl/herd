@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd Draw Poker</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <label>Room <input id="room-id" value="poker-room" /></label>
+        <label>Name <input id="player-name" value="Player" /></label>
+        <label>
+          Seat
+          <select id="seat">
+            <option value="north">north</option>
+            <option value="east">east</option>
+            <option value="south">south</option>
+            <option value="west">west</option>
+          </select>
+        </label>
+        <label>Seed <input id="seed" value="poker-seed" /></label>
+        <button id="join" type="button">Join</button>
+        <button id="start" type="button">Start</button>
+      </section>
+      <section class="meta">
+        <div id="status" data-testid="status">No room joined</div>
+        <div id="winner" data-testid="winner"></div>
+      </section>
+      <section id="players" class="players"></section>
+      <section class="actions-wrap">
+        <label>Discard Indexes <input id="discard" value="" placeholder="0,3" /></label>
+        <div id="actions" class="actions"></div>
+      </section>
+    </main>
+    <script src="../game-runtime.js"></script>
+    <script src="./logic.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

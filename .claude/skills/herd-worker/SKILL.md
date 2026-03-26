@@ -24,7 +24,9 @@ Local-network discovery and calls:
 
 ## Operating Rules
 
-- Use `network_list` or `network_get` before `network_call`.
+- If Root gives you an explicit tile id and an exact `network_call` shape to execute, do that first.
+- In that explicit-dispatch case, skip `network_list` / `network_get` unless the call fails.
+- Otherwise, use `network_list` or `network_get` before `network_call`.
 - Call only actions advertised in a tile's `responds_to`.
 - Inspect `message_api` for required args and browser-drive subcommands.
 - Browser automation goes through `network_call` with browser action `drive`.
@@ -55,9 +57,10 @@ Operational rules:
 
 1. Review `/herd-worker`.
 2. Read recent chatter and current channel traffic.
-3. Inspect your local network.
-4. Use `network_call` only when the tile advertises the action.
-5. Report findings and blockers through the message tools.
+3. If Root sent an exact one-shot tile action, execute it directly.
+4. Otherwise inspect your local network.
+5. Use `network_call` only when the tile advertises the action.
+6. Report findings and blockers through the message tools.
 
 ## Do Not
 

@@ -8,6 +8,7 @@ const tauriMocks = vi.hoisted(() => ({
   createWorkItem: vi.fn(),
   deleteWorkItem: vi.fn(),
   disconnectNetworkPort: vi.fn(),
+  getBrowserExtensionPages: vi.fn(),
   sendDirectMessageCommand: vi.fn(),
   sendPublicMessageCommand: vi.fn(),
   getAgentDebugState: vi.fn(),
@@ -19,6 +20,7 @@ const tauriMocks = vi.hoisted(() => ({
   killPane: vi.fn(),
   killSession: vi.fn(),
   killWindow: vi.fn(),
+  loadBrowserWebview: vi.fn(),
   newSession: vi.fn(),
   newWindow: vi.fn(),
   readWorkStagePreview: vi.fn(),
@@ -47,36 +49,52 @@ import {
   applyTmuxSnapshotToState,
   appState,
   activeNetworkDrag,
+  activeTabTerminals,
+  activeTabVisibleTerminals,
+  activeTabVisibleWorkCards,
+  activeTabWorkCards,
   appendChatterEntryToState,
   applyWorkItemsToState,
   autoArrange,
+  autoArrangeWithElk,
   beginNetworkPortDrag,
   beginSidebarRename,
   bootstrapAppState,
   buildCanvasWorkCards,
   buildContextMenuItems,
   buildCanvasConnections,
+  buildNetworkCallSignals,
   buildTestDriverProjection,
   buildTileActivityEntries,
+  canvasState,
   clientDeltaToWorldDelta,
   buildRenderedNetworkConnections,
   buildSidebarItems,
   buildSidebarRenameCommand,
   calculateWindowSizeRequest,
+  clearCurrentNetworkDragPortSnap,
   completeNetworkPortDrag,
   dismissContextMenuInState,
+  fitCanvasToActiveTab,
   initialAppState,
   networkReleaseAnimation,
   openCanvasContextMenuInState,
   openPaneContextMenuInState,
+  openPaneContextMenu,
   parseCommandBarCommand,
+  portCanAcceptCurrentDrag,
   reduceContextMenuSelection,
   reportPaneViewport,
+  restoreMinimizedTile,
   reduceIntent,
   executeCommandBarCommand,
   activeSessionWorkItems,
-  topicInfos,
+  snapCurrentNetworkDragToPort,
+  channelInfos,
+  togglePaneMinimized,
+  toggleWorkCardMinimized,
   updateNetworkPortDrag,
+  zoomCanvasAtPoint,
 } from './appState';
 
 function freshState(): AppStateTree {
@@ -123,6 +141,72 @@ function tileForWork(workId: string): string {
 
 function layoutEntryForWindow(state: AppStateTree, windowId: keyof typeof TILE_BY_WINDOW) {
   return state.layout.entries[tileForWindow(windowId)];
+}
+
+function pointStrictlyInsideRect(
+  point: { x: number; y: number },
+  rect: { x: number; y: number; width: number; height: number },
+) {
+  return (
+    point.x > rect.x
+    && point.x < rect.x + rect.width
+    && point.y > rect.y
+    && point.y < rect.y + rect.height
+  );
+}
+
+function segmentCrossesRectInterior(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  rect: { x: number; y: number; width: number; height: number },
+) {
+  if (pointStrictlyInsideRect(start, rect) || pointStrictlyInsideRect(end, rect)) {
+    return true;
+  }
+
+  const xMin = rect.x;
+  const xMax = rect.x + rect.width;
+  const yMin = rect.y;
+  const yMax = rect.y + rect.height;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  let entry = 0;
+  let exit = 1;
+
+  const clip = (p: number, q: number) => {
+    if (p === 0) {
+      return q >= 0;
+    }
+    const ratio = q / p;
+    if (p < 0) {
+      if (ratio > exit) {
+        return false;
+      }
+      if (ratio > entry) {
+        entry = ratio;
+      }
+      return true;
+    }
+    if (ratio < entry) {
+      return false;
+    }
+    if (ratio < exit) {
+      exit = ratio;
+    }
+    return true;
+  };
+
+  if (!clip(-dx, start.x - xMin)) return false;
+  if (!clip(dx, xMax - start.x)) return false;
+  if (!clip(-dy, start.y - yMin)) return false;
+  if (!clip(dy, yMax - start.y)) return false;
+  if (entry > exit) return false;
+
+  const midpoint = {
+    x: start.x + dx * ((entry + exit) / 2),
+    y: start.y + dy * ((entry + exit) / 2),
+  };
+  return pointStrictlyInsideRect(midpoint, rect);
 }
 
 function baseSnapshot(): TmuxSnapshot {
@@ -237,8 +321,10 @@ beforeEach(() => {
   __resetWindowResizeTrackingForTest();
   Object.values(tauriMocks).forEach((mockFn) => mockFn.mockReset());
   tauriMocks.getClaudeMenuDataForPane.mockResolvedValue({ commands: [], skills: [] });
-  tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
+  tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
+  tauriMocks.getBrowserExtensionPages.mockResolvedValue([]);
   tauriMocks.getWorkItems.mockResolvedValue([]);
+  tauriMocks.loadBrowserWebview.mockResolvedValue(undefined);
   tauriMocks.resizeWindow.mockResolvedValue(undefined);
   tauriMocks.spawnAgentWindow.mockResolvedValue(undefined);
   tauriMocks.connectNetworkTiles.mockResolvedValue(undefined);
@@ -401,7 +487,11 @@ describe('applyTmuxSnapshotToState', () => {
 });
 
 describe('network connectors', () => {
-  it('builds curved network connector control points', () => {
+  it('defaults tile port count to four total ports', () => {
+    expect(initialAppState.ui.tilePortCount).toBe(4);
+  });
+
+  it('builds simple rendered curves when nothing blocks the wire', () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
     state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
     state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
@@ -425,8 +515,73 @@ describe('network connectors', () => {
       x2: 420,
       y2: 130,
     });
-    expect(connection.cx1).toBeGreaterThan(connection.x1);
-    expect(connection.cx2).toBeLessThan(connection.x2);
+    expect(connection.points).toEqual([
+      { x: 240, y: 80 },
+      { x: 420, y: 130 },
+    ]);
+    expect(connection.path).toMatch(/^M 240 80 C [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+ 420 130$/);
+    const firstCurveMatch = connection.path.match(/^M 240 80 C ([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)/);
+    expect(firstCurveMatch).not.toBeNull();
+    const firstControl1 = { x: Number(firstCurveMatch?.[1]), y: Number(firstCurveMatch?.[2]) };
+    const firstSegmentStart = connection.points[0];
+    const firstSegmentEnd = connection.points[1];
+    const firstSegmentVector = {
+      x: firstSegmentEnd.x - firstSegmentStart.x,
+      y: firstSegmentEnd.y - firstSegmentStart.y,
+    };
+    const firstControlVector = {
+      x: firstControl1.x - firstSegmentStart.x,
+      y: firstControl1.y - firstSegmentStart.y,
+    };
+    expect(
+      firstSegmentVector.x * firstControlVector.x + firstSegmentVector.y * firstControlVector.y,
+    ).toBeGreaterThan(0);
+    const lastCurveMatch = connection.path.match(/C ([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+) 420 130$/);
+    expect(lastCurveMatch).not.toBeNull();
+    const lastControl2 = { x: Number(lastCurveMatch?.[3]), y: Number(lastCurveMatch?.[4]) };
+    const lastSegmentStart = connection.points[connection.points.length - 2];
+    const lastSegmentEnd = connection.points[connection.points.length - 1];
+    const lastSegmentVector = {
+      x: lastSegmentStart.x - lastSegmentEnd.x,
+      y: lastSegmentStart.y - lastSegmentEnd.y,
+    };
+    const lastControlVector = {
+      x: lastControl2.x - lastSegmentEnd.x,
+      y: lastControl2.y - lastSegmentEnd.y,
+    };
+    expect(
+      lastSegmentVector.x * lastControlVector.x + lastSegmentVector.y * lastControlVector.y,
+    ).toBeGreaterThan(0);
+    expect(connection.path).toMatch(/420 130$/);
+    expect(connection.path).not.toContain(' Q ');
+    expect(connection).not.toHaveProperty('cx1');
+    expect(connection).not.toHaveProperty('cy1');
+    expect(connection).not.toHaveProperty('cx2');
+    expect(connection).not.toHaveProperty('cy2');
+  });
+
+  it('routes around blocking tiles instead of crossing their bounds', () => {
+    const state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 560, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@4')] = { x: 250, y: -40, width: 300, height: 240 };
+    state.network.connections = [{
+      session_id: '$1',
+      from_tile_id: tileForPane('%1'),
+      from_port: 'right',
+      to_tile_id: tileForPane('%2'),
+      to_port: 'left',
+    }];
+
+    const [connection] = buildRenderedNetworkConnections(state);
+    expect(connection?.points.length).toBeGreaterThan(2);
+
+    const blocker = state.layout.entries[tileForWindow('@4')];
+    const segmentsCrossingBlocker = connection.points
+      .slice(0, -1)
+      .filter((point, index) => segmentCrossesRectInterior(point, connection.points[index + 1], blocker));
+
+    expect(segmentsCrossingBlocker).toHaveLength(0);
   });
 
   it('keeps browser connections full-duplex on non-left ports', () => {
@@ -470,6 +625,150 @@ describe('network connectors', () => {
       tileForPane('%2'),
       'left',
     );
+  });
+
+  it('uses a larger circular snap vicinity around target ports', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    updateNetworkPortDrag(450, 145);
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: tileForPane('%2'),
+      snappedPort: 'left',
+      snappedX: 420,
+      snappedY: 130,
+    });
+
+    updateNetworkPortDrag(460, 170);
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+      snappedX: null,
+      snappedY: null,
+    });
+  });
+
+  it('lets a valid target port claim the active drag directly on hover', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    updateNetworkPortDrag(330, 95);
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+    });
+
+    snapCurrentNetworkDragToPort(tileForPane('%2'), 'left');
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: tileForPane('%2'),
+      snappedPort: 'left',
+      snappedX: 420,
+      snappedY: 130,
+    });
+  });
+
+  it('clears a forced port snap when leaving that same target port', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    snapCurrentNetworkDragToPort(tileForPane('%2'), 'left');
+    clearCurrentNetworkDragPortSnap(tileForPane('%2'), 'left');
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+      snappedX: null,
+      snappedY: null,
+    });
+  });
+
+  it('does not force-snap incompatible ports even if the cursor enters them', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%2', 'browser');
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    snapCurrentNetworkDragToPort(tileForPane('%2'), 'left');
+
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+      snappedX: null,
+      snappedY: null,
+    });
+  });
+
+  it('does not advertise work left as a valid snap target for non-agent drags', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    updateNetworkPortDrag(405, 130);
+
+    expect(portCanAcceptCurrentDrag(tileForWork('work-s1-001'), 'left')).toBe(false);
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+      snappedX: null,
+      snappedY: null,
+    });
+  });
+
+  it('allows agent drags to snap into work left', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%1', 'claude');
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    updateNetworkPortDrag(405, 130);
+
+    expect(portCanAcceptCurrentDrag(tileForWork('work-s1-001'), 'left')).toBe(true);
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: tileForWork('work-s1-001'),
+      snappedPort: 'left',
+      snappedX: 420,
+      snappedY: 130,
+    });
+  });
+
+  it('does not advertise browser left as a valid snap target for non-agent drags', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%2', 'browser');
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right', 240, 80);
+    updateNetworkPortDrag(405, 130);
+
+    expect(portCanAcceptCurrentDrag(tileForPane('%2'), 'left')).toBe(false);
+    expect(get(activeNetworkDrag)).toMatchObject({
+      snappedTileId: null,
+      snappedPort: null,
+      snappedX: null,
+      snappedY: null,
+    });
   });
 
   it('detaches occupied drags from the opposite endpoint', () => {
@@ -579,13 +878,56 @@ describe('network connectors', () => {
       anchorY: 130,
     });
   });
+
+  it('positions higher-slot rendered connections away from the side midpoint', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.tilePortCount = 8;
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWindow('@2')] = { x: 420, y: 40, width: 260, height: 180 };
+    state.network.connections = [{
+      session_id: '$1',
+      from_tile_id: tileForPane('%1'),
+      from_port: 'right-2',
+      to_tile_id: tileForPane('%2'),
+      to_port: 'left-2',
+    }];
+
+    const [connection] = buildRenderedNetworkConnections(state);
+    expect(connection).toMatchObject({
+      fromPort: 'right-2',
+      toPort: 'left-2',
+      x1: 240,
+      x2: 420,
+    });
+    expect(connection.y1).toBeCloseTo(160 * (2 / 3));
+    expect(connection.y2).toBeCloseTo(40 + 180 * (2 / 3));
+    expect(connection.y1).not.toBeCloseTo(80);
+    expect(connection.y2).not.toBeCloseTo(130);
+  });
+
+  it('applies left-side agent-only rules to higher left slots', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.tilePortCount = 8;
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 0, y: 0, width: 240, height: 160 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 420, y: 40, width: 260, height: 180 };
+    appState.set(state);
+
+    beginNetworkPortDrag(tileForPane('%1'), 'right-2', 240, 80);
+    expect(portCanAcceptCurrentDrag(tileForWork('work-s1-001'), 'left-2')).toBe(false);
+
+    const agentState = applyPaneRoleToState(state, '%1', 'claude');
+    appState.set(agentState);
+    beginNetworkPortDrag(tileForPane('%1'), 'right-2', 240, 80);
+    expect(portCanAcceptCurrentDrag(tileForWork('work-s1-001'), 'left-2')).toBe(true);
+  });
 });
 
 describe('work state', () => {
   it('bootstraps current-session work items from tauri', async () => {
     tauriMocks.getLayoutState.mockResolvedValue({});
     tauriMocks.getTmuxState.mockResolvedValue(baseSnapshot());
-    tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], topics: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
+    tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
     tauriMocks.getWorkItems.mockResolvedValue([
       sampleWorkItem(),
       sampleWorkItem({
@@ -647,7 +989,15 @@ describe('session-scoped agent debug state', () => {
     expect(clientDeltaToWorldDelta(40, 20, 0.5)).toEqual({ dx: 80, dy: 40 });
   });
 
-  it('keeps only active-session agents, topics, and chatter from debug snapshots', () => {
+  it('allows the main canvas to zoom out to the lower floor', () => {
+    canvasState.set({ panX: 100, panY: 50, zoom: 1 });
+
+    zoomCanvasAtPoint(400, 300, 0.05);
+
+    expect(get(canvasState).zoom).toBe(0.05);
+  });
+
+  it('keeps only active-session agents, channels, and chatter from debug snapshots', () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
     const next = applyAgentDebugStateToState(state, {
       agents: [
@@ -662,7 +1012,7 @@ describe('session-scoped agent debug state', () => {
           display_name: 'Agent 1',
           alive: true,
           chatter_subscribed: true,
-          topics: ['#work-s1-001'],
+          channels: ['#work-s1-001'],
         },
         {
           agent_id: 'agent-2',
@@ -675,13 +1025,13 @@ describe('session-scoped agent debug state', () => {
           display_name: 'Agent 2',
           alive: true,
           chatter_subscribed: true,
-          topics: ['#work-s2-001'],
+          channels: ['#work-s2-001'],
         },
       ],
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
-      topics: [
+      channels: [
         { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
         { session_id: '$2', name: '#work-s2-001', subscriber_count: 1, last_activity_at: 20 },
       ],
@@ -694,7 +1044,7 @@ describe('session-scoped agent debug state', () => {
           message: 'hello from main',
           to_agent_id: null,
           to_display_name: null,
-          topics: ['#work-s1-001'],
+          channels: ['#work-s1-001'],
           mentions: [],
           timestamp_ms: 1,
           public: true,
@@ -708,7 +1058,7 @@ describe('session-scoped agent debug state', () => {
           message: 'hello from build',
           to_agent_id: null,
           to_display_name: null,
-          topics: ['#work-s2-001'],
+          channels: ['#work-s2-001'],
           mentions: [],
           timestamp_ms: 2,
           public: true,
@@ -718,7 +1068,7 @@ describe('session-scoped agent debug state', () => {
     });
 
     expect(Object.keys(next.agents)).toEqual(['agent-1']);
-    expect(Object.keys(next.topics)).toEqual(['#work-s1-001']);
+    expect(Object.keys(next.channels)).toEqual(['#work-s1-001']);
     expect(next.chatter.map((entry) => entry.session_id)).toEqual(['$1']);
   });
 
@@ -738,7 +1088,7 @@ describe('session-scoped agent debug state', () => {
             display_name: 'Agent 1',
             alive: true,
             chatter_subscribed: true,
-            topics: ['#work-s1-001'],
+            channels: ['#work-s1-001'],
           },
           {
             agent_id: 'agent-2',
@@ -751,13 +1101,13 @@ describe('session-scoped agent debug state', () => {
             display_name: 'Agent 2',
             alive: true,
             chatter_subscribed: true,
-            topics: ['#work-s2-001'],
+            channels: ['#work-s2-001'],
           },
         ],
         agent_logs: [],
         tile_message_logs: [],
         connections: [],
-        topics: [
+        channels: [
           { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
           { session_id: '$2', name: '#work-s2-001', subscriber_count: 1, last_activity_at: 20 },
         ],
@@ -775,7 +1125,7 @@ describe('session-scoped agent debug state', () => {
         message: 'foreign',
         to_agent_id: null,
         to_display_name: null,
-        topics: ['#work-s2-001'],
+        channels: ['#work-s2-001'],
         mentions: [],
         timestamp_ms: 99,
         public: true,
@@ -784,7 +1134,7 @@ describe('session-scoped agent debug state', () => {
     );
 
     expect(get(agentInfos).map((agent) => agent.agent_id)).toEqual(['agent-1']);
-    expect(get(topicInfos).map((topic) => topic.name)).toEqual(['#work-s1-001']);
+    expect(get(channelInfos).map((channel) => channel.name)).toEqual(['#work-s1-001']);
     expect(get(appState).chatter).toEqual([]);
   });
 
@@ -804,10 +1154,10 @@ describe('session-scoped agent debug state', () => {
             display_name: 'Agent 1',
             alive: true,
             chatter_subscribed: true,
-            topics: [],
+            channels: [],
           },
         ],
-        topics: [],
+        channels: [],
         chatter: [
           {
             session_id: '$1',
@@ -817,7 +1167,7 @@ describe('session-scoped agent debug state', () => {
             to_agent_id: 'agent-1',
             to_display_name: 'Agent 1',
             message: 'hello',
-            topics: [],
+            channels: [],
             mentions: [],
             timestamp_ms: 20,
             public: false,
@@ -1155,13 +1505,13 @@ describe('reduceIntent', () => {
           display_name: 'Agent 1',
           alive: true,
           chatter_subscribed: true,
-          topics: ['#work-s1-002'],
+          channels: ['#work-s1-002'],
         },
       ],
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
-      topics: [],
+      channels: [],
       chatter: [],
     });
 
@@ -1184,20 +1534,25 @@ describe('reduceIntent', () => {
     expect(state.ui.selectedWorkId).toBe('work-s1-002');
   });
 
-  it('shows a root-specific close label in the pane context menu', () => {
-    const seeded = openPaneContextMenuInState(
-      applyPaneRoleToState(
-        applyTmuxSnapshotToState(freshState(), baseSnapshot()),
-        '%1',
-        'root_agent',
-      ),
-      '%1',
-      420,
-      240,
-    );
+  it('shows the same agent context menu for root and worker agents', () => {
+    const base = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    const worker = openPaneContextMenuInState(applyPaneRoleToState(base, '%1', 'claude'), '%1', 420, 240);
+    const root = openPaneContextMenuInState(applyPaneRoleToState(base, '%1', 'root_agent'), '%1', 420, 240);
 
-    expect(buildContextMenuItems(seeded)).toEqual([
-      { id: 'close-shell', label: 'Close Root Agent', kind: 'action', disabled: false },
+    expect(buildContextMenuItems(root)).toEqual(buildContextMenuItems(worker));
+    expect(buildContextMenuItems(root)).toEqual([
+      {
+        id: 'claude-skills',
+        label: 'Skills',
+        kind: 'submenu',
+        disabled: false,
+        children: [{ id: 'skills-loading', label: 'Loading…', kind: 'status', disabled: true }],
+      },
+      { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
+      { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
+      { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
+      { id: 'claude-loading', label: 'Loading…', kind: 'status', disabled: true },
     ]);
   });
 
@@ -1252,7 +1607,7 @@ describe('reduceIntent', () => {
           display_name: 'Root',
           alive: true,
           chatter_subscribed: true,
-          topics: [],
+          channels: [],
         },
         {
           agent_id: 'worker-1-live',
@@ -1265,7 +1620,7 @@ describe('reduceIntent', () => {
           display_name: 'Agent 1',
           alive: true,
           chatter_subscribed: true,
-          topics: [],
+          channels: [],
         },
         {
           agent_id: 'worker-2-dead',
@@ -1278,7 +1633,7 @@ describe('reduceIntent', () => {
           display_name: 'Agent 2',
           alive: false,
           chatter_subscribed: true,
-          topics: [],
+          channels: [],
         },
         {
           agent_id: 'stale-browser-binding',
@@ -1291,13 +1646,13 @@ describe('reduceIntent', () => {
           display_name: 'Agent 999',
           alive: false,
           chatter_subscribed: true,
-          topics: [],
+          channels: [],
         },
       ],
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
-      topics: [],
+      channels: [],
       chatter: [],
     });
 
@@ -1325,6 +1680,8 @@ describe('buildCanvasConnections', () => {
     expect(connections).toHaveLength(1);
     expect(connections[0].parentWindowId).toBe('@1');
     expect(connections[0].childWindowId).toBe('@2');
+    expect(connections[0].path).toMatch(/^M [\d.-]+ [\d.-]+(?: (?:L [\d.-]+ [\d.-]+|C [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+))+$/);
+    expect(connections[0].path).not.toContain(' Q ');
   });
 
   it('does not draw manual parent-child lineage lines', () => {
@@ -1338,6 +1695,149 @@ describe('buildCanvasConnections', () => {
     });
 
     expect(buildCanvasConnections(state)).toHaveLength(0);
+  });
+});
+
+describe('buildNetworkCallSignals', () => {
+  it('derives a direct wire signal from a network_call log entry', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%1', 'claude');
+    state = applyAgentDebugStateToState(state, {
+      agents: [
+        {
+          agent_id: 'agent-1',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%1'),
+          window_id: '@1',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 1',
+          alive: true,
+          chatter_subscribed: true,
+          channels: [],
+        },
+      ],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [
+        {
+          session_id: '$1',
+          from_tile_id: tileForPane('%1'),
+          from_port: 'right',
+          to_tile_id: tileForPane('%2'),
+          to_port: 'left',
+        },
+      ],
+    });
+
+    const signals = buildNetworkCallSignals(state, [
+      {
+        session_id: '$1',
+        layer: 'network',
+        channel: 'socket',
+        target_id: tileForPane('%2'),
+        target_kind: 'network',
+        wrapper_command: 'network_call',
+        message_name: 'output_read',
+        caller_tile_id: tileForPane('%1'),
+        args: {},
+        related_tile_ids: [tileForPane('%1'), tileForPane('%2')],
+        outcome: 'ok',
+        duration_ms: 8,
+        timestamp_ms: 1000,
+      },
+    ]);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.segments).toHaveLength(1);
+    expect(signals[0]?.segments[0]?.connectionKey).toBe(`${tileForPane('%1')}:right-${tileForPane('%2')}:left`);
+    expect(signals[0]?.segments[0]?.motionPath.length).toBeGreaterThan(0);
+    expect(signals[0]?.totalDurationMs).toBeGreaterThan(0);
+  });
+
+  it('breaks a multi-hop network_call into ordered wire segments', () => {
+    let state = applyTmuxSnapshotToState(freshState(), {
+      ...baseSnapshot(),
+      windows: [
+        { ...baseSnapshot().windows[0] },
+        { ...baseSnapshot().windows[1] },
+        { ...baseSnapshot().windows[2], id: '@4', tile_id: tileForWindow('@4'), session_id: '$1', session_name: 'Main', active: false, index: 2, name: 'relay', pane_ids: ['%4'], cols: 90, rows: 28 },
+      ],
+      panes: [
+        { ...baseSnapshot().panes[0], role: 'claude', title: 'Worker' },
+        { ...baseSnapshot().panes[1], title: 'Relay', command: 'zsh' },
+        { ...baseSnapshot().panes[2], id: '%4', tile_id: tileForPane('%4'), session_id: '$1', window_id: '@4', window_index: 2, pane_index: 0, cols: 90, rows: 28, title: 'Target', command: 'zsh', active: false, dead: false },
+      ],
+      sessions: [
+        { ...baseSnapshot().sessions[0], window_ids: ['@1', '@2', '@4'], active_window_id: '@1' },
+        baseSnapshot().sessions[1],
+      ],
+      active_window_id: '@1',
+      active_pane_id: '%1',
+    });
+    state = applyPaneRoleToState(state, '%1', 'claude');
+    state = applyAgentDebugStateToState(state, {
+      agents: [
+        {
+          agent_id: 'agent-1',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%1'),
+          window_id: '@1',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 1',
+          alive: true,
+          chatter_subscribed: true,
+          channels: [],
+        },
+      ],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [
+        {
+          session_id: '$1',
+          from_tile_id: tileForPane('%1'),
+          from_port: 'right',
+          to_tile_id: tileForPane('%2'),
+          to_port: 'left',
+        },
+        {
+          session_id: '$1',
+          from_tile_id: tileForPane('%2'),
+          from_port: 'right',
+          to_tile_id: tileForPane('%4'),
+          to_port: 'left',
+        },
+      ],
+    });
+
+    const signals = buildNetworkCallSignals(state, [
+      {
+        session_id: '$1',
+        layer: 'network',
+        channel: 'mcp',
+        target_id: tileForPane('%4'),
+        target_kind: 'network',
+        wrapper_command: 'network_call',
+        message_name: 'output_read',
+        caller_tile_id: tileForPane('%1'),
+        args: {},
+        related_tile_ids: [tileForPane('%1'), tileForPane('%4')],
+        outcome: 'ok',
+        duration_ms: 10,
+        timestamp_ms: 2000,
+      },
+    ]);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.segments).toHaveLength(2);
+    expect(signals[0]?.segments[1]?.delayMs).toBeGreaterThan(signals[0]?.segments[0]?.delayMs ?? 0);
   });
 });
 
@@ -1416,6 +1916,57 @@ describe('buildCanvasWorkCards', () => {
       },
     ]);
   });
+
+  it('tracks minimized pane and work tiles separately from visible canvas projections', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 80, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 860, y: 120, width: 640, height: 400 };
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 1540, y: 90, width: 360, height: 320 };
+    appState.set(state);
+
+    togglePaneMinimized('%1');
+    toggleWorkCardMinimized('work-s1-001');
+
+    const allTerminals = get(activeTabTerminals);
+    const visibleTerminals = get(activeTabVisibleTerminals);
+    const allWorkCards = get(activeTabWorkCards);
+    const visibleWorkCards = get(activeTabVisibleWorkCards);
+
+    expect(allTerminals.find((term) => term.id === '%1')).toMatchObject({ minimized: true });
+    expect(allWorkCards.find((card) => card.workId === 'work-s1-001')).toMatchObject({ minimized: true });
+    expect(visibleTerminals.map((term) => term.id)).toEqual(['%2']);
+    expect(visibleWorkCards).toEqual([]);
+
+    restoreMinimizedTile(tileForPane('%1'));
+    restoreMinimizedTile(tileForWork('work-s1-001'));
+
+    expect(get(activeTabVisibleTerminals).map((term) => term.id)).toEqual(['%1', '%2']);
+    expect(get(activeTabVisibleWorkCards).map((card) => card.workId)).toEqual(['work-s1-001']);
+  });
+
+  it('fits the canvas to only non-minimized tiles', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 80, y: 100, width: 320, height: 200 };
+    state.layout.entries[tileForWindow('@2')] = { x: 2200, y: 120, width: 640, height: 400 };
+    appState.set(state);
+    vi.stubGlobal('window', {
+      clearTimeout,
+      innerHeight: 900,
+      innerWidth: 1400,
+      setTimeout,
+    });
+
+    togglePaneMinimized('%2');
+    fitCanvasToActiveTab(1400, 846);
+
+    expect(get(canvasState)).toEqual({
+      zoom: 2,
+      panX: 220,
+      panY: 23,
+    });
+    vi.unstubAllGlobals();
+  });
 });
 
 describe('context menu state', () => {
@@ -1451,6 +2002,47 @@ describe('context menu state', () => {
     expect(state.ui.contextMenu?.paneId).toBe('%2');
     expect(buildContextMenuItems(state)).toEqual([
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('derives browser-tile Load submenu items from browser extension pages', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%2', 'browser');
+    state.browserExtensionPages = [
+      { label: 'Checkers', path: 'extensions/browser/checkers/index.html' },
+      { label: 'Pong', path: 'extensions/browser/pong/index.html' },
+    ];
+    state = openPaneContextMenuInState(state, '%2', 640, 360);
+
+    expect(buildContextMenuItems(state)).toEqual([
+      {
+        id: 'browser-load',
+        label: 'Load',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'browser-load:extensions/browser/checkers/index.html', label: 'Checkers', kind: 'action', disabled: false },
+          { id: 'browser-load:extensions/browser/pong/index.html', label: 'Pong', kind: 'action', disabled: false },
+        ],
+      },
+      { id: 'separator-browser-load', label: '', kind: 'separator', disabled: true },
+      { id: 'close-shell', label: 'Close Browser', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('maps browser Load submenu selection to a browser file-load effect', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyPaneRoleToState(state, '%2', 'browser');
+    state.browserExtensionPages = [
+      { label: 'Checkers', path: 'extensions/browser/checkers/index.html' },
+    ];
+    state = openPaneContextMenuInState(state, '%2', 640, 360);
+
+    const selected = reduceContextMenuSelection(state, 'browser-load:extensions/browser/checkers/index.html');
+    expect(selected.state.ui.contextMenu).toBeNull();
+    expect(selected.state.ui.selectedPaneId).toBe('%2');
+    expect(selected.effects).toEqual([
+      { type: 'load-browser-file', paneId: '%2', path: 'extensions/browser/checkers/index.html' },
     ]);
   });
 
@@ -1643,6 +2235,38 @@ describe('context menu state', () => {
 
     const inserted = reduceContextMenuSelection(state, 'claude-command:model');
     expect(inserted.effects).toEqual([{ type: 'write-pane', paneId: '%1', data: '/model ' }]);
+  });
+
+  it('loads menu data for root agents when opening the pane context menu', async () => {
+    tauriMocks.getClaudeMenuDataForPane.mockResolvedValue({
+      commands: [
+        { name: 'model', execution: 'insert', source: 'builtin' },
+      ],
+      skills: [
+        { name: 'herd-root', execution: 'execute', source: 'skill' },
+      ],
+    });
+
+    appState.set(
+      applyPaneRoleToState(
+        applyTmuxSnapshotToState(freshState(), baseSnapshot()),
+        '%1',
+        'root_agent',
+      ),
+    );
+
+    openPaneContextMenu('%1', 600, 320);
+    expect(tauriMocks.getClaudeMenuDataForPane).toHaveBeenCalledWith('%1');
+
+    await Promise.resolve();
+
+    expect(get(appState).ui.contextMenu).toMatchObject({
+      paneId: '%1',
+      loadingClaudeCommands: false,
+      claudeCommandsError: null,
+      claudeCommands: [{ name: 'model', execution: 'insert', source: 'builtin' }],
+      claudeSkills: [{ name: 'herd-root', execution: 'execute', source: 'skill' }],
+    });
   });
 });
 
@@ -1848,6 +2472,106 @@ describe('autoArrange', () => {
     expect(next.layout.entries[tileForWindow('@4')]).toEqual({ x: 900, y: 100, width: 640, height: 400 });
     expect(next.layout.entries[tileForWindow('@5')]).toEqual({ x: 100, y: 900, width: 640, height: 400 });
     expect(next.layout.entries[tileForWindow('@6')]).toEqual({ x: -700, y: 100, width: 640, height: 400 });
+  });
+
+  it('arranges current-session tiles with ELK using network connections and preserves the selected-tile anchor', async () => {
+    let state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 120, y: 120, width: 320, height: 200 };
+    state.layout.entries[tileForWindow('@2')] = { x: 900, y: 80, width: 420, height: 260 };
+    state.layout.entries[tileForWindow('@4')] = { x: 520, y: 700, width: 360, height: 220 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 1440, y: 440, width: 300, height: 240 };
+    state.ui.selectedPaneId = '%2';
+    state.network.connections = [
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@1'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@2'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@2'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@4'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@2'),
+        from_port: 'bottom',
+        to_tile_id: tileForWork('work-s1-001'),
+        to_port: 'top',
+      },
+    ];
+    appState.set(state);
+
+    await autoArrangeWithElk('$1');
+
+    const next = get(appState);
+    const first = next.layout.entries[tileForWindow('@1')];
+    const anchor = next.layout.entries[tileForWindow('@2')];
+    const third = next.layout.entries[tileForWindow('@4')];
+    const work = next.layout.entries[tileForWork('work-s1-001')];
+
+    expect(next.ui.arrangementModeBySession['$1']).toBe('elk');
+    expect(anchor).toEqual({ x: 900, y: 80, width: 420, height: 260 });
+    expect(first.width).toBe(320);
+    expect(third.width).toBe(360);
+    expect(work.width).toBe(300);
+    expect(first.x + first.width).toBeLessThanOrEqual(anchor.x);
+    expect(anchor.x + anchor.width).toBeLessThanOrEqual(third.x);
+    expect(work.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+    expect(entriesOverlap(first, anchor)).toBe(false);
+    expect(entriesOverlap(anchor, third)).toBe(false);
+    expect(entriesOverlap(anchor, work)).toBe(false);
+    const persistedTileIds = tauriMocks.saveLayoutState.mock.calls.map(([entryId]) => entryId);
+    expect(persistedTileIds).toEqual(expect.arrayContaining([
+      tileForWindow('@1'),
+      tileForWindow('@2'),
+      tileForWindow('@4'),
+      tileForWork('work-s1-001'),
+    ]));
+  });
+
+  it('preserves elk mode across session growth without falling back to the lowercase cycle', () => {
+    const initial = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
+    initial.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 320, height: 220 };
+    initial.layout.entries[tileForWindow('@2')] = { x: 900, y: 120, width: 420, height: 260 };
+    initial.layout.entries[tileForWindow('@4')] = { x: 1500, y: 140, width: 360, height: 220 };
+    initial.ui.arrangementModeBySession['$1'] = 'elk';
+    initial.ui.arrangementCycleBySession['$1'] = 3;
+    initial.network.connections = [
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@1'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@2'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@2'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@4'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@4'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@5'),
+        to_port: 'left',
+      },
+    ];
+
+    const next = applyTmuxSnapshotToState(initial, snapshotWithMainWindowCount(5));
+    expect(next.ui.arrangementModeBySession['$1']).toBe('elk');
+    expect(next.ui.arrangementCycleBySession['$1']).toBe(3);
+    expect(next.layout.entries[tileForWindow('@2')]).toEqual({ x: 900, y: 120, width: 420, height: 260 });
+    expect(next.layout.entries[tileForWindow('@5')].width).toBe(640);
+    expect(next.layout.entries[tileForWindow('@5')].height).toBe(400);
   });
 });
 

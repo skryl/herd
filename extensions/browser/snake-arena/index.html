@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd Snake Arena</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <label>Room <input id="room-id" value="snake-room" /></label>
+        <label>Name <input id="player-name" value="Player" /></label>
+        <label>
+          Seat
+          <select id="seat">
+            <option value="north">north</option>
+            <option value="east">east</option>
+            <option value="south">south</option>
+            <option value="west">west</option>
+          </select>
+        </label>
+        <label>Seed <input id="seed" value="snake-seed" /></label>
+        <button id="join" type="button">Join</button>
+        <button id="start" type="button">Start</button>
+      </section>
+      <section class="meta">
+        <div id="status" data-testid="status">No room joined</div>
+        <div id="winner" data-testid="winner"></div>
+        <div id="players" class="players"></div>
+      </section>
+      <section id="controls" class="controls"></section>
+      <pre id="arena" class="arena" data-testid="arena"></pre>
+    </main>
+    <script src="../game-runtime.js"></script>
+    <script src="./logic.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -49,6 +49,7 @@
         { key: 'f', desc: 'fit all shells in view' },
         { key: '0', desc: 'reset canvas zoom and pan' },
         { key: 'a', desc: 'cycle anchored shell arrangements starting with circle and snowflake, then fit view' },
+        { key: 'Shift+A', desc: 'arrange the current session with ELK using tile connections and port sides' },
       ],
     },
     {

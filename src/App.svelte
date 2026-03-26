@@ -9,6 +9,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import StatusBar from './lib/StatusBar.svelte';
   import Toolbar from './lib/Toolbar.svelte';
+  import { handleArrangeElkEvent } from './lib/appEvents';
   import { handleGlobalKeyInput, keyboardEventToKeyInput } from './lib/interaction/keyboard';
   import {
     applyRemoteLayoutEntry,
@@ -38,6 +39,7 @@
   let unlistenChatterEntry: UnlistenFn | null = null;
   let unlistenWorkUpdated: UnlistenFn | null = null;
   let unlistenLayoutEntry: UnlistenFn | null = null;
+  let unlistenArrangeElk: UnlistenFn | null = null;
   let disposeTestDriver: (() => void) | null = null;
   let workDialogOpen = false;
   let workDialogTitle = '';
@@ -193,6 +195,9 @@
         event.payload.request_resize ?? false,
       );
     });
+    unlistenArrangeElk = await listen<{ session_id?: string | null }>('herd-arrange-elk', (event) => {
+      void handleArrangeElkEvent(event.payload);
+    });
     await bootstrapAppState();
     await setTestDriverState({ bootstrapComplete: true });
   });
@@ -206,6 +211,7 @@
     if (unlistenChatterEntry) unlistenChatterEntry();
     if (unlistenWorkUpdated) unlistenWorkUpdated();
     if (unlistenLayoutEntry) unlistenLayoutEntry();
+    if (unlistenArrangeElk) unlistenArrangeElk();
     if (unregisterWorkDialogOpener) unregisterWorkDialogOpener();
     if (disposeTestDriver) disposeTestDriver();
   });

@@ -19,6 +19,7 @@
     selectTile,
     selectedTerminalId,
     tileActivityById,
+    togglePaneMinimized,
     updateTerminal,
     zoomCanvasToTile,
   } from './stores/appState';
@@ -48,6 +49,7 @@
   let isBrowserTile = $derived(info.kind === 'browser');
   let canClose = $derived(true);
   let closeLabel = $derived(isRootAgentTile ? 'Close Root Agent' : 'Close Shell');
+  let minimizeLabel = $derived(isRootAgentTile ? 'Minimize Root Agent' : isAgentTile ? 'Minimize Agent' : 'Minimize Shell');
   let componentTypeLabel = $derived(
     isRootAgentTile ? 'ROOT' : info.readOnly ? 'VIEW' : info.kind === 'browser' ? 'WEB' : 'TTY',
   );
@@ -327,8 +329,25 @@
       </div>
       <div class="header-right">
         <span class="coord-info">{Math.round(info.x)},{Math.round(info.y)}</span>
+        <button
+          class="header-control-btn minimize-btn"
+          type="button"
+          title={minimizeLabel}
+          aria-label={minimizeLabel}
+          onmousedown={(event) => event.stopPropagation()}
+          onclick={() => togglePaneMinimized(info.id)}
+        >
+          <span class="control-glyph">_</span>
+        </button>
         {#if canClose}
-          <button class="close-btn" onclick={handleClose} title={closeLabel} aria-label={closeLabel}>
+          <button
+            class="header-control-btn close-btn"
+            type="button"
+            onclick={handleClose}
+            title={closeLabel}
+            aria-label={closeLabel}
+            onmousedown={(event) => event.stopPropagation()}
+          >
             <span class="close-x">×</span>
           </button>
         {/if}
@@ -591,7 +610,7 @@
     color: var(--copper-dim);
   }
 
-  .close-btn {
+  .header-control-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -604,9 +623,28 @@
     padding: 0;
   }
 
+  .minimize-btn {
+    color: var(--copper-dim);
+  }
+
+  .minimize-btn:hover {
+    color: var(--phosphor-green);
+    border-color: rgba(51, 255, 51, 0.2);
+  }
+
+  .close-btn {
+    color: var(--silk-dim);
+  }
+
   .close-btn:hover {
     color: var(--phosphor-red);
     border-color: rgba(255, 51, 51, 0.2);
+  }
+
+  .control-glyph {
+    font-size: 10px;
+    line-height: 1;
+    transform: translateY(-1px);
   }
 
   .close-x {

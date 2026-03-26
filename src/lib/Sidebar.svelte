@@ -12,7 +12,9 @@
     sidebarItems,
     sidebarOpen,
     sidebarSelectedIdx,
+    tilePortCount,
   } from './stores/appState';
+  import { TILE_PORT_COUNT_OPTIONS } from './tilePorts';
   import { setSessionRootCwd } from './tauri';
 
   let workCollapsed = $state(false);
@@ -99,9 +101,9 @@
           </button>
         </div>
         {#if !settingsCollapsed}
-          <div class="session-cwd-card">
+          <div class="session-cwd-card settings-card">
             <div class="session-cwd-topline">
-              <span class="session-cwd-label">SPAWN DIR</span>
+              <span class="session-cwd-label settings-card-label">SPAWN DIR</span>
               <button
                 class="session-cwd-edit"
                 type="button"
@@ -113,6 +115,27 @@
               </button>
             </div>
             <div class="session-cwd-value">{activeSession?.root_cwd ?? 'unavailable'}</div>
+          </div>
+          <div class="tile-port-count-card settings-card">
+            <div class="tile-port-count-topline">
+              <span class="settings-card-label">PORTS</span>
+              <span class="tile-port-count-current">{$tilePortCount}</span>
+            </div>
+            <div class="tile-port-count-group" role="group" aria-label="Tile port count">
+              {#each TILE_PORT_COUNT_OPTIONS as count}
+                <button
+                  class="tile-port-count-toggle"
+                  class:selected={$tilePortCount === count}
+                  type="button"
+                  data-port-count={count}
+                  aria-pressed={$tilePortCount === count}
+                  onclick={() => tilePortCount.set(count)}
+                >
+                  {count}
+                </button>
+              {/each}
+            </div>
+            <div class="tile-port-count-help">available ports per tile</div>
           </div>
         {/if}
       </section>
@@ -198,8 +221,8 @@
                   </div>
                   <div class="agent-meta">id={agent.agent_id}</div>
                   <div class="agent-meta">tile={agent.tile_id} tab={agent.session_id}</div>
-                  {#if agent.topics.length > 0}
-                    <div class="agent-meta">topics={agent.topics.join(', ')}</div>
+                  {#if agent.channels.length > 0}
+                    <div class="agent-meta">channels={agent.channels.join(', ')}</div>
                   {/if}
                 </button>
               {/each}
@@ -387,7 +410,7 @@
     padding: 4px 0;
   }
 
-  .session-cwd-card {
+  .settings-card {
     padding: 8px;
     border-bottom: 1px solid rgba(242, 176, 90, 0.08);
     background: rgba(0, 0, 0, 0.12);
@@ -401,7 +424,7 @@
     margin-bottom: 6px;
   }
 
-  .session-cwd-label {
+  .settings-card-label {
     font-size: 9px;
     color: var(--copper);
     letter-spacing: 1.5px;
@@ -431,6 +454,58 @@
     font-size: 10px;
     color: var(--silk-white);
     word-break: break-all;
+    line-height: 1.4;
+  }
+
+  .tile-port-count-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .tile-port-count-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .tile-port-count-current {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--silk-white);
+  }
+
+  .tile-port-count-group {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .tile-port-count-toggle {
+    border: 1px solid var(--component-border);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--silk-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 5px 0;
+    cursor: pointer;
+  }
+
+  .tile-port-count-toggle:hover {
+    border-color: var(--copper);
+    color: var(--copper);
+  }
+
+  .tile-port-count-toggle.selected {
+    border-color: var(--copper);
+    color: var(--silk-white);
+    background: rgba(242, 176, 90, 0.12);
+  }
+
+  .tile-port-count-help {
+    font-size: 10px;
+    color: var(--silk-dim);
     line-height: 1.4;
   }
 

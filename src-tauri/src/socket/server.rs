@@ -1,9 +1,10 @@
 use std::fs::OpenOptions;
 use std::io::Write as IoWrite;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::collections::BTreeSet;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use serde::{de::DeserializeOwned, Deserialize};
 use tokio::sync::mpsc as tokio_mpsc;
@@ -12,10 +13,10 @@ use tokio::net::UnixListener;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::agent::{
-    collect_mentions, collect_topics, format_direct_display, format_network_display,
+    collect_mentions, format_channel_display, format_direct_display, format_network_display,
     format_public_display, format_root_display, format_sign_off_display,
-    format_sign_on_display, now_ms, AgentChannelEvent, AgentChannelEventKind, AgentRole,
-    ChatterEntry, ChatterKind,
+    format_sign_on_display, now_ms, AgentChannelEvent,
+    AgentChannelEventKind, AgentRole, ChatterEntry, ChatterKind,
 };
 use crate::persist::TileState;
 use crate::state::AppState;
@@ -39,6 +40,7 @@ const WORK_CARD_HEIGHT: f64 = 320.0;
 fn parse_agent_type(value: Option<&str>) -> Result<crate::agent::AgentType, String> {
     match value.unwrap_or("claude").trim() {
         "" | "claude" => Ok(crate::agent::AgentType::Claude),
+        "fixture" if runtime::test_driver_enabled() => Ok(crate::agent::AgentType::Fixture),
         other => Err(format!("unsupported agent type: {other}")),
     }
 }
@@ -74,6 +76,47 @@ impl SocketLogger {
 }
 
 type SharedLogger = Arc<Mutex<Option<SocketLogger>>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketPathIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+fn socket_binding_identity() -> &'static Mutex<Option<SocketPathIdentity>> {
+    static SOCKET_BINDING_IDENTITY: OnceLock<Mutex<Option<SocketPathIdentity>>> = OnceLock::new();
+    SOCKET_BINDING_IDENTITY.get_or_init(|| Mutex::new(None))
+}
+
+fn current_socket_path_identity(path: &Path) -> Option<SocketPathIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(SocketPathIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+fn remember_socket_binding(path: &Path) {
+    *socket_binding_identity().lock().expect("socket binding identity lock poisoned") =
+        current_socket_path_identity(path);
+}
+
+fn remove_stale_socket_path(path: &Path) {
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn cleanup_owned_socket_path(path: &Path) {
+    let recorded = socket_binding_identity()
+        .lock()
+        .expect("socket binding identity lock poisoned")
+        .take();
+    let current = current_socket_path_identity(path);
+    if current.is_some() && current == recorded {
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 fn emit_agent_state(app: &AppHandle, state: &AppState) {
     let Ok(session_id) = resolve_ui_session_id(state) else {
@@ -115,6 +158,15 @@ fn emit_layout_updated(
             "width": layout.width,
             "height": layout.height,
             "request_resize": request_resize,
+        }),
+    );
+}
+
+fn emit_arrange_elk(app: &AppHandle, session_id: &str) {
+    let _ = app.emit(
+        "herd-arrange-elk",
+        serde_json::json!({
+            "session_id": session_id,
         }),
     );
 }
@@ -432,7 +484,7 @@ fn send_direct_message_from_sender(
         to_agent_id: Some(to_agent_id.clone()),
         to_display_name: Some(to_display_name.clone()),
         message: message.clone(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         replay: false,
         ping_id: None,
@@ -458,22 +510,47 @@ fn send_public_message_from_sender(
     app: &AppHandle,
     sender: SenderContext,
     message: String,
-    topics: Vec<String>,
     mentions: Vec<String>,
 ) -> Result<(), String> {
-    let normalized_topics = collect_topics(&message, &topics);
     let normalized_mentions = collect_mentions(&message, &mentions);
-    state.touch_topics_in_session(&sender.session_id, &normalized_topics)?;
     let entry = build_chatter_entry(
         sender.session_id,
         sender.sender_agent_id.clone(),
         sender.display_name.clone(),
         message,
-        normalized_topics,
         normalized_mentions,
     );
     append_chatter_entry(state, app, entry.clone())?;
     broadcast_public_event(state, app, &entry);
+    Ok(())
+}
+
+fn send_channel_message_from_sender(
+    state: &AppState,
+    app: &AppHandle,
+    sender: SenderContext,
+    channel_name: String,
+    message: String,
+    mentions: Vec<String>,
+) -> Result<(), String> {
+    let Some(sender_agent_id) = sender.sender_agent_id.clone() else {
+        return Err("message_channel requires an agent sender".to_string());
+    };
+    if !state.agent_has_channel(&sender_agent_id, &channel_name)? {
+        return Err(format!("agent {sender_agent_id} is not subscribed to channel {channel_name}"));
+    }
+    let normalized_mentions = collect_mentions(&message, &mentions);
+    state.touch_channels_in_session(&sender.session_id, std::slice::from_ref(&channel_name))?;
+    let entry = build_channel_entry(
+        sender.session_id,
+        sender.sender_agent_id.clone(),
+        sender.display_name.clone(),
+        channel_name.clone(),
+        message,
+        normalized_mentions,
+    );
+    append_chatter_entry(state, app, entry.clone())?;
+    broadcast_channel_event(state, app, &entry);
     Ok(())
 }
 
@@ -491,7 +568,7 @@ fn send_root_message_from_sender(
         to_agent_id: Some(root_agent.agent_id.clone()),
         to_display_name: Some(root_agent.display_name.clone()),
         message: message.clone(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         replay: false,
         ping_id: None,
@@ -553,7 +630,7 @@ fn build_direct_entry(
         to_agent_id: Some(to_agent_id),
         to_display_name: Some(to_display_name.clone()),
         message: message.clone(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         timestamp_ms: now_ms(),
         public: false,
@@ -566,7 +643,6 @@ fn build_chatter_entry(
     from_agent_id: Option<String>,
     from_display_name: String,
     message: String,
-    topics: Vec<String>,
     mentions: Vec<String>,
 ) -> ChatterEntry {
     ChatterEntry {
@@ -577,11 +653,35 @@ fn build_chatter_entry(
         to_agent_id: None,
         to_display_name: None,
         message: message.clone(),
-        topics,
+        channels: Vec::new(),
         mentions,
         timestamp_ms: now_ms(),
         public: true,
         display_text: format_public_display(&from_display_name, &message),
+    }
+}
+
+fn build_channel_entry(
+    session_id: String,
+    from_agent_id: Option<String>,
+    from_display_name: String,
+    channel_name: String,
+    message: String,
+    mentions: Vec<String>,
+) -> ChatterEntry {
+    ChatterEntry {
+        session_id,
+        kind: ChatterKind::Channel,
+        from_agent_id,
+        from_display_name: from_display_name.clone(),
+        to_agent_id: None,
+        to_display_name: None,
+        message: message.clone(),
+        channels: vec![channel_name.clone()],
+        mentions,
+        timestamp_ms: now_ms(),
+        public: true,
+        display_text: format_channel_display(&from_display_name, &channel_name, &message),
     }
 }
 
@@ -599,7 +699,7 @@ fn build_network_entry(
         to_agent_id: None,
         to_display_name: None,
         message: message.clone(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         timestamp_ms: now_ms(),
         public: false,
@@ -621,7 +721,7 @@ fn build_root_entry(
         to_agent_id: None,
         to_display_name: None,
         message: message.clone(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         timestamp_ms: now_ms(),
         public: false,
@@ -638,7 +738,7 @@ fn build_sign_on_entry(session_id: &str, display_name: &str) -> ChatterEntry {
         to_agent_id: None,
         to_display_name: None,
         message: "Signed On".to_string(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         timestamp_ms: now_ms(),
         public: true,
@@ -655,7 +755,7 @@ fn build_sign_off_entry(session_id: &str, display_name: &str) -> ChatterEntry {
         to_agent_id: None,
         to_display_name: None,
         message: "Signed Off".to_string(),
-        topics: Vec::new(),
+        channels: Vec::new(),
         mentions: Vec::new(),
         timestamp_ms: now_ms(),
         public: true,
@@ -667,6 +767,7 @@ fn channel_event_from_entry(entry: &ChatterEntry, replay: bool) -> AgentChannelE
     let kind = match entry.kind {
         ChatterKind::Direct => AgentChannelEventKind::Direct,
         ChatterKind::Public => AgentChannelEventKind::Public,
+        ChatterKind::Channel => AgentChannelEventKind::Channel,
         ChatterKind::Network => AgentChannelEventKind::Network,
         ChatterKind::Root => AgentChannelEventKind::Root,
         ChatterKind::SignOn | ChatterKind::SignOff => AgentChannelEventKind::System,
@@ -678,7 +779,7 @@ fn channel_event_from_entry(entry: &ChatterEntry, replay: bool) -> AgentChannelE
         to_agent_id: entry.to_agent_id.clone(),
         to_display_name: entry.to_display_name.clone(),
         message: entry.message.clone(),
-        topics: entry.topics.clone(),
+        channels: entry.channels.clone(),
         mentions: entry.mentions.clone(),
         replay,
         ping_id: None,
@@ -689,6 +790,15 @@ fn channel_event_from_entry(entry: &ChatterEntry, replay: bool) -> AgentChannelE
 fn broadcast_public_event(state: &AppState, app: &AppHandle, entry: &ChatterEntry) {
     let failed = state
         .broadcast_event_in_session(&entry.session_id, channel_event_from_entry(entry, false), false)
+        .unwrap_or_default();
+    for agent_id in failed {
+        let _ = mark_agent_dead(state, app, &agent_id);
+    }
+}
+
+fn broadcast_channel_event(state: &AppState, app: &AppHandle, entry: &ChatterEntry) {
+    let failed = state
+        .broadcast_channel_event_in_session(&entry.session_id, &entry.channels, channel_event_from_entry(entry, false), false)
         .unwrap_or_default();
     for agent_id in failed {
         let _ = mark_agent_dead(state, app, &agent_id);
@@ -796,7 +906,7 @@ fn notify_agents_about_connection_change(
             to_agent_id: Some(agent.agent_id.clone()),
             to_display_name: Some(agent.display_name.clone()),
             message: message.clone(),
-            topics: Vec::new(),
+            channels: Vec::new(),
             mentions: Vec::new(),
             replay: false,
             ping_id: None,
@@ -936,7 +1046,7 @@ pub fn send_public_message_as_user(
         Some(&sender),
         serde_json::json!({ "message": message }),
         || {
-            send_public_message_from_sender(state, app, sender.clone(), message.clone(), Vec::new(), Vec::new())
+            send_public_message_from_sender(state, app, sender.clone(), message.clone(), Vec::new())
                 .map(|()| None)
                 .map_err(DispatchError::error)
         },
@@ -1275,6 +1385,7 @@ fn session_tile_by_id(
 fn pending_agent_tile_info(
     tile: &network::SessionTileInfo,
     agent_id: &str,
+    agent_type: crate::agent::AgentType,
     title: Option<&str>,
 ) -> network::SessionTileInfo {
     let mut next = tile.clone();
@@ -1286,12 +1397,12 @@ fn pending_agent_tile_info(
     next.message_api = network::message_api(network::NetworkTileKind::Agent);
     next.details = network::TileDetails::Agent(network::AgentTileDetails {
         agent_id: agent_id.to_string(),
-        agent_type: crate::agent::AgentType::Claude,
+        agent_type,
         agent_role: AgentRole::Worker,
         display_name: next.title.clone(),
         alive: false,
         chatter_subscribed: false,
-        topics: Vec::new(),
+        channels: Vec::new(),
         agent_pid: None,
     });
     next
@@ -1451,6 +1562,11 @@ fn session_network_tiles(
             _ if !pane.title.trim().is_empty() => pane.title.clone(),
             _ => pane.id.clone(),
         };
+        let browser_extension = if kind == network::NetworkTileKind::Browser {
+            crate::browser::browser_extension_info_for_pane(app, &record.pane_id)
+        } else {
+            None
+        };
         let details = match kind {
             network::NetworkTileKind::Agent | network::NetworkTileKind::RootAgent => {
                 let role = match kind {
@@ -1475,7 +1591,7 @@ fn session_network_tiles(
                         }),
                     alive: agent.map(|agent| agent.alive).unwrap_or(false),
                     chatter_subscribed: agent.map(|agent| agent.chatter_subscribed).unwrap_or(false),
-                    topics: agent.map(|agent| agent.topics.clone()).unwrap_or_default(),
+                    channels: agent.map(|agent| agent.channels.clone()).unwrap_or_default(),
                     agent_pid: agent.and_then(|agent| agent.agent_pid),
                 })
             }
@@ -1488,6 +1604,7 @@ fn session_network_tiles(
                 active: pane.active,
                 dead: pane.dead,
                 current_url: crate::browser::current_url_for_pane(app, &record.pane_id),
+                extension: browser_extension.clone(),
             }),
             network::NetworkTileKind::Shell => {
                 network::TileDetails::Shell(pane_tile_details(pane, window))
@@ -1503,7 +1620,7 @@ fn session_network_tiles(
                 width: DEFAULT_TILE_WIDTH,
                 height: DEFAULT_TILE_HEIGHT,
             });
-        tiles.push(network::SessionTileInfo {
+        let mut tile = network::SessionTileInfo {
             tile_id: record.tile_id.clone(),
             session_id: session_id.to_string(),
             kind,
@@ -1519,7 +1636,16 @@ fn session_network_tiles(
             responds_to: network::responds_to(kind),
             message_api: network::message_api(kind),
             details,
-        });
+        };
+        if kind == network::NetworkTileKind::Browser {
+            network::extend_browser_api_with_extension(
+                &mut tile.responds_to,
+                &mut tile.message_api,
+                network::TileRpcAccess::ReadWrite,
+                browser_extension.as_ref(),
+            );
+        }
+        tiles.push(tile);
     }
 
     for item in work_items {
@@ -1612,41 +1738,22 @@ fn create_session_tile(
         height,
         parent_window_id,
         browser_incognito,
+        browser_path,
     } = args;
 
     match tile_type {
         network::TileTypeFilter::Shell => {
-            let window_id = crate::commands::new_window_detached(app.clone(), Some(session_id.to_string()))
+            let created = crate::commands::new_shell_window_detached(app.clone(), Some(session_id.to_string()))
                 .map_err(DispatchError::error)?;
             if let Some(parent_window_id) = parent_window_id {
-                state.set_window_parent(&window_id, Some(parent_window_id));
+                state.set_window_parent(&created.window_id, Some(parent_window_id));
                 let _ = crate::tmux_state::emit_snapshot(app);
             }
-            let pane_id = crate::tmux_state::snapshot(state)
-                .ok()
-                .and_then(|snapshot| {
-                    snapshot
-                        .windows
-                        .iter()
-                        .find(|window| window.id == window_id)
-                        .and_then(|window| window.pane_ids.first().cloned())
-                })
-                .ok_or_else(|| DispatchError::error("created shell window is missing a pane".to_string()))?;
-            let tile = crate::commands::ensure_tmux_tile_record_for_backing(
-                state,
-                session_id,
-                &window_id,
-                &pane_id,
-                crate::tile_registry::TileRecordKind::Shell,
-                false,
-                None,
-            )
-            .map_err(DispatchError::from)?;
             if let Some(title) = title.as_ref().filter(|value| !value.trim().is_empty()) {
-                crate::commands::set_pane_title(app.clone(), pane_id.clone(), title.clone())
+                crate::commands::set_pane_title(app.clone(), created.pane_id.clone(), title.clone())
                     .map_err(DispatchError::from)?;
             }
-            let tile = session_tile_by_id(app, state, session_id, &tile.tile_id)
+            let tile = session_tile_by_id(app, state, session_id, &created.tile_id)
                 .map_err(DispatchError::from)?;
             apply_create_layout(app, state, &tile, x, y, width, height)
         }
@@ -1655,6 +1762,7 @@ fn create_session_tile(
                 app.clone(),
                 Some(session_id.to_string()),
                 browser_incognito.unwrap_or(false),
+                browser_path,
             )
                 .map_err(DispatchError::error)?;
             if let Some(parent_window_id) = parent_window_id {
@@ -1687,6 +1795,10 @@ fn create_session_tile(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| DispatchError::error("created agent payload is missing agent_id".to_string()))?
                 .to_string();
+            let agent_type = parse_agent_type(
+                created.get("agent_type").and_then(serde_json::Value::as_str),
+            )
+            .map_err(DispatchError::error)?;
             let window_id = created
                 .get("window_id")
                 .and_then(serde_json::Value::as_str)
@@ -1699,9 +1811,32 @@ fn create_session_tile(
             if let Some(title) = title.as_ref().filter(|value| !value.trim().is_empty()) {
                 crate::commands::set_pane_title(app.clone(), pane_id.clone(), title.clone())
                     .map_err(DispatchError::from)?;
+                if agent_type == crate::agent::AgentType::Fixture {
+                    let agent_pid = crate::tmux_state::pane_pid(&pane_id).ok().flatten();
+                    state
+                        .upsert_agent(
+                            agent_id.clone(),
+                            tile_id.clone(),
+                            pane_id.clone(),
+                            window_id.clone(),
+                            session_id.to_string(),
+                            title.clone(),
+                            agent_type,
+                            AgentRole::Worker,
+                            agent_pid,
+                        )
+                        .map_err(DispatchError::error)?;
+                    emit_agent_state(app, state);
+                }
             }
             let tile = session_tile_by_id(app, state, session_id, &tile_id)
-                .map(|tile| pending_agent_tile_info(&tile, &agent_id, title.as_deref()))
+                .map(|tile| {
+                    if agent_type == crate::agent::AgentType::Fixture {
+                        tile
+                    } else {
+                        pending_agent_tile_info(&tile, &agent_id, agent_type, title.as_deref())
+                    }
+                })
                 .map_err(DispatchError::from)?;
             apply_create_layout(app, state, &tile, x, y, width, height)
         }
@@ -1715,8 +1850,8 @@ fn create_session_tile(
                 &title,
             )
             .map_err(DispatchError::from)?;
-            if let Err(error) = state.touch_topics_in_session(&item.session_id, std::slice::from_ref(&item.topic)) {
-                log::warn!("Failed to register work topic {}: {error}", item.topic);
+            if let Err(error) = state.touch_channels_in_session(&item.session_id, std::slice::from_ref(&item.topic)) {
+                log::warn!("Failed to register work channel {}: {error}", item.topic);
             } else {
                 emit_agent_state(app, state);
             }
@@ -1771,6 +1906,8 @@ struct SessionTileCreateMessageArgs {
     parent_window_id: Option<String>,
     #[serde(default)]
     browser_incognito: Option<bool>,
+    #[serde(default)]
+    browser_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1852,7 +1989,13 @@ struct MessageDirectArgs {
 struct MessagePublicArgs {
     message: String,
     #[serde(default)]
-    topics: Vec<String>,
+    mentions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MessageChannelArgs {
+    channel_name: String,
+    message: String,
     #[serde(default)]
     mentions: Vec<String>,
 }
@@ -1863,9 +2006,9 @@ struct MessageTextArgs {
 }
 
 #[derive(Deserialize)]
-struct TopicSubscriptionArgs {
+struct ChannelSubscriptionArgs {
     agent_id: String,
-    topic: String,
+    channel_name: String,
 }
 
 #[derive(Deserialize)]
@@ -1879,6 +2022,13 @@ struct NetworkCallMessageArgs {
 #[derive(Deserialize)]
 struct BrowserDriveMessageArgs {
     action: String,
+    #[serde(default)]
+    args: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct BrowserExtensionCallMessageArgs {
+    method: String,
     #[serde(default)]
     args: Option<serde_json::Value>,
 }
@@ -1920,7 +2070,7 @@ fn ensure_browser_tile_receiver(receiver: &TileMessageReceiver, action: &str) ->
 }
 
 fn ensure_browser_drive_action_supported(action: &str) -> Result<(), DispatchError> {
-    if matches!(action, "click" | "type" | "dom_query" | "eval") {
+    if matches!(action, "click" | "select" | "type" | "dom_query" | "eval" | "screenshot") {
         return Ok(());
     }
     Err(DispatchError::error(format!(
@@ -1950,6 +2100,14 @@ fn network_visible_tile_for_sender(
     let access = network_access_for_tile(sender, component, tile);
     visible.responds_to = network::responds_to_for_access(tile.kind, access);
     visible.message_api = network::message_api_for_access(tile.kind, access);
+    if let network::TileDetails::Browser(details) = &tile.details {
+        network::extend_browser_api_with_extension(
+            &mut visible.responds_to,
+            &mut visible.message_api,
+            access,
+            details.extension.as_ref(),
+        );
+    }
     visible
 }
 
@@ -1972,13 +2130,21 @@ fn ensure_network_message_allowed(
     receiver: &TileMessageReceiver,
     message_name: &str,
 ) -> Result<(), DispatchError> {
-    if network::dispatchable_messages_for_access(
-        receiver.tile.kind,
-        network_access_for_tile(sender, component, &receiver.tile),
-    )
-    .iter()
-    .any(|candidate| *candidate == message_name)
+    let access = network_access_for_tile(sender, component, &receiver.tile);
+    let mut allowed = network::dispatchable_messages_for_access(receiver.tile.kind, access)
+        .iter()
+        .any(|candidate| *candidate == message_name);
+    if !allowed
+        && message_name == "extension_call"
+        && access == network::TileRpcAccess::ReadWrite
+        && matches!(
+            &receiver.tile.details,
+            network::TileDetails::Browser(details) if details.extension.is_some()
+        )
     {
+        allowed = true;
+    }
+    if allowed {
         return Ok(());
     }
     Err(message_not_supported(receiver.target_kind(), receiver.target_id(), message_name))
@@ -2012,6 +2178,12 @@ impl TileMessageReceiver {
     }
 
     fn responds_to_message(&self, message_name: &str) -> bool {
+        if message_name == "extension_call" {
+            return matches!(
+                &self.tile.details,
+                network::TileDetails::Browser(details) if details.extension.is_some()
+            );
+        }
         network::dispatchable_messages(self.tile.kind)
             .iter()
             .any(|candidate| *candidate == message_name)
@@ -2022,6 +2194,7 @@ impl TileMessageReceiver {
         app: &AppHandle,
         state: &AppState,
         message_name: &str,
+        sender: Option<&SenderContext>,
         args: Option<&serde_json::Value>,
     ) -> DispatchResult {
         if !self.responds_to_message(message_name) {
@@ -2132,6 +2305,39 @@ impl TileMessageReceiver {
                 .map_err(DispatchError::from)?;
                 Ok(Some(result))
             }
+            "extension_call" => {
+                ensure_browser_tile_receiver(self, "extension_call")?;
+                let sender = sender.ok_or_else(|| {
+                    DispatchError::error("extension_call requires a sender context".to_string())
+                })?;
+                let sender_tile_id = sender.sender_tile_id.clone().ok_or_else(|| {
+                    DispatchError::error("extension_call requires a sender tile id".to_string())
+                })?;
+                let extension_call: BrowserExtensionCallMessageArgs = deserialize_message_args(args, message_name)?;
+                let pane_id = self
+                    .tile
+                    .pane_id
+                    .as_deref()
+                    .ok_or_else(|| DispatchError::error(format!(
+                        "browser tile {} is missing a pane id",
+                        self.target_id()
+                    )))?;
+                let result = crate::browser::call_browser_extension(
+                    app,
+                    pane_id,
+                    &extension_call.method,
+                    &extension_call.args.unwrap_or_else(|| serde_json::json!({})),
+                    &crate::browser::BrowserExtensionCallerContext {
+                        sender_tile_id,
+                        sender_agent_id: sender.sender_agent_id.clone(),
+                        sender_agent_role: sender.sender_agent_role,
+                        target_tile_id: self.tile.tile_id.clone(),
+                        target_pane_id: pane_id.to_string(),
+                    },
+                )
+                .map_err(DispatchError::from)?;
+                Ok(Some(result))
+            }
             "stage_start" => {
                 let work_id = work_id_from_tile(&self.tile)?;
                 let agent_id = required_string_arg(args, "agent_id", message_name)?;
@@ -2210,20 +2416,22 @@ impl SessionMessageReceiver {
             "agent_register",
             "agent_unregister",
             "agent_ping_ack",
-            "message_topic_list",
+            "message_channel_list",
             "network_list",
             "network_get",
             "network_call",
             "tile_move",
             "tile_resize",
+            "tile_arrange_elk",
             "network_connect",
             "network_disconnect",
             "message_direct",
             "message_public",
+            "message_channel",
             "message_network",
             "message_root",
-            "message_topic_subscribe",
-            "message_topic_unsubscribe",
+            "message_channel_subscribe",
+            "message_channel_unsubscribe",
         ]
     }
 
@@ -2331,9 +2539,9 @@ impl SessionMessageReceiver {
                     Err(error) => Err(DispatchError::error(error)),
                 }
             }
-            "message_topic_list" => state
-                .list_topics_in_session(&self.session_id)
-                .map(|topics| Some(serde_json::json!(topics)))
+            "message_channel_list" => state
+                .list_channels_in_session(&self.session_id)
+                .map(|channels| Some(serde_json::json!(channels)))
                 .map_err(DispatchError::error),
             "network_list" => {
                 let args: TileListMessageArgs = deserialize_message_args(args, message_name)?;
@@ -2386,7 +2594,7 @@ impl SessionMessageReceiver {
                             &args.action,
                             Some(&sender),
                             call_args.clone(),
-                            || receiver.send(app, state, &args.action, Some(&call_args)),
+                            || receiver.send(app, state, &args.action, Some(&sender), Some(&call_args)),
                         )
                     },
                 )?;
@@ -2446,6 +2654,14 @@ impl SessionMessageReceiver {
                 )
                 .map_err(DispatchError::from)?;
                 Ok(Some(serde_json::json!(updated)))
+            }
+            "tile_arrange_elk" => {
+                emit_arrange_elk(app, &self.session_id);
+                Ok(Some(serde_json::json!({
+                    "session_id": self.session_id,
+                    "arrange_mode": "elk",
+                    "scheduled": true,
+                })))
             }
             "network_connect" => {
                 let args: NetworkConnectMessageArgs = deserialize_message_args(args, message_name)?;
@@ -2514,7 +2730,14 @@ impl SessionMessageReceiver {
             "message_public" => {
                 let sender = self.sender(message_name)?.clone();
                 let args: MessagePublicArgs = deserialize_message_args(args, message_name)?;
-                send_public_message_from_sender(state, app, sender, args.message, args.topics, args.mentions)
+                send_public_message_from_sender(state, app, sender, args.message, args.mentions)
+                    .map(|()| None)
+                    .map_err(DispatchError::error)
+            }
+            "message_channel" => {
+                let sender = self.sender(message_name)?.clone();
+                let args: MessageChannelArgs = deserialize_message_args(args, message_name)?;
+                send_channel_message_from_sender(state, app, sender, args.channel_name, args.message, args.mentions)
                     .map(|()| None)
                     .map_err(DispatchError::error)
             }
@@ -2544,7 +2767,7 @@ impl SessionMessageReceiver {
                         to_agent_id: Some(recipient.agent_id.clone()),
                         to_display_name: Some(recipient.display_name.clone()),
                         message: args.message.clone(),
-                        topics: Vec::new(),
+                        channels: Vec::new(),
                         mentions: Vec::new(),
                         replay: false,
                         ping_id: None,
@@ -2572,9 +2795,9 @@ impl SessionMessageReceiver {
                     .map(|()| None)
                     .map_err(DispatchError::error)
             }
-            "message_topic_subscribe" => {
-                let args: TopicSubscriptionArgs = deserialize_message_args(args, message_name)?;
-                match state.topic_subscribe(&args.agent_id, &args.topic) {
+            "message_channel_subscribe" => {
+                let args: ChannelSubscriptionArgs = deserialize_message_args(args, message_name)?;
+                match state.channel_subscribe(&args.agent_id, &args.channel_name) {
                     Ok(info) => {
                         emit_agent_state(app, state);
                         Ok(Some(serde_json::json!(info)))
@@ -2582,9 +2805,9 @@ impl SessionMessageReceiver {
                     Err(error) => Err(DispatchError::error(error)),
                 }
             }
-            "message_topic_unsubscribe" => {
-                let args: TopicSubscriptionArgs = deserialize_message_args(args, message_name)?;
-                match state.topic_unsubscribe(&args.agent_id, &args.topic) {
+            "message_channel_unsubscribe" => {
+                let args: ChannelSubscriptionArgs = deserialize_message_args(args, message_name)?;
+                match state.channel_unsubscribe(&args.agent_id, &args.channel_name) {
                     Ok(info) => {
                         emit_agent_state(app, state);
                         Ok(Some(serde_json::json!(info)))
@@ -2784,7 +3007,7 @@ fn dispatch_tile_message(
                 message_name,
                 sender,
                 args.clone(),
-                || receiver.send(app, state, message_name, Some(&args)),
+                || receiver.send(app, state, message_name, sender, Some(&args)),
             )
         },
     )
@@ -3077,7 +3300,7 @@ fn forward_test_driver_request(
 }
 
 fn handle_test_dom_query(js: String, app: &AppHandle) -> Result<serde_json::Value, String> {
-    if let Some(webview) = app.webview_windows().values().next() {
+    if let Some(webview) = app.get_webview("main") {
         let result_file = runtime::dom_result_path().to_string();
         let _ = std::fs::remove_file(&result_file);
 
@@ -3114,7 +3337,7 @@ fn handle_test_dom_query(js: String, app: &AppHandle) -> Result<serde_json::Valu
 }
 
 fn handle_test_dom_keys(keys: String, app: &AppHandle) -> Result<serde_json::Value, String> {
-    if let Some(webview) = app.webview_windows().values().next() {
+    if let Some(webview) = app.get_webview("main") {
         let js = format!(
             r#"(function() {{
                 const keys = {keys_json};
@@ -3243,7 +3466,7 @@ async fn agent_ping_loop(state: AppState, app: AppHandle) {
                 to_agent_id: Some(agent_id.clone()),
                 to_display_name: None,
                 message: "PING".to_string(),
-                topics: Vec::new(),
+                channels: Vec::new(),
                 mentions: Vec::new(),
                 replay: false,
                 ping_id: Some(ping_id),
@@ -3321,7 +3544,7 @@ async fn handle_agent_event_subscription(
         },
     );
     let replay_entries = state
-        .public_chatter_since_in_session(&subscription.info.session_id, now_ms() - AGENT_REPLAY_WINDOW_MS)
+        .replayable_chatter_since_for_agent(&agent_id, now_ms() - AGENT_REPLAY_WINDOW_MS)
         .unwrap_or_default();
 
     let response = SocketResponse::success(Some(serde_json::json!({
@@ -3360,7 +3583,7 @@ async fn handle_agent_event_subscription(
                 AgentRole::Worker => HERD_WORKER_WELCOME_MESSAGE,
             }
             .to_string(),
-            topics: Vec::new(),
+            channels: Vec::new(),
             mentions: Vec::new(),
             replay: false,
             ping_id: None,
@@ -3405,9 +3628,7 @@ async fn handle_agent_event_subscription(
 
 pub async fn start(state: AppState, app_handle: AppHandle) {
     let path = Path::new(runtime::socket_path());
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
+    remove_stale_socket_path(path);
 
     let listener = match UnixListener::bind(runtime::socket_path()) {
         Ok(l) => l,
@@ -3416,6 +3637,7 @@ pub async fn start(state: AppState, app_handle: AppHandle) {
             return;
         }
     };
+    remember_socket_binding(path);
 
     let logger: SharedLogger = Arc::new(Mutex::new(SocketLogger::open()));
     log::info!("Socket server listening on {}", runtime::socket_path());
@@ -3515,6 +3737,7 @@ fn handle_command(
             parent_session_id,
             parent_tile_id,
             browser_incognito,
+            browser_path,
             sender_agent_id,
             sender_tile_id,
         } => {
@@ -3550,6 +3773,7 @@ fn handle_command(
                 "height": height,
                 "parent_window_id": parent_window_id,
                 "browser_incognito": browser_incognito,
+                "browser_path": browser_path,
             });
             let receiver = SessionMessageReceiver::new(target_session_id, sender.clone());
             dispatch_session_message(
@@ -3838,6 +4062,7 @@ fn handle_command(
                             app,
                             state,
                             "drive",
+                            Some(&sender),
                             Some(&serde_json::json!({ "action": action.clone(), "args": drive_args.clone() })),
                         ),
                     )?;
@@ -3909,8 +4134,8 @@ fn handle_command(
             )
         }
 
-        SocketCommand::MessageTopicList { sender_agent_id, sender_tile_id } => {
-            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "message_topic_list") {
+        SocketCommand::MessageChannelList { sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "message_channel_list") {
                 Ok(sender) => sender,
                 Err(error) => return SocketResponse::error(error),
             };
@@ -3920,8 +4145,8 @@ fn handle_command(
                 app,
                 channel,
                 &receiver,
-                "message_topic_list",
-                "message_topic_list",
+                "message_channel_list",
+                "message_channel_list",
                 Some(&sender),
                 serde_json::json!({}),
             )
@@ -4092,7 +4317,7 @@ fn handle_command(
                         &action,
                         Some(&sender),
                         call_args.clone(),
-                        || receiver.send(app, state, &action, Some(&call_args)),
+                        || receiver.send(app, state, &action, Some(&sender), Some(&call_args)),
                     )?;
                     Ok(Some(serde_json::json!({
                         "tile_id": receiver.target_id(),
@@ -4148,6 +4373,27 @@ fn handle_command(
                 "tile_resize",
                 Some(&sender),
                 serde_json::json!({ "tile_id": tile_id, "width": width, "height": height }),
+            )
+        }
+
+        SocketCommand::TileArrangeElk {
+            sender_agent_id,
+            sender_tile_id,
+        } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "tile_arrange_elk") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let receiver = SessionMessageReceiver::new(sender.session_id.clone(), Some(sender.clone()));
+            dispatch_session_message(
+                state,
+                app,
+                channel,
+                &receiver,
+                "tile_arrange_elk",
+                "tile_arrange_elk",
+                Some(&sender),
+                serde_json::json!({}),
             )
         }
 
@@ -4227,7 +4473,6 @@ fn handle_command(
 
         SocketCommand::MessagePublic {
             message,
-            topics,
             mentions,
             sender_agent_id,
             sender_tile_id,
@@ -4236,7 +4481,7 @@ fn handle_command(
                 Ok(sender) => sender,
                 Err(error) => return SocketResponse::error(error),
             };
-            let args = serde_json::json!({ "message": message, "topics": topics, "mentions": mentions });
+            let args = serde_json::json!({ "message": message, "mentions": mentions });
             let receiver = SessionMessageReceiver::new(sender.session_id.clone(), Some(sender.clone()));
             dispatch_session_message(
                 state,
@@ -4245,6 +4490,35 @@ fn handle_command(
                 &receiver,
                 "message_public",
                 "message_public",
+                Some(&sender),
+                args,
+            )
+        }
+
+        SocketCommand::MessageChannel {
+            channel_name,
+            message,
+            mentions,
+            sender_agent_id,
+            sender_tile_id,
+        } => {
+            let sender = match resolve_sender_context(state, sender_agent_id, sender_tile_id) {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let args = serde_json::json!({
+                "channel_name": channel_name,
+                "message": message,
+                "mentions": mentions,
+            });
+            let receiver = SessionMessageReceiver::new(sender.session_id.clone(), Some(sender.clone()));
+            dispatch_session_message(
+                state,
+                app,
+                channel,
+                &receiver,
+                "message_channel",
+                "message_channel",
                 Some(&sender),
                 args,
             )
@@ -4296,9 +4570,18 @@ fn handle_command(
             )
         }
 
-        SocketCommand::MessageTopicSubscribe { topic, agent_id } => {
-            let Some(topic) = crate::agent::normalize_topic(&topic) else {
-                return SocketResponse::error("invalid topic".into());
+        SocketCommand::MessageChannelSubscribe {
+            channel_name,
+            agent_id,
+            sender_agent_id,
+            sender_tile_id,
+        } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "message_channel_subscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(channel_name) = crate::agent::normalize_channel(&channel_name) else {
+                return SocketResponse::error("invalid channel".into());
             };
             let Some(agent_id) = agent_id else {
                 return SocketResponse::error("agent_id is required".into());
@@ -4307,22 +4590,31 @@ fn handle_command(
                 Ok(info) => info.session_id,
                 Err(error) => return SocketResponse::error(error),
             };
-            let receiver = SessionMessageReceiver::new(session_id, None);
+            let receiver = SessionMessageReceiver::new(session_id, Some(sender.clone()));
             dispatch_session_message(
                 state,
                 app,
                 channel,
                 &receiver,
-                "message_topic_subscribe",
-                "message_topic_subscribe",
-                None,
-                serde_json::json!({ "agent_id": agent_id, "topic": topic }),
+                "message_channel_subscribe",
+                "message_channel_subscribe",
+                Some(&sender),
+                serde_json::json!({ "agent_id": agent_id, "channel_name": channel_name }),
             )
         }
 
-        SocketCommand::MessageTopicUnsubscribe { topic, agent_id } => {
-            let Some(topic) = crate::agent::normalize_topic(&topic) else {
-                return SocketResponse::error("invalid topic".into());
+        SocketCommand::MessageChannelUnsubscribe {
+            channel_name,
+            agent_id,
+            sender_agent_id,
+            sender_tile_id,
+        } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "message_channel_unsubscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(channel_name) = crate::agent::normalize_channel(&channel_name) else {
+                return SocketResponse::error("invalid channel".into());
             };
             let Some(agent_id) = agent_id else {
                 return SocketResponse::error("agent_id is required".into());
@@ -4331,16 +4623,16 @@ fn handle_command(
                 Ok(info) => info.session_id,
                 Err(error) => return SocketResponse::error(error),
             };
-            let receiver = SessionMessageReceiver::new(session_id, None);
+            let receiver = SessionMessageReceiver::new(session_id, Some(sender.clone()));
             dispatch_session_message(
                 state,
                 app,
                 channel,
                 &receiver,
-                "message_topic_unsubscribe",
-                "message_topic_unsubscribe",
-                None,
-                serde_json::json!({ "agent_id": agent_id, "topic": topic }),
+                "message_channel_unsubscribe",
+                "message_channel_unsubscribe",
+                Some(&sender),
+                serde_json::json!({ "agent_id": agent_id, "channel_name": channel_name }),
             )
         }
 
@@ -4523,15 +4815,27 @@ fn handle_command(
 }
 
 pub fn cleanup() {
-    let path = Path::new(runtime::socket_path());
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
+    cleanup_owned_socket_path(Path::new(runtime::socket_path()));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HERD_ROOT_WELCOME_MESSAGE, HERD_WORKER_WELCOME_MESSAGE};
+    use super::{HERD_ROOT_WELCOME_MESSAGE, HERD_WORKER_WELCOME_MESSAGE, SessionMessageReceiver};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("herd-{name}-{unique}"))
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write test file");
+    }
 
     #[test]
     fn welcome_messages_reference_role_specific_skills() {
@@ -4542,5 +4846,40 @@ mod tests {
         assert!(HERD_WORKER_WELCOME_MESSAGE.contains("/herd-worker"));
         assert!(!HERD_WORKER_WELCOME_MESSAGE.contains("/herd-root"));
         assert!(HERD_WORKER_WELCOME_MESSAGE.contains("Root manages the full session-wide MCP surface"));
+    }
+
+    #[test]
+    fn cleanup_removes_recorded_socket_path() {
+        let path = test_path("socket-owned");
+        write_file(&path, "owned");
+
+        super::remember_socket_binding(&path);
+        super::cleanup_owned_socket_path(&path);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_removes_only_owned_socket_path() {
+        let path = test_path("socket-replaced");
+        let replacement_path = test_path("socket-replacement-source");
+
+        write_file(&path, "original");
+        super::remember_socket_binding(&path);
+
+        fs::remove_file(&path).expect("remove original file");
+        write_file(&replacement_path, "replacement");
+        fs::rename(&replacement_path, &path).expect("replace socket path");
+
+        super::cleanup_owned_socket_path(&path);
+
+        assert!(path.exists(), "cleanup removed the replacement socket path");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_message_surface_includes_tile_arrange_elk() {
+        let receiver = SessionMessageReceiver::new("$1", None);
+        assert!(receiver.responds_to().contains(&"tile_arrange_elk"));
     }
 }

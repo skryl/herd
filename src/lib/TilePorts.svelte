@@ -1,10 +1,33 @@
 <script lang="ts">
-  import { activeNetworkDrag, appState, beginNetworkPortDrag, completeNetworkPortDrag, portModeForTile } from './stores/appState';
+  import {
+    activeNetworkDrag,
+    appState,
+    beginNetworkPortDrag,
+    clearCurrentNetworkDragPortSnap,
+    completeNetworkPortDrag,
+    portCanAcceptCurrentDrag,
+    portModeForTile,
+    snapCurrentNetworkDragToPort,
+  } from './stores/appState';
+  import { tilePortOffsetRatio, tilePortSide, visibleTilePortSlotsBySide, visibleTilePorts } from './tilePorts';
   import type { TilePort } from './types';
 
   let { tileId }: { tileId: string } = $props();
 
-  const ports: TilePort[] = ['left', 'top', 'right', 'bottom'];
+  let occupiedPorts = $derived(
+    $appState.network.connections.flatMap((connection) => {
+      const ports: TilePort[] = [];
+      if (connection.from_tile_id === tileId) {
+        ports.push(connection.from_port);
+      }
+      if (connection.to_tile_id === tileId) {
+        ports.push(connection.to_port);
+      }
+      return ports;
+    }),
+  );
+  let visibleSlotsBySide = $derived(visibleTilePortSlotsBySide($appState.ui.tilePortCount, occupiedPorts));
+  let ports = $derived(visibleTilePorts($appState.ui.tilePortCount, occupiedPorts));
 
   function occupied(port: TilePort) {
     if ($activeNetworkDrag?.startedOccupied && $activeNetworkDrag.grabbedTileId === tileId && $activeNetworkDrag.grabbedPort === port) {
@@ -25,6 +48,23 @@
     return $activeNetworkDrag?.startedOccupied && $activeNetworkDrag?.grabbedTileId === tileId && $activeNetworkDrag?.grabbedPort === port;
   }
 
+  function connectable(port: TilePort) {
+    return portCanAcceptCurrentDrag(tileId, port);
+  }
+
+  function portStyle(port: TilePort) {
+    const side = tilePortSide(port);
+    const ratio = tilePortOffsetRatio(port, visibleSlotsBySide[side]) * 100;
+    switch (side) {
+      case 'left':
+      case 'right':
+        return `top: calc(${ratio}% - 13px);`;
+      case 'top':
+      case 'bottom':
+        return `left: calc(${ratio}% - 13px);`;
+    }
+  }
+
   function handleMouseDown(port: TilePort, event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -42,7 +82,31 @@
   function handleMouseUp(port: TilePort, event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
+    if ($activeNetworkDrag && !connectable(port)) {
+      void completeNetworkPortDrag();
+      return;
+    }
     void completeNetworkPortDrag(tileId, port);
+  }
+
+  function handleMouseEnter(port: TilePort, event: MouseEvent) {
+    if (!$activeNetworkDrag) {
+      return;
+    }
+    event.stopPropagation();
+    if (connectable(port)) {
+      snapCurrentNetworkDragToPort(tileId, port);
+      return;
+    }
+    clearCurrentNetworkDragPortSnap(tileId, port);
+  }
+
+  function handleMouseLeave(port: TilePort, event: MouseEvent) {
+    if (!$activeNetworkDrag) {
+      return;
+    }
+    event.stopPropagation();
+    clearCurrentNetworkDragPortSnap(tileId, port);
   }
 </script>
 
@@ -51,10 +115,14 @@
     role="button"
     tabindex="-1"
     aria-label={`${tileId} ${port} port`}
-    class={`tile-port port-${port} ${portModeForTile(tileId, port) === 'read_write' ? 'port-read-write' : 'port-read'} ${occupied(port) ? 'port-occupied' : 'port-open'} ${snapped(port) ? 'port-snapped' : ''} ${detached(port) ? 'port-detached' : ''}`}
+    class={`tile-port port-${tilePortSide(port)} ${portModeForTile(tileId, port) === 'read_write' ? 'port-read-write' : 'port-read'} ${occupied(port) ? 'port-occupied' : connectable(port) ? 'port-open' : 'port-unavailable'} ${snapped(port) ? 'port-snapped' : ''} ${detached(port) ? 'port-detached' : ''}`}
     data-port-tile={tileId}
     data-port={port}
+    style={portStyle(port)}
     onmousedown={(event) => handleMouseDown(port, event)}
+    onmouseenter={(event) => handleMouseEnter(port, event)}
+    onmousemove={(event) => handleMouseEnter(port, event)}
+    onmouseleave={(event) => handleMouseLeave(port, event)}
     onmouseup={(event) => handleMouseUp(port, event)}
   ></div>
 {/each}
@@ -191,5 +259,14 @@
 
   .port-occupied::after {
     opacity: 0.92;
+  }
+
+  .port-unavailable {
+    opacity: 0.34;
+    filter: saturate(0.58);
+  }
+
+  .port-unavailable::after {
+    opacity: 0.16;
   }
 </style>

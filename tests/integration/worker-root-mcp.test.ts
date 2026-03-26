@@ -15,13 +15,13 @@ interface SocketResponse<T = unknown> {
 }
 
 interface AgentChannelEvent {
-  kind: 'direct' | 'public' | 'network' | 'root' | 'system' | 'ping';
+  kind: 'direct' | 'public' | 'channel' | 'network' | 'root' | 'system' | 'ping';
   from_agent_id?: string | null;
   from_display_name: string;
   to_agent_id?: string | null;
   to_display_name?: string | null;
   message: string;
-  topics: string[];
+  channels: string[];
   mentions: string[];
   replay: boolean;
   ping_id?: string | null;
@@ -36,6 +36,127 @@ interface AgentStreamEnvelope {
 interface AgentEventSubscription {
   nextEvent: (timeoutMs?: number) => Promise<AgentChannelEvent>;
   close: () => void;
+}
+
+interface BrowserScreenshotResult {
+  mimeType: string;
+  dataBase64: string;
+}
+
+interface BrowserTextScreenshotResult {
+  format: 'braille' | 'ascii' | 'ansi' | 'text';
+  text: string;
+  columns: number;
+  rows: number;
+}
+
+const GAMEPAD_BUTTON_NAMES = ['up', 'down', 'left', 'right', 'a', 'b', 'start', 'select'] as const;
+
+function expectPngScreenshot(result: BrowserScreenshotResult) {
+  expect(result.mimeType).toBe('image/png');
+  expect(result.dataBase64.length).toBeGreaterThan(100);
+  const bytes = Buffer.from(result.dataBase64, 'base64');
+  expect(bytes.length).toBeGreaterThan(100);
+  expect(Array.from(bytes.subarray(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+}
+
+function expectBrailleScreenshot(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('braille');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).toMatch(/[\u2801-\u28ff]/u);
+}
+
+function expectBrailleScreenshotShape(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('braille');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).toMatch(/[\u2800-\u28ff]/u);
+}
+
+function expectAsciiScreenshot(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('ascii');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).not.toContain('\u001b[');
+  expect(result.text).not.toMatch(/[\u2800-\u28ff]/u);
+  expect(result.text.replace(/\s/g, '').length).toBeGreaterThan(0);
+}
+
+function expectAsciiScreenshotShape(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('ascii');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).not.toContain('\u001b[');
+  expect(result.text).not.toMatch(/[\u2800-\u28ff]/u);
+}
+
+function expectAnsiScreenshot(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('ansi');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).toMatch(/\u001b\[[0-9;]*m/);
+}
+
+function expectTextScreenshot(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('text');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).not.toContain('\u001b[');
+  expect(result.text).not.toMatch(/[\u2800-\u28ff]/u);
+  expect(result.text).toContain('SCORE 1200');
+  expect(result.text).toContain('LIVES x3');
+  expect(result.text).toContain('PRESS START');
+
+  const lines = result.text.split('\n');
+  const scoreLine = lines.findIndex((line) => line.includes('SCORE 1200'));
+  const livesLine = lines.findIndex((line) => line.includes('LIVES x3'));
+  const promptLine = lines.findIndex((line) => line.includes('PRESS START'));
+  expect(scoreLine).toBeGreaterThanOrEqual(0);
+  expect(livesLine).toBeGreaterThanOrEqual(0);
+  expect(promptLine).toBeGreaterThan(scoreLine + 2);
+  expect(Math.abs(scoreLine - livesLine)).toBeLessThanOrEqual(1);
+
+  const scoreColumn = lines[scoreLine]!.indexOf('SCORE 1200');
+  const livesColumn = lines[livesLine]!.indexOf('LIVES x3');
+  expect(scoreColumn).toBeGreaterThanOrEqual(0);
+  expect(livesColumn - scoreColumn).toBeGreaterThan(20);
+}
+
+function expectImageDerivedTextScreenshot(result: BrowserTextScreenshotResult, columns: number) {
+  expect(result.format).toBe('text');
+  expect(result.columns).toBe(columns);
+  expect(result.rows).toBeGreaterThan(0);
+  expect(result.text.length).toBeGreaterThan(10);
+  expect(result.text).not.toContain('\u001b[');
+  expect(result.text).not.toMatch(/[\u2800-\u28ff]/u);
+}
+
+function tinyNesRomBase64() {
+  const header = Uint8Array.from([
+    0x4e, 0x45, 0x53, 0x1a,
+    0x01,
+    0x01,
+    0x00,
+    0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]);
+  const prg = new Uint8Array(16 * 1024).fill(0xea);
+  prg.set([0x78, 0xd8, 0x4c, 0x00, 0x80], 0);
+  prg[0x3ffa] = 0x00;
+  prg[0x3ffb] = 0x80;
+  prg[0x3ffc] = 0x00;
+  prg[0x3ffd] = 0x80;
+  prg[0x3ffe] = 0x00;
+  prg[0x3fff] = 0x80;
+  const chr = new Uint8Array(8 * 1024);
+  return Buffer.from(Uint8Array.from([...header, ...prg, ...chr])).toString('base64');
 }
 
 async function collectAgentEvents(
@@ -584,7 +705,7 @@ describe.sequential('worker/root mcp and permissions', () => {
               type: 'string',
               required: true,
               description: 'Browser drive subcommand to execute.',
-              enum_values: ['click', 'type', 'dom_query', 'eval'],
+              enum_values: ['click', 'select', 'type', 'dom_query', 'eval', 'screenshot'],
             },
             {
               name: 'args',
@@ -629,6 +750,23 @@ describe.sequential('worker/root mcp and permissions', () => {
               ],
             }),
             expect.objectContaining({
+              name: 'select',
+              args: [
+                {
+                  name: 'selector',
+                  type: 'string',
+                  required: true,
+                  description: 'CSS selector for the target select element.',
+                },
+                {
+                  name: 'value',
+                  type: 'string',
+                  required: true,
+                  description: 'Option value to select.',
+                },
+              ],
+            }),
+            expect.objectContaining({
               name: 'dom_query',
               args: [
                 {
@@ -650,10 +788,33 @@ describe.sequential('worker/root mcp and permissions', () => {
                 },
               ],
             }),
+            expect.objectContaining({
+              name: 'screenshot',
+              args: [
+                {
+                  name: 'format',
+                  type: 'string',
+                  required: false,
+                  description: 'Screenshot output format. Defaults to image.',
+                  enum_values: ['image', 'braille', 'ascii', 'ansi', 'text'],
+                },
+                {
+                  name: 'columns',
+                  type: 'number',
+                  required: false,
+                  description: 'Requested text width in characters when format is braille, ascii, ansi, or text.',
+                },
+              ],
+            }),
           ]),
         }),
       ]),
     );
+
+    const rootBrowserTile = await client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id);
+    expect(rootBrowserTile.tile_id).toBe(browserPaneId);
+    expect(rootBrowserTile.responds_to).toEqual(browserTile.responds_to);
+    expect(rootBrowserTile.message_api).toEqual(browserTile.message_api);
 
     const observerVisibleNetwork = await client.listNetwork(observer.paneId, observer.agentId);
     expect(observerVisibleNetwork.tiles.find((tile) => tile.tile_id === browserPaneId)?.responds_to).toEqual([
@@ -840,6 +1001,58 @@ describe.sequential('worker/root mcp and permissions', () => {
     ).resolves.toBeNull();
 
     expect(projection.active_tab_id).toBeTruthy();
+  });
+
+  it('animates network wires after a network_call', async () => {
+    const projection = await createIsolatedTab(client, 'worker-network-signal');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in worker-network-signal tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const shellPaneId = await spawnWorkerShellInActiveTab(client);
+
+    await client.networkConnect(worker.paneId, 'left', shellPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+
+    await waitFor(
+      'network wire is visible on canvas',
+      () => client.testDomQuery<number>('return document.querySelectorAll(".network-line").length;'),
+      (count) => count > 0,
+      30_000,
+      100,
+    );
+
+    await client.networkCall(shellPaneId, 'output_read', {}, worker.paneId, worker.agentId);
+
+    const signalSnapshot = await waitFor(
+      'network signal pulse appears on the wire',
+      () =>
+        client.testDomQuery<{
+          lineCount: number;
+          dotCount: number;
+          fromTileId: string | null;
+          toTileId: string | null;
+        }>(`
+          const line = document.querySelector('.network-signal-line');
+          return {
+            lineCount: document.querySelectorAll('.network-signal-line').length,
+            dotCount: document.querySelectorAll('.network-signal-dot').length,
+            fromTileId: line?.getAttribute('data-from-tile-id') ?? null,
+            toTileId: line?.getAttribute('data-to-tile-id') ?? null,
+          };
+        `),
+      (snapshot) => snapshot.lineCount > 0 && snapshot.dotCount > 0,
+      30_000,
+      75,
+    );
+
+    expect(signalSnapshot.fromTileId).toBe(worker.paneId);
+    expect(signalSnapshot.toTileId).toBe(shellPaneId);
   });
 
   it('allows shared shell access from multiple workers on one local network', async () => {
@@ -1164,9 +1377,9 @@ describe.sequential('worker/root mcp and permissions', () => {
     await client.agentRegister(registeredAgentId, registeredPaneId, 'Session Route');
     await client.agentPingAck(registeredAgentId);
 
-    await client.messageTopicSubscribe('#session-route', worker.agentId);
-    const topics = await client.messageTopicList(rootAgent.tile_id);
-    expect(topics.some((topic) => topic.name === '#session-route')).toBe(true);
+    await client.messageChannelSubscribe('#session-route', worker.agentId, rootAgent.tile_id, rootAgent.agent_id);
+    const channels = await client.messageChannelList(rootAgent.tile_id, rootAgent.agent_id);
+    expect(channels.some((channel) => channel.name === '#session-route')).toBe(true);
 
     await client.tileList(rootAgent.tile_id, rootAgent.agent_id);
     await client.networkConnect(worker.paneId, 'left', rootAgent.tile_id, 'left', rootAgent.tile_id, rootAgent.agent_id);
@@ -1182,9 +1395,9 @@ describe.sequential('worker/root mcp and permissions', () => {
       sender_tile_id: worker.paneId,
     });
     await client.sendCommand({
-      command: 'message_public',
+      command: 'message_channel',
+      channel_name: '#session-route',
       message: 'session receiver public',
-      topics: ['#session-route'],
       mentions: [],
       sender_agent_id: worker.agentId,
       sender_tile_id: worker.paneId,
@@ -1203,7 +1416,7 @@ describe.sequential('worker/root mcp and permissions', () => {
     });
 
     await client.networkDisconnect(worker.paneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
-    await client.messageTopicUnsubscribe('#session-route', worker.agentId);
+    await client.messageChannelUnsubscribe('#session-route', worker.agentId, rootAgent.tile_id, rootAgent.agent_id);
     await client.sendCommand({
       command: 'agent_unregister',
       agent_id: registeredAgentId,
@@ -1216,17 +1429,17 @@ describe.sequential('worker/root mcp and permissions', () => {
       'tile_destroy',
       'agent_register',
       'agent_ping_ack',
-      'message_topic_list',
+      'message_channel_list',
       'network_list',
       'tile_list',
       'network_connect',
       'network_disconnect',
       'message_direct',
-      'message_public',
+      'message_channel',
       'message_network',
       'message_root',
-      'message_topic_subscribe',
-      'message_topic_unsubscribe',
+      'message_channel_subscribe',
+      'message_channel_unsubscribe',
       'agent_unregister',
     ];
 
@@ -1480,6 +1693,805 @@ return document.body.dataset.driven;
       worker.agentId,
     );
     expect(evalResult.result).toBe('yes');
+
+    const screenshot = await client.browserDrive<BrowserScreenshotResult>(
+      browserPaneId,
+      'screenshot',
+      {},
+      worker.paneId,
+      worker.agentId,
+    );
+    expectPngScreenshot(screenshot.result);
+
+    const brailleScreenshot = await client.browserDrive<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'screenshot',
+      { format: 'braille', columns: 24 },
+      worker.paneId,
+      worker.agentId,
+    );
+    expectBrailleScreenshot(brailleScreenshot.result, 24);
+
+    const asciiScreenshot = await client.browserDrive<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'screenshot',
+      { format: 'ascii', columns: 24 },
+      worker.paneId,
+      worker.agentId,
+    );
+    expectAsciiScreenshot(asciiScreenshot.result, 24);
+
+    const ansiScreenshot = await client.browserDrive<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'screenshot',
+      { format: 'ansi', columns: 24 },
+      worker.paneId,
+      worker.agentId,
+    );
+    expectAnsiScreenshot(ansiScreenshot.result, 24);
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserPaneId,
+      path: 'tests/fixtures/browser-text-layout.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+    await waitFor(
+      'browser text layout fixture loaded',
+      () => client.browserDrive<string>(
+        browserPaneId,
+        'dom_query',
+        { js: 'document.title' },
+        worker.paneId,
+        worker.agentId,
+      ),
+      (response) => response.result === 'browser-text-layout',
+      30_000,
+      150,
+    );
+
+    const textScreenshot = await client.browserDrive<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'screenshot',
+      { format: 'text', columns: 80 },
+      worker.paneId,
+      worker.agentId,
+    );
+    expectTextScreenshot(textScreenshot.result, 80);
+  });
+
+  it('exposes browser extension metadata and enforces sender-bound extension calls', async () => {
+    const projection = await createIsolatedTab(client, 'browser-extension-holdem');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-extension-holdem tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const northWorker = await spawnWorkerAgentInActiveTab(client);
+    const eastWorker = await spawnWorkerAgentInActiveTab(client);
+    const browserPaneId = await spawnBrowserInActiveTab(client);
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserPaneId,
+      path: 'extensions/browser/texas-holdem/index.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    await waitFor(
+      'texas holdem page loads',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => (tile.details as any)?.current_url?.includes('extensions/browser/texas-holdem/index.html') === true,
+      30_000,
+      150,
+    );
+
+    await client.networkConnect(northWorker.paneId, 'left', browserPaneId, 'left', rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkConnect(eastWorker.paneId, 'right', browserPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+
+    const rootBrowserTile = await waitFor(
+      'root sees loaded browser extension metadata',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => Boolean((tile.details as any)?.extension),
+      30_000,
+      150,
+    );
+    expect(rootBrowserTile.responds_to).toContain('extension_call');
+    expect(rootBrowserTile.message_api.find((message) => message.name === 'call')?.args?.[0]?.enum_values).toContain('extension_call');
+    expect(rootBrowserTile.message_api.find((message) => message.name === 'extension_call')?.subcommands?.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        'state',
+        'claim_seat',
+        'register_commentator',
+        'start_match',
+        'act',
+        'reveal_private',
+        'reveal_all',
+      ]),
+    );
+    expect((rootBrowserTile.details as any).extension).toEqual(
+      expect.objectContaining({
+        extension_id: 'texas-holdem',
+        label: "Texas Hold'em",
+        source_path: 'extensions/browser/texas-holdem/index.html',
+      }),
+    );
+
+    const workerBrowserTile = await waitFor(
+      'worker sees extension_call on connected browser',
+      () => client.networkGet(browserPaneId, northWorker.paneId, northWorker.agentId),
+      (tile) => tile.responds_to.includes('extension_call'),
+      30_000,
+      150,
+    );
+    expect(workerBrowserTile.responds_to).toContain('extension_call');
+
+    const commentator = await client.tileCall<{ state: { commentator: { name: string } | null } }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'register_commentator',
+        args: { name: 'Booth' },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(commentator.result.state.commentator?.name).toBe('Booth');
+
+    await client.browserExtensionCall(browserPaneId, 'claim_seat', { seat: 'north', name: 'North' }, northWorker.paneId, northWorker.agentId);
+    await client.browserExtensionCall(browserPaneId, 'claim_seat', { seat: 'east', name: 'East' }, eastWorker.paneId, eastWorker.agentId);
+
+    await expect(
+      client.browserExtensionCall(browserPaneId, 'register_commentator', {}, northWorker.paneId, northWorker.agentId),
+    ).rejects.toThrow(/players cannot register/i);
+    await expect(
+      client.tileCall(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'reveal_private',
+          args: {},
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+    ).rejects.toThrow(/does not own a seat/i);
+
+    const northReveal = await client.browserExtensionCall<{ seat: string; cards: string[] }>(
+      browserPaneId,
+      'reveal_private',
+      {},
+      northWorker.paneId,
+      northWorker.agentId,
+    );
+    const eastReveal = await client.browserExtensionCall<{ seat: string; cards: string[] }>(
+      browserPaneId,
+      'reveal_private',
+      {},
+      eastWorker.paneId,
+      eastWorker.agentId,
+    );
+    const allReveal = await client.tileCall<{ hands: Record<string, string[]> }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'reveal_all',
+        args: {},
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+
+    expect(northReveal.result.seat).toBe('north');
+    expect(northReveal.result.cards).toEqual([]);
+    expect(eastReveal.result.seat).toBe('east');
+    expect(eastReveal.result.cards).toEqual([]);
+    expect(allReveal.result.hands).toEqual({
+      north: [],
+      east: [],
+    });
+  });
+
+  it('exposes game boy extension metadata and bundled ROM controls', async () => {
+    const projection = await createIsolatedTab(client, 'browser-extension-game-boy');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-extension-game-boy tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const browserPaneId = await spawnBrowserInActiveTab(client);
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserPaneId,
+      path: 'extensions/browser/game-boy/index.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    await waitFor(
+      'game boy page loads',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => (tile.details as any)?.current_url?.includes('extensions/browser/game-boy/index.html') === true,
+      30_000,
+      150,
+    );
+
+    const rootBrowserTile = await waitFor(
+      'root sees loaded game boy extension metadata',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => Boolean((tile.details as any)?.extension),
+      30_000,
+      150,
+    );
+    expect(rootBrowserTile.responds_to).toContain('extension_call');
+    expect(rootBrowserTile.message_api.find((message) => message.name === 'extension_call')?.subcommands?.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        'state',
+        'load_bundled_rom',
+        'screenshot',
+        'set_button',
+        'button_combo',
+        'release_all_buttons',
+      ]),
+    );
+    expect((rootBrowserTile.details as any).extension).toEqual(
+      expect.objectContaining({
+        extension_id: 'game-boy',
+        label: 'Game Boy',
+        source_path: 'extensions/browser/game-boy/index.html',
+      }),
+    );
+
+    const readyState = await waitFor(
+      'game boy core ready',
+      () => client.tileCall<{
+        core_ready: boolean;
+        available_roms: Array<{ filename: string }>;
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'state',
+          args: {},
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result.core_ready === true,
+      30_000,
+      150,
+    );
+    expect(readyState.result.available_roms).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ filename: 'pokemon_yellow.gb' }),
+      ]),
+    );
+
+    const loaded = await client.tileCall<{
+      state: {
+        loaded: boolean;
+        rom: { filename: string; source: string };
+      };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'load_bundled_rom',
+        args: { rom: 'pokemon_yellow.gb' },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(loaded.result.state.loaded).toBe(true);
+    expect(loaded.result.state.rom).toMatchObject({
+      filename: 'pokemon_yellow.gb',
+      source: 'bundled',
+    });
+
+    const imageScreenshot = await client.tileCall<BrowserScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: {},
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectPngScreenshot(imageScreenshot.result);
+
+    const brailleScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'braille', columns: 48 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectBrailleScreenshotShape(brailleScreenshot.result, 48);
+
+    const asciiScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'ascii', columns: 48 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectAsciiScreenshotShape(asciiScreenshot.result, 48);
+
+    const ansiScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'ansi', columns: 48 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectAnsiScreenshot(ansiScreenshot.result, 48);
+
+    const textScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'text', columns: 48 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectImageDerivedTextScreenshot(textScreenshot.result, 48);
+
+    const pressed = await client.tileCall<{
+      button: string;
+      pressed: boolean;
+      state: { buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'set_button',
+        args: { button: 'start', pressed: true },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(pressed.result.button).toBe('start');
+    expect(pressed.result.state.buttons.start).toBe(true);
+
+    for (const button of GAMEPAD_BUTTON_NAMES) {
+      const buttonDown = await client.tileCall<{
+        button: string;
+        pressed: boolean;
+        state: { buttons: Record<string, boolean> };
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'set_button',
+          args: { button, pressed: true },
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      );
+      expect(buttonDown.result.button).toBe(button);
+      expect(buttonDown.result.state.buttons[button]).toBe(true);
+
+      const buttonUp = await client.tileCall<{
+        button: string;
+        pressed: boolean;
+        state: { buttons: Record<string, boolean> };
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'set_button',
+          args: { button, pressed: false },
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      );
+      expect(buttonUp.result.button).toBe(button);
+      expect(buttonUp.result.state.buttons[button]).toBe(false);
+    }
+
+    const comboStarted = await client.tileCall<{
+      sequence_length: number;
+      delay_ms: number;
+      hold_ms: number;
+      state: { buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'button_combo',
+        args: {
+          sequence: [{ buttons: ['start'] }],
+          delay_ms: 30,
+          hold_ms: 10,
+        },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(comboStarted.result.sequence_length).toBe(1);
+    expect(comboStarted.result.state.buttons.start).toBe(true);
+
+    await waitFor(
+      'game boy combo releases start button',
+      () => client.tileCall<{ buttons: Record<string, boolean> }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'state',
+          args: {},
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result.buttons.start === false,
+      5_000,
+      25,
+    );
+
+    const released = await client.tileCall<{
+      state: { buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'release_all_buttons',
+        args: {},
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(released.result.state.buttons.start).toBe(false);
+  });
+
+  it('exposes jsnes extension metadata and multiplayer controls', async () => {
+    const projection = await createIsolatedTab(client, 'browser-extension-jsnes');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-extension-jsnes tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const browserPaneId = await spawnBrowserInActiveTab(client);
+    const secondPlayerPaneId = await spawnWorkerShellInActiveTab(client);
+
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserPaneId,
+      path: 'extensions/browser/jsnes/index.html',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    await waitFor(
+      'jsnes page loads',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => (tile.details as any)?.current_url?.includes('extensions/browser/jsnes/index.html') === true,
+      30_000,
+      150,
+    );
+
+    const rootBrowserTile = await waitFor(
+      'root sees loaded jsnes extension metadata',
+      () => client.tileGet(browserPaneId, rootAgent.tile_id, rootAgent.agent_id),
+      (tile) => Boolean((tile.details as any)?.extension),
+      30_000,
+      150,
+    );
+    expect(rootBrowserTile.responds_to).toContain('extension_call');
+    expect(rootBrowserTile.message_api.find((message) => message.name === 'extension_call')?.subcommands?.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        'state',
+        'claim_player',
+        'load_rom_base64',
+        'screenshot',
+        'set_button',
+        'button_combo',
+        'release_all_buttons',
+      ]),
+    );
+    expect((rootBrowserTile.details as any).extension).toEqual(
+      expect.objectContaining({
+        extension_id: 'jsnes',
+        label: 'JSNES',
+        source_path: 'extensions/browser/jsnes/index.html',
+      }),
+    );
+
+    await client.networkConnect(
+      secondPlayerPaneId,
+      'right',
+      browserPaneId,
+      'right',
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+
+    await waitFor(
+      'connected shell sees extension_call on jsnes browser',
+      () => client.networkGet(browserPaneId, secondPlayerPaneId, null),
+      (tile) => tile.responds_to.includes('extension_call'),
+      30_000,
+      150,
+    );
+
+    const readyState = await waitFor(
+      'jsnes core ready',
+      () => client.tileCall<{
+        core_ready: boolean;
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'state',
+          args: {},
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result.core_ready === true,
+      30_000,
+      150,
+    );
+    expect(readyState.result.core_ready).toBe(true);
+
+    const playerOne = await client.tileCall<{
+      player: { player: number; claimed: boolean; owner_tile_id: string };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'claim_player',
+        args: { player: 1, name: 'North' },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(playerOne.result.player).toMatchObject({
+      player: 1,
+      claimed: true,
+      owner_tile_id: rootAgent.tile_id,
+    });
+
+    const playerTwo = await client.browserExtensionCall<{
+      player: { player: number; claimed: boolean; owner_tile_id: string };
+    }>(
+      browserPaneId,
+      'claim_player',
+      { player: 2, name: 'South' },
+      secondPlayerPaneId,
+      null,
+    );
+    expect(playerTwo.result.player).toMatchObject({
+      player: 2,
+      claimed: true,
+      owner_tile_id: secondPlayerPaneId,
+    });
+
+    const loaded = await client.tileCall<{
+      state: {
+        loaded: boolean;
+        rom: { filename: string; source: string };
+      };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'load_rom_base64',
+        args: {
+          filename: 'tiny-test.nes',
+          data_base64: tinyNesRomBase64(),
+        },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(loaded.result.state.loaded).toBe(true);
+    expect(loaded.result.state.rom).toMatchObject({
+      filename: 'tiny-test.nes',
+      source: 'api',
+    });
+
+    const imageScreenshot = await client.tileCall<BrowserScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: {},
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectPngScreenshot(imageScreenshot.result);
+
+    const brailleScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'braille', columns: 64 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectBrailleScreenshotShape(brailleScreenshot.result, 64);
+
+    const asciiScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'ascii', columns: 64 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectAsciiScreenshotShape(asciiScreenshot.result, 64);
+
+    const ansiScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'ansi', columns: 64 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectAnsiScreenshot(ansiScreenshot.result, 64);
+
+    const textScreenshot = await client.tileCall<BrowserTextScreenshotResult>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'screenshot',
+        args: { format: 'text', columns: 64 },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expectImageDerivedTextScreenshot(textScreenshot.result, 64);
+
+    const playerOnePress = await client.tileCall<{
+      player: { player: number; buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'extension_call',
+      {
+        method: 'set_button',
+        args: { button: 'start', pressed: true },
+      },
+      rootAgent.tile_id,
+      rootAgent.agent_id,
+    );
+    expect(playerOnePress.result.player.player).toBe(1);
+    expect(playerOnePress.result.player.buttons.start).toBe(true);
+
+    const playerTwoPress = await client.browserExtensionCall<{
+      player: { player: number; buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'set_button',
+      { button: 'a', pressed: true },
+      secondPlayerPaneId,
+      null,
+    );
+    expect(playerTwoPress.result.player.player).toBe(2);
+    expect(playerTwoPress.result.player.buttons.a).toBe(true);
+
+    for (const button of GAMEPAD_BUTTON_NAMES) {
+      const buttonDown = await client.tileCall<{
+        player: { player: number; buttons: Record<string, boolean> };
+        button: string;
+        pressed: boolean;
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'set_button',
+          args: { button, pressed: true },
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      );
+      expect(buttonDown.result.player.player).toBe(1);
+      expect(buttonDown.result.button).toBe(button);
+      expect(buttonDown.result.player.buttons[button]).toBe(true);
+
+      const buttonUp = await client.tileCall<{
+        player: { player: number; buttons: Record<string, boolean> };
+        button: string;
+        pressed: boolean;
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'set_button',
+          args: { button, pressed: false },
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      );
+      expect(buttonUp.result.player.player).toBe(1);
+      expect(buttonUp.result.button).toBe(button);
+      expect(buttonUp.result.player.buttons[button]).toBe(false);
+    }
+
+    const comboStarted = await client.browserExtensionCall<{
+      player: { player: number; buttons: Record<string, boolean> };
+      sequence_length: number;
+      delay_ms: number;
+      hold_ms: number;
+    }>(
+      browserPaneId,
+      'button_combo',
+      {
+        sequence: [{ buttons: ['a'] }],
+        delay_ms: 30,
+        hold_ms: 10,
+      },
+      secondPlayerPaneId,
+      null,
+    );
+    expect(comboStarted.result.player.player).toBe(2);
+    expect(comboStarted.result.sequence_length).toBe(1);
+    expect(comboStarted.result.player.buttons.a).toBe(true);
+
+    await waitFor(
+      'jsnes combo releases player two A button',
+      () => client.tileCall<{
+        players: Array<{ player: number; buttons: Record<string, boolean> }>;
+      }>(
+        browserPaneId,
+        'extension_call',
+        {
+          method: 'state',
+          args: {},
+        },
+        rootAgent.tile_id,
+        rootAgent.agent_id,
+      ),
+      (response) => response.result.players.find((player) => player.player === 2)?.buttons.a === false,
+      5_000,
+      25,
+    );
+
+    const released = await client.browserExtensionCall<{
+      player: { player: number; buttons: Record<string, boolean> };
+    }>(
+      browserPaneId,
+      'release_all_buttons',
+      {},
+      secondPlayerPaneId,
+      null,
+    );
+    expect(released.result.player.player).toBe(2);
+    expect(released.result.player.buttons.a).toBe(false);
   });
 
   it('creates browser tiles with optional incognito storage isolation', async () => {

@@ -6,6 +6,7 @@ import {
   addTab,
   appState,
   autoArrange,
+  autoArrangeWithElk,
   beginSidebarRename,
   closePaneConfirmation,
   closeSidebar,
@@ -336,6 +337,14 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
     case 'a':
       handled();
       await autoArrange(get(activeTabId));
+      fitCanvasToActiveTab(viewportWidth(context), viewportHeight(context));
+      return true;
+    case 'A':
+      if (!input.shift_key) {
+        return false;
+      }
+      handled();
+      await autoArrangeWithElk(get(activeTabId));
       fitCanvasToActiveTab(viewportWidth(context), viewportHeight(context));
       return true;
     case 's':

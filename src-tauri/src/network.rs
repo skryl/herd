@@ -12,24 +12,84 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
 pub enum TilePort {
+    #[serde(rename = "left")]
     Left,
+    #[serde(rename = "left-2")]
+    Left2,
+    #[serde(rename = "left-3")]
+    Left3,
+    #[serde(rename = "left-4")]
+    Left4,
+    #[serde(rename = "top")]
     Top,
+    #[serde(rename = "top-2")]
+    Top2,
+    #[serde(rename = "top-3")]
+    Top3,
+    #[serde(rename = "top-4")]
+    Top4,
+    #[serde(rename = "right")]
     Right,
+    #[serde(rename = "right-2")]
+    Right2,
+    #[serde(rename = "right-3")]
+    Right3,
+    #[serde(rename = "right-4")]
+    Right4,
+    #[serde(rename = "bottom")]
     Bottom,
+    #[serde(rename = "bottom-2")]
+    Bottom2,
+    #[serde(rename = "bottom-3")]
+    Bottom3,
+    #[serde(rename = "bottom-4")]
+    Bottom4,
 }
 
 impl TilePort {
-    pub const ALL: [Self; 4] = [Self::Left, Self::Top, Self::Right, Self::Bottom];
+    pub const ALL: [Self; 16] = [
+        Self::Left,
+        Self::Top,
+        Self::Right,
+        Self::Bottom,
+        Self::Left2,
+        Self::Top2,
+        Self::Right2,
+        Self::Bottom2,
+        Self::Left3,
+        Self::Top3,
+        Self::Right3,
+        Self::Bottom3,
+        Self::Left4,
+        Self::Top4,
+        Self::Right4,
+        Self::Bottom4,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Left => "left",
+            Self::Left2 => "left-2",
+            Self::Left3 => "left-3",
+            Self::Left4 => "left-4",
             Self::Top => "top",
+            Self::Top2 => "top-2",
+            Self::Top3 => "top-3",
+            Self::Top4 => "top-4",
             Self::Right => "right",
+            Self::Right2 => "right-2",
+            Self::Right3 => "right-3",
+            Self::Right4 => "right-4",
             Self::Bottom => "bottom",
+            Self::Bottom2 => "bottom-2",
+            Self::Bottom3 => "bottom-3",
+            Self::Bottom4 => "bottom-4",
         }
+    }
+
+    pub fn is_left_side(self) -> bool {
+        matches!(self, Self::Left | Self::Left2 | Self::Left3 | Self::Left4)
     }
 }
 
@@ -100,7 +160,7 @@ pub struct AgentTileDetails {
     pub display_name: String,
     pub alive: bool,
     pub chatter_subscribed: bool,
-    pub topics: Vec<String>,
+    pub channels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
 }
@@ -127,6 +187,8 @@ pub struct BrowserTileDetails {
     pub dead: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<BrowserExtensionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +234,25 @@ pub struct TileMessageSpec {
     pub args: Vec<TileMessageArgSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subcommands: Vec<TileMessageSubcommandSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserExtensionMethod {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<TileMessageArgSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserExtensionInfo {
+    pub extension_id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<BrowserExtensionMethod>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -359,9 +440,9 @@ pub fn controller_agent_id_with_conn(
 ) -> Result<Option<String>, String> {
     let connections = list_connections_with_conn(conn, session_id)?;
     let connected_tile_id = connections.iter().find_map(|connection| {
-        if connection.from_tile_id == controlled_tile_id && connection.from_port == TilePort::Left {
+        if connection.from_tile_id == controlled_tile_id && connection.from_port.is_left_side() {
             Some(connection.to_tile_id.clone())
-        } else if connection.to_tile_id == controlled_tile_id && connection.to_port == TilePort::Left {
+        } else if connection.to_tile_id == controlled_tile_id && connection.to_port.is_left_side() {
             Some(connection.from_tile_id.clone())
         } else {
             None
@@ -702,7 +783,7 @@ pub fn filter_component(mut component: NetworkComponent, tile_type: Option<TileT
 pub fn port_mode(kind: NetworkTileKind, port: TilePort) -> PortMode {
     match kind {
         NetworkTileKind::Work => {
-            if port == TilePort::Left {
+            if port.is_left_side() {
                 PortMode::ReadWrite
             } else {
                 PortMode::Read
@@ -758,6 +839,36 @@ pub fn responds_to_for_access(kind: NetworkTileKind, access: TileRpcAccess) -> V
 
 pub fn responds_to(kind: NetworkTileKind) -> Vec<String> {
     responds_to_for_access(kind, TileRpcAccess::ReadWrite)
+}
+
+pub fn extend_browser_api_with_extension(
+    responds_to: &mut Vec<String>,
+    message_api: &mut Vec<TileMessageSpec>,
+    access: TileRpcAccess,
+    extension: Option<&BrowserExtensionInfo>,
+) {
+    if access != TileRpcAccess::ReadWrite {
+        return;
+    }
+    let Some(extension) = extension else {
+        return;
+    };
+
+    if !responds_to.iter().any(|message| message == "extension_call") {
+        responds_to.push("extension_call".to_string());
+    }
+
+    if let Some(call_spec) = message_api.iter_mut().find(|message| message.name == "call") {
+        if let Some(action_arg) = call_spec.args.iter_mut().find(|arg| arg.name == "action") {
+            if !action_arg.enum_values.iter().any(|value| value == "extension_call") {
+                action_arg.enum_values.push("extension_call".to_string());
+            }
+        }
+    }
+
+    if !message_api.iter().any(|message| message.name == "extension_call") {
+        message_api.push(browser_extension_call_message_spec(extension));
+    }
 }
 
 fn message_arg(
@@ -910,7 +1021,7 @@ fn message_spec_for_kind(kind: NetworkTileKind, message_name: &str) -> TileMessa
                     "action",
                     "string",
                     "Browser drive subcommand to execute.",
-                    &["click", "type", "dom_query", "eval"],
+                    &["click", "select", "type", "dom_query", "eval", "screenshot"],
                 ),
                 optional_message_arg("args", "object", "Nested args for the selected browser drive subcommand."),
             ],
@@ -934,6 +1045,14 @@ fn message_spec_for_kind(kind: NetworkTileKind, message_name: &str) -> TileMessa
                     ],
                 ),
                 tile_subcommand(
+                    "select",
+                    "Choose an option in a select element by value.",
+                    vec![
+                        required_message_arg("selector", "string", "CSS selector for the target select element."),
+                        required_message_arg("value", "string", "Option value to select."),
+                    ],
+                ),
+                tile_subcommand(
                     "dom_query",
                     "Evaluate JavaScript as an expression and return its result.",
                     vec![required_message_arg(
@@ -946,6 +1065,24 @@ fn message_spec_for_kind(kind: NetworkTileKind, message_name: &str) -> TileMessa
                     "eval",
                     "Run JavaScript statements in the browser DOM.",
                     vec![required_message_arg("js", "string", "JavaScript source to execute in the browser DOM.")],
+                ),
+                tile_subcommand(
+                    "screenshot",
+                    "Capture the current browser tile view as a PNG image or text output.",
+                    vec![
+                        message_arg(
+                            "format",
+                            "string",
+                            false,
+                            "Screenshot output format. Defaults to image.",
+                            &["image", "braille", "ascii", "ansi", "text"],
+                        ),
+                        optional_message_arg(
+                            "columns",
+                            "number",
+                            "Requested text width in characters when format is braille, ascii, ansi, or text.",
+                        ),
+                    ],
                 ),
             ],
         ),
@@ -980,6 +1117,36 @@ fn message_spec_for_kind(kind: NetworkTileKind, message_name: &str) -> TileMessa
             Vec::new(),
         ),
     }
+}
+
+fn browser_extension_call_message_spec(extension: &BrowserExtensionInfo) -> TileMessageSpec {
+    let method_names = extension
+        .methods
+        .iter()
+        .map(|method| method.name.as_str())
+        .collect::<Vec<_>>();
+    tile_message(
+        "extension_call",
+        "Invoke a method exposed by the loaded browser extension page.",
+        vec![
+            required_enum_message_arg(
+                "method",
+                "string",
+                "Browser extension method to invoke.",
+                &method_names,
+            ),
+            optional_message_arg("args", "object", "Optional argument object for the selected extension method."),
+        ],
+        extension
+            .methods
+            .iter()
+            .map(|method| tile_subcommand(
+                &method.name,
+                method.description.as_deref().unwrap_or("Browser extension method."),
+                method.args.clone(),
+            ))
+            .collect(),
+    )
 }
 
 pub fn message_api_for_access(kind: NetworkTileKind, access: TileRpcAccess) -> Vec<TileMessageSpec> {
@@ -1036,9 +1203,21 @@ pub fn rpc_access_for_sender_to_tile(
 pub fn parse_port(value: &str) -> Result<TilePort, rusqlite::Error> {
     match value {
         "left" => Ok(TilePort::Left),
+        "left-2" => Ok(TilePort::Left2),
+        "left-3" => Ok(TilePort::Left3),
+        "left-4" => Ok(TilePort::Left4),
         "top" => Ok(TilePort::Top),
+        "top-2" => Ok(TilePort::Top2),
+        "top-3" => Ok(TilePort::Top3),
+        "top-4" => Ok(TilePort::Top4),
         "right" => Ok(TilePort::Right),
+        "right-2" => Ok(TilePort::Right2),
+        "right-3" => Ok(TilePort::Right3),
+        "right-4" => Ok(TilePort::Right4),
         "bottom" => Ok(TilePort::Bottom),
+        "bottom-2" => Ok(TilePort::Bottom2),
+        "bottom-3" => Ok(TilePort::Bottom3),
+        "bottom-4" => Ok(TilePort::Bottom4),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             value.len(),
             rusqlite::types::Type::Text,
@@ -1115,7 +1294,7 @@ fn validate_controlled_port(
     other: &NetworkTileDescriptor,
 ) -> Result<(), String> {
     if matches!(controlled.kind, NetworkTileKind::Work | NetworkTileKind::Browser)
-        && controlled_port == TilePort::Left
+        && controlled_port.is_left_side()
         && !is_agent_kind(other.kind)
     {
         return Err(format!(
@@ -1153,8 +1332,9 @@ mod tests {
         component_for_tile, connect_at, derived_work_owner_agent_id_at,
         disconnect_all_for_tile_at, dispatchable_messages_for_access, filter_component,
         inferred_tmux_tile_record_kind, list_connections_at, message_api, message_api_for_access,
-        network_tile_kind_from_record_kind, port_mode, readable_messages, reconciled_tmux_tile_record_kind,
-        responds_to, responds_to_for_access, rpc_access_for_sender_to_tile, NetworkConnection,
+        network_tile_kind_from_record_kind, parse_port, port_mode, readable_messages,
+        reconciled_tmux_tile_record_kind, responds_to, responds_to_for_access,
+        rpc_access_for_sender_to_tile, NetworkConnection,
         NetworkTileDescriptor, NetworkTileKind, PaneTileDetails, PortMode, SessionTileInfo,
         TileDetails, TileRpcAccess, TileTypeFilter, TilePort, WorkTileDetails,
     };
@@ -1190,7 +1370,7 @@ mod tests {
             display_name: agent_id.to_string(),
             alive: true,
             chatter_subscribed: true,
-            topics: Vec::new(),
+            channels: Vec::new(),
             agent_pid: None,
         }
     }
@@ -1213,7 +1393,7 @@ mod tests {
                 display_name: "Agent".to_string(),
                 alive: true,
                 chatter_subscribed: true,
-                topics: Vec::new(),
+                channels: Vec::new(),
                 agent_pid: None,
             }),
             NetworkTileKind::Browser => TileDetails::Browser(super::BrowserTileDetails {
@@ -1225,6 +1405,7 @@ mod tests {
                 active: false,
                 dead: false,
                 current_url: Some("https://example.com/".to_string()),
+                extension: None,
             }),
             NetworkTileKind::Work => TileDetails::Work(WorkTileDetails {
                 work_id: "work-s1-001".to_string(),
@@ -1310,6 +1491,7 @@ mod tests {
         assert_eq!(port_mode(NetworkTileKind::Agent, TilePort::Top), PortMode::ReadWrite);
         assert_eq!(port_mode(NetworkTileKind::Shell, TilePort::Bottom), PortMode::ReadWrite);
         assert_eq!(port_mode(NetworkTileKind::Work, TilePort::Left), PortMode::ReadWrite);
+        assert_eq!(port_mode(NetworkTileKind::Work, TilePort::Left3), PortMode::ReadWrite);
         assert_eq!(port_mode(NetworkTileKind::Work, TilePort::Top), PortMode::Read);
         assert_eq!(port_mode(NetworkTileKind::Browser, TilePort::Right), PortMode::ReadWrite);
         assert_eq!(readable_messages(NetworkTileKind::Shell), &["get", "output_read"]);
@@ -1405,7 +1587,7 @@ mod tests {
                             "type": "string",
                             "required": true,
                             "description": "Browser drive subcommand to execute.",
-                            "enum_values": ["click", "type", "dom_query", "eval"]
+                            "enum_values": ["click", "select", "type", "dom_query", "eval", "screenshot"]
                         },
                         {
                             "name": "args",
@@ -1452,6 +1634,24 @@ mod tests {
                             ]
                         },
                         {
+                            "name": "select",
+                            "description": "Choose an option in a select element by value.",
+                            "args": [
+                                {
+                                    "name": "selector",
+                                    "type": "string",
+                                    "required": true,
+                                    "description": "CSS selector for the target select element."
+                                },
+                                {
+                                    "name": "value",
+                                    "type": "string",
+                                    "required": true,
+                                    "description": "Option value to select."
+                                }
+                            ]
+                        },
+                        {
                             "name": "dom_query",
                             "description": "Evaluate JavaScript as an expression and return its result.",
                             "args": [
@@ -1472,6 +1672,25 @@ mod tests {
                                     "type": "string",
                                     "required": true,
                                     "description": "JavaScript source to execute in the browser DOM."
+                                }
+                            ]
+                        },
+                        {
+                            "name": "screenshot",
+                            "description": "Capture the current browser tile view as a PNG image or text output.",
+                            "args": [
+                                {
+                                    "name": "format",
+                                    "type": "string",
+                                    "required": false,
+                                    "description": "Screenshot output format. Defaults to image.",
+                                    "enum_values": ["image", "braille", "ascii", "ansi", "text"]
+                                },
+                                {
+                                    "name": "columns",
+                                    "type": "number",
+                                    "required": false,
+                                    "description": "Requested text width in characters when format is braille, ascii, ansi, or text."
                                 }
                             ]
                         }
@@ -1628,6 +1847,36 @@ mod tests {
         connect_at(&path, &agent, TilePort::Left, &shell_a, TilePort::Right).unwrap();
         let error = connect_at(&path, &shell_b, TilePort::Left, &agent, TilePort::Left).unwrap_err();
         assert!(error.contains("already connected"));
+    }
+
+    #[test]
+    fn parses_higher_slot_ports_and_applies_left_side_control_rules() {
+        assert_eq!(parse_port("left-3").unwrap(), TilePort::Left3);
+        assert_eq!(parse_port("bottom-4").unwrap(), TilePort::Bottom4);
+
+        let path = temp_db_path("slot-control");
+        let work = NetworkTileDescriptor {
+            tile_id: "AbCdEf".to_string(),
+            session_id: "$1".to_string(),
+            kind: NetworkTileKind::Work,
+        };
+        let shell = NetworkTileDescriptor {
+            tile_id: "%1".to_string(),
+            session_id: "$1".to_string(),
+            kind: NetworkTileKind::Shell,
+        };
+        let agent = NetworkTileDescriptor {
+            tile_id: "%2".to_string(),
+            session_id: "$1".to_string(),
+            kind: NetworkTileKind::Agent,
+        };
+
+        let error = connect_at(&path, &work, TilePort::Left2, &shell, TilePort::Top).unwrap_err();
+        assert!(error.contains("only accepts agent"));
+
+        connect_at(&path, &agent, TilePort::Right2, &work, TilePort::Left2).unwrap();
+        let connections = list_connections_at(&path, "$1").unwrap();
+        assert_eq!(connections[0].to_port, TilePort::Left2);
     }
 
     #[test]

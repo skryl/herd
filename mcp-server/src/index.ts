@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
 import * as net from "node:net";
 import * as readline from "node:readline";
@@ -44,6 +45,7 @@ const IS_ROOT_MODE = HERD_MCP_MODE === "root";
 const MESSAGE_TOOLS = {
   direct: "message_direct",
   public: "message_public",
+  channel: "message_channel",
   network: "message_network",
   root: "message_root",
 } as const;
@@ -67,12 +69,13 @@ const ROOT_TOOLS = {
   browserNavigate: "browser_navigate",
   browserLoad: "browser_load",
   browserDrive: "browser_drive",
-  messageTopicList: "message_topic_list",
-  messageTopicSubscribe: "message_topic_subscribe",
-  messageTopicUnsubscribe: "message_topic_unsubscribe",
+  messageChannelList: "message_channel_list",
+  messageChannelSubscribe: "message_channel_subscribe",
+  messageChannelUnsubscribe: "message_channel_unsubscribe",
   tileGet: "tile_get",
   tileMove: "tile_move",
   tileResize: "tile_resize",
+  tileArrangeElk: "tile_arrange_elk",
   networkConnect: "network_connect",
   networkDisconnect: "network_disconnect",
   workStageStart: "work_stage_start",
@@ -90,16 +93,26 @@ export const ROOT_TOOL_NAMES = Object.freeze([...WORKER_TOOL_NAMES, ...ROOT_ONLY
 type SocketResponse = { ok: boolean; data?: unknown; error?: string };
 type HerdToolSchema = Record<string, z.ZodTypeAny>;
 const TILE_TYPE_SCHEMA = z.enum(["shell", "agent", "browser", "work"]).optional();
+type BrowserImageScreenshotPayload = {
+  mimeType: string;
+  dataBase64: string;
+};
+type BrowserTextScreenshotPayload = {
+  format: "braille" | "ascii" | "ansi" | "text";
+  text: string;
+  columns: number;
+  rows: number;
+};
 type AgentStreamEnvelope = {
   type: "event";
   event: {
-    kind: "direct" | "public" | "network" | "root" | "system" | "ping";
+    kind: "direct" | "public" | "channel" | "network" | "root" | "system" | "ping";
     from_agent_id?: string | null;
     from_display_name: string;
     to_agent_id?: string | null;
     to_display_name?: string | null;
     message: string;
-    topics?: string[];
+    channels?: string[];
     mentions?: string[];
     replay?: boolean;
     ping_id?: string | null;
@@ -215,6 +228,73 @@ function jsonText(value: unknown) {
   return value === undefined ? "{}" : JSON.stringify(value, null, 2);
 }
 
+function isBrowserImageScreenshotPayload(value: unknown): value is BrowserImageScreenshotPayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<BrowserImageScreenshotPayload>;
+  return typeof payload.mimeType === "string" && typeof payload.dataBase64 === "string";
+}
+
+function isBrowserTextScreenshotPayload(value: unknown): value is BrowserTextScreenshotPayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<BrowserTextScreenshotPayload>;
+  return (
+    (payload.format === "braille"
+      || payload.format === "ascii"
+      || payload.format === "ansi"
+      || payload.format === "text") &&
+    typeof payload.text === "string" &&
+    typeof payload.columns === "number" &&
+    typeof payload.rows === "number"
+  );
+}
+
+function screenshotPayloadResult(payload: unknown, invalidMessage: string): CallToolResult {
+  if (isBrowserImageScreenshotPayload(payload)) {
+    return {
+      content: [{ type: "image", data: payload.dataBase64, mimeType: payload.mimeType }],
+    };
+  }
+  if (isBrowserTextScreenshotPayload(payload)) {
+    return {
+      content: [{ type: "text", text: payload.text }],
+    };
+  }
+  return errorResult(invalidMessage);
+}
+
+function nestedScreenshotPayload(
+  action: string,
+  args: Record<string, unknown> | undefined,
+  data: unknown,
+): unknown | null {
+  const isExtensionScreenshot = action === "extension_call" && typeof args?.method === "string" && args.method === "screenshot";
+  const isDriveScreenshot = action === "drive" && typeof args?.action === "string" && args.action === "screenshot";
+  if (!isExtensionScreenshot && !isDriveScreenshot) {
+    return null;
+  }
+  if (!data || typeof data !== "object") {
+    return undefined;
+  }
+  return (data as { result?: unknown }).result;
+}
+
+export function unwrapNestedScreenshotResult(
+  action: string,
+  args: Record<string, unknown> | undefined,
+  data: unknown,
+  invalidMessage: string,
+): CallToolResult | null {
+  const payload = nestedScreenshotPayload(action, args, data);
+  if (payload === null) {
+    return null;
+  }
+  return screenshotPayloadResult(payload, invalidMessage);
+}
+
 async function sendToolCommand(
   toolName: string,
   toolArgs: Record<string, unknown>,
@@ -242,7 +322,7 @@ function buildChannelMeta(event: AgentStreamEnvelope["event"]) {
     from_display_name: event.from_display_name,
     to_agent_id: event.to_agent_id,
     to_display_name: event.to_display_name,
-    topics: event.topics?.join(","),
+    channels: event.channels?.join(","),
     mentions: event.mentions?.join(","),
     replay: event.replay ? "true" : "false",
     timestamp_ms: String(event.timestamp_ms),
@@ -331,8 +411,8 @@ const server = new McpServer(
     },
     instructions:
       (IS_ROOT_MODE
-        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, topics, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, type, dom_query, or eval on browser tiles in the current session.'
-        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, topics, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
+        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, select, type, dom_query, eval, or screenshot on browser tiles in the current session.'
+        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
   },
 );
 
@@ -347,7 +427,7 @@ function registerTool(
   name: string,
   description: string,
   schema: HerdToolSchema,
-  handler: (args: any) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
+  handler: (args: any) => Promise<CallToolResult>,
 ) {
   server.tool(name, description, schema, handler);
 }
@@ -385,24 +465,51 @@ function registerMessageTools() {
     "Send a public message to the current session chatter stream.",
     {
       message: z.string(),
-      topics: z.array(z.string()).optional(),
       mentions: z.array(z.string()).optional(),
     },
-    async ({ message, topics, mentions }) => {
+    async ({ message, mentions }) => {
       try {
         const resp = await sendToolCommand(
           MESSAGE_TOOLS.public,
-          { message, topics: topics ?? [], mentions: mentions ?? [] },
+          { message, mentions: mentions ?? [] },
           {
             command: "message_public",
             message,
-            topics: topics ?? [],
             mentions: mentions ?? [],
             ...senderContext(),
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: "Public message sent" }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    MESSAGE_TOOLS.channel,
+    "Send a message to a subscribed channel in the current session.",
+    {
+      channel_name: z.string(),
+      message: z.string(),
+      mentions: z.array(z.string()).optional(),
+    },
+    async ({ channel_name, message, mentions }) => {
+      try {
+        const resp = await sendToolCommand(
+          MESSAGE_TOOLS.channel,
+          { channel_name, message, mentions: mentions ?? [] },
+          {
+            command: "message_channel",
+            channel_name,
+            message,
+            mentions: mentions ?? [],
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: "Channel message sent" }] };
       } catch (err) {
         return errorResult(String(err));
       }
@@ -532,6 +639,15 @@ function registerSharedTools() {
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        const screenshotResult = unwrapNestedScreenshotResult(
+          action,
+          args ?? {},
+          resp.data,
+          "network_call screenshot returned an invalid screenshot payload",
+        );
+        if (screenshotResult) {
+          return screenshotResult;
+        }
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
       } catch (err) {
         return errorResult(String(err));
@@ -544,10 +660,10 @@ function registerSharedTools() {
 function registerRootTools() {
   registerTool(
     ROOT_TOOLS.browserDrive,
-    "Drive a browser tile in the current session. Supported actions: click, type, dom_query, eval.",
+    "Drive a browser tile in the current session. Supported actions: click, select, type, dom_query, eval, screenshot. `screenshot` accepts `{ format: \"image\" | \"braille\" | \"ascii\" | \"ansi\" | \"text\", columns?: number }`.",
     {
       tile_id: z.string(),
-      action: z.enum(["click", "type", "dom_query", "eval"]),
+      action: z.enum(["click", "select", "type", "dom_query", "eval", "screenshot"]),
       args: z.record(z.unknown()).optional(),
     },
     async ({ tile_id, action, args }) => {
@@ -564,6 +680,9 @@ function registerRootTools() {
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        if (action === "screenshot") {
+          return screenshotPayloadResult(resp.data, "browser_drive screenshot returned an invalid screenshot payload");
+        }
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
       } catch (err) {
         return errorResult(String(err));
@@ -593,6 +712,15 @@ function registerRootTools() {
           },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        const screenshotResult = unwrapNestedScreenshotResult(
+          action,
+          args ?? {},
+          resp.data,
+          "tile_call screenshot returned an invalid screenshot payload",
+        );
+        if (screenshotResult) {
+          return screenshotResult;
+        }
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
       } catch (err) {
         return errorResult(String(err));
@@ -804,12 +932,12 @@ function registerRootTools() {
     },
   );
 
-  registerTool(ROOT_TOOLS.messageTopicList, "List topics in the current session.", {}, async () => {
+  registerTool(ROOT_TOOLS.messageChannelList, "List channels in the current session.", {}, async () => {
     try {
       const resp = await sendToolCommand(
-        ROOT_TOOLS.messageTopicList,
+        ROOT_TOOLS.messageChannelList,
         {},
-        { command: "message_topic_list", ...senderContext() },
+        { command: "message_channel_list", ...senderContext() },
       );
       if (!resp.ok) return errorResult(resp.error || "Unknown error");
       return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -819,15 +947,15 @@ function registerRootTools() {
   });
 
   registerTool(
-    ROOT_TOOLS.messageTopicSubscribe,
-    "Subscribe an agent to a topic in the current session.",
-    { agent_id: z.string(), topic: z.string() },
-    async ({ agent_id, topic }) => {
+    ROOT_TOOLS.messageChannelSubscribe,
+    "Subscribe an agent to a channel in the current session.",
+    { agent_id: z.string(), channel_name: z.string() },
+    async ({ agent_id, channel_name }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.messageTopicSubscribe,
-          { agent_id, topic },
-          { command: "message_topic_subscribe", agent_id, topic },
+          ROOT_TOOLS.messageChannelSubscribe,
+          { agent_id, channel_name },
+          { command: "message_channel_subscribe", agent_id, channel_name, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -838,15 +966,15 @@ function registerRootTools() {
   );
 
   registerTool(
-    ROOT_TOOLS.messageTopicUnsubscribe,
-    "Unsubscribe an agent from a topic in the current session.",
-    { agent_id: z.string(), topic: z.string() },
-    async ({ agent_id, topic }) => {
+    ROOT_TOOLS.messageChannelUnsubscribe,
+    "Unsubscribe an agent from a channel in the current session.",
+    { agent_id: z.string(), channel_name: z.string() },
+    async ({ agent_id, channel_name }) => {
       try {
         const resp = await sendToolCommand(
-          ROOT_TOOLS.messageTopicUnsubscribe,
-          { agent_id, topic },
-          { command: "message_topic_unsubscribe", agent_id, topic },
+          ROOT_TOOLS.messageChannelUnsubscribe,
+          { agent_id, channel_name },
+          { command: "message_channel_unsubscribe", agent_id, channel_name, ...senderContext() },
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
@@ -954,6 +1082,28 @@ function registerRootTools() {
         );
         if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    ROOT_TOOLS.tileArrangeElk,
+    "Arrange all current-session tiles with the ELK layout based on their existing tile sizes and network connections.",
+    {},
+    async () => {
+      try {
+        const resp = await sendToolCommand(
+          ROOT_TOOLS.tileArrangeElk,
+          {},
+          {
+            command: "tile_arrange_elk",
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data ?? { ok: true }) }] };
       } catch (err) {
         return errorResult(String(err));
       }

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<!--
+  Uses binjgb's browser build. Touch controller markup is derived from the
+  upstream simple embed page; see LICENSE.binjgb and LICENSE.gbstudio.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>Game Boy</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Browser Extension</p>
+          <h1>Game Boy</h1>
+          <p class="hero-text">
+            Load a local <code>.gb</code> or <code>.gbc</code> ROM into
+            <code>binjgb</code>. Battery saves and save states stay local to
+            this browser tile.
+          </p>
+        </div>
+        <div class="toolbar">
+          <label class="file-pill">
+            <span>Choose ROM</span>
+            <input id="rom-file" type="file" accept=".gb,.gbc,application/octet-stream" />
+          </label>
+          <button id="load-bundled-rom" type="button">Load Pokemon Yellow</button>
+          <button id="toggle-grid-overlay" type="button">Show Grid</button>
+          <button id="fullscreen-toggle" class="fullscreen-toggle" type="button">Full Screen</button>
+          <button id="reset-rom" type="button" disabled>Reset</button>
+          <button id="toggle-pause" type="button" disabled>Pause</button>
+          <button id="save-state" type="button" disabled>Save State</button>
+          <button id="load-state" type="button" disabled>Load State</button>
+          <button id="clear-save" type="button" disabled>Clear Save</button>
+        </div>
+      </section>
+
+      <section class="status-panel">
+        <p id="status" class="status-line" data-tone="info">Choose a Game Boy ROM to begin.</p>
+        <p id="rom-name" class="meta-line">No ROM loaded.</p>
+        <p id="save-status" class="meta-line">Controls: arrows, Z, X, Enter, Tab, Shift, [, ], F6, F9.</p>
+      </section>
+
+      <section class="play-area">
+        <div class="console-shell">
+          <div class="screen-bezel">
+            <div id="game">
+              <canvas id="mainCanvas" width="160" height="144">No Canvas Support</canvas>
+              <canvas id="grid-overlay" width="160" height="144" aria-hidden="true"></canvas>
+            </div>
+          </div>
+          <div class="console-details">
+            <span>Touch controls appear automatically on touch devices.</span>
+            <span>Fast-forward: hold Shift</span>
+          </div>
+        </div>
+
+        <aside class="info-card">
+          <h2>Notes</h2>
+          <p>A bundled <code>pokemon_yellow.gb</code> cartridge is available alongside manual local ROM loading.</p>
+          <p>Battery save RAM and save states are stored per ROM in local browser storage.</p>
+          <p>Palette switching works for DMG titles with <code>[</code> and <code>]</code>.</p>
+        </aside>
+      </section>
+    </main>
+
+    <div id="controller">
+      <div id="controller_dpad">
+        <div id="controller_left"></div>
+        <div id="controller_right"></div>
+        <div id="controller_up"></div>
+        <div id="controller_down"></div>
+      </div>
+      <div id="controller_select" class="capsuleBtn">Select</div>
+      <div id="controller_start" class="capsuleBtn">Start</div>
+      <div id="controller_b" class="roundBtn">B</div>
+      <div id="controller_a" class="roundBtn">A</div>
+    </div>
+
+    <script src="binjgb.js"></script>
+    <script src="binjgb-wasm.js"></script>
+    <script src="roms/bundled-roms.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

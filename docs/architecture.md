@@ -292,8 +292,14 @@ Public messages are session-wide chatter.
 
 Public messages may carry:
 
-- `#topics`
 - `@mentions`
+
+Channel messages are subscription-scoped chatter.
+
+- socket command: `message_channel`
+- CLI: `herd message channel ...`
+- MCP: `message_channel`
+- chatter display: `Sender -> #channel: message`
 
 ### Network
 
@@ -353,7 +359,7 @@ Important metadata fields:
 - `from_display_name`
 - `to_agent_id`
 - `to_display_name`
-- `topics`
+- `channels`
 - `mentions`
 - `replay`
 - `timestamp_ms`
@@ -446,7 +452,7 @@ SQLite stores:
 - tile/layout state
 - stable tile registry and tmux backing metadata
 - agent registry
-- topics
+- channels
 - chatter
 - agent logs
 - work metadata and stage content

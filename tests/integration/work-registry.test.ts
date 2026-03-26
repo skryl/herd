@@ -25,13 +25,13 @@ interface SocketResponse<T = unknown> {
 }
 
 interface AgentChannelEvent {
-  kind: 'direct' | 'public' | 'network' | 'root' | 'system' | 'ping';
+  kind: 'direct' | 'public' | 'channel' | 'network' | 'root' | 'system' | 'ping';
   from_agent_id?: string | null;
   from_display_name: string;
   to_agent_id?: string | null;
   to_display_name?: string | null;
   message: string;
-  topics: string[];
+  channels: string[];
   mentions: string[];
   replay: boolean;
   ping_id?: string | null;
@@ -319,21 +319,25 @@ describe.sequential('work registry integration', () => {
     const firstPaneId = await spawnShellInActiveTab(client);
     const firstChatterPaneId = await spawnShellInActiveTab(client);
     const firstSessionId = firstProjection.active_tab_id!;
+    const firstRootAgent = await waitForRootAgentInSession(client, firstSessionId);
     await client.agentRegister('agent-private-a', firstPaneId, 'Private Agent A');
 
     const secondProjection = await createIsolatedTab(client, 'private-b');
     const secondPaneId = await spawnShellInActiveTab(client);
     const secondChatterPaneId = await spawnShellInActiveTab(client);
     const secondSessionId = secondProjection.active_tab_id!;
+    const secondRootAgent = await waitForRootAgentInSession(client, secondSessionId);
     await client.agentRegister('agent-private-b', secondPaneId, 'Private Agent B');
     const firstSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-private-a');
     const secondSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-private-b');
 
     try {
       const firstWork = await createWorkInSession(client, 'Private work A', firstPaneId);
-      await client.messageChatter('scope-a sync #scope-a', firstChatterPaneId, ['#scope-a']);
+      await client.messageChannelSubscribe('#scope-a', 'agent-private-a', firstRootAgent.tile_id, firstRootAgent.agent_id);
+      await client.messageChannel('scope-a sync #scope-a', '#scope-a', firstPaneId, 'agent-private-a');
       const secondWork = await createWorkInSession(client, 'Private work B', secondPaneId);
-      await client.messageChatter('scope-b sync #scope-b', secondChatterPaneId, ['#scope-b']);
+      await client.messageChannelSubscribe('#scope-b', 'agent-private-b', secondRootAgent.tile_id, secondRootAgent.agent_id);
+      await client.messageChannel('scope-b sync #scope-b', '#scope-b', secondPaneId, 'agent-private-b');
 
       const firstAgents = (await client.tileList(firstChatterPaneId, null, 'agent')).tiles
         .map((tile) => (tile.details as { agent_id: string }).agent_id)
@@ -341,7 +345,7 @@ describe.sequential('work registry integration', () => {
       expect(firstAgents).toContain('agent-private-a');
       expect(firstAgents.some((agentId) => agentId.startsWith('root:'))).toBe(true);
       expect(firstAgents).toHaveLength(2);
-      expect((await client.messageTopicList(firstChatterPaneId)).map((topic) => topic.name)).toEqual(['#scope-a', firstWork.topic]);
+      expect((await client.messageChannelList(firstChatterPaneId)).map((channel) => channel.name)).toEqual(['#scope-a', firstWork.topic]);
       expect(
         (await client.tileList(firstChatterPaneId, null, 'work')).tiles.map(
           (tile) => (tile.details as { work_id: string }).work_id,
@@ -354,7 +358,7 @@ describe.sequential('work registry integration', () => {
       expect(secondAgents).toContain('agent-private-b');
       expect(secondAgents.some((agentId) => agentId.startsWith('root:'))).toBe(true);
       expect(secondAgents).toHaveLength(2);
-      expect((await client.messageTopicList(secondChatterPaneId)).map((topic) => topic.name)).toEqual(['#scope-b', secondWork.topic]);
+      expect((await client.messageChannelList(secondChatterPaneId)).map((channel) => channel.name)).toEqual(['#scope-b', secondWork.topic]);
       expect(
         (await client.tileList(secondChatterPaneId, null, 'work')).tiles.map(
           (tile) => (tile.details as { work_id: string }).work_id,
@@ -404,7 +408,7 @@ describe.sequential('work registry integration', () => {
       expect(item.owner_agent_id ?? null).toBeNull();
       expect(currentStageStatus(item)).toBe('ready');
 
-      expect((await client.messageTopicList(rootAgent.tile_id)).some((topic) => topic.name === item.topic)).toBe(true);
+      expect((await client.messageChannelList(rootAgent.tile_id, rootAgent.agent_id)).some((channel) => channel.name === item.topic)).toBe(true);
 
       await client.networkConnect(ownerPaneId, 'left', workTileId(item.work_id), 'left', rootAgent.tile_id);
       item = await loadWorkItemAsRoot(client, rootAgent, item.work_id);
@@ -634,7 +638,7 @@ describe.sequential('work registry integration', () => {
     const projection = await createIsolatedTab(client, 'welcome-bootstrap');
     const paneId = projection.selected_tile_id!;
 
-    await client.messageChatter('bootstrap replay #welcome-bootstrap', paneId, ['#welcome-bootstrap']);
+    await client.messagePublic('bootstrap replay #welcome-bootstrap', paneId);
     await client.agentRegister('agent-bootstrap', paneId, 'Bootstrap Agent');
 
     const subscription = await openAgentEventSubscription(runtime.socketPath, 'agent-bootstrap');
@@ -679,6 +683,135 @@ describe.sequential('work registry integration', () => {
       ).toBe(true);
     } finally {
       subscription.close();
+    }
+  });
+
+  it('delivers channel chatter only to subscribed agents and replays subscribed channel history', async () => {
+    const projection = await createIsolatedTab(client, 'channel-delivery');
+    const sessionId = projection.active_tab_id!;
+    const rootAgent = await waitForRootAgentInSession(client, sessionId);
+
+    const paneA = await spawnShellInActiveTab(client);
+    const paneB = await spawnShellInActiveTab(client);
+    const paneC = await spawnShellInActiveTab(client);
+
+    await client.agentRegister('agent-channel-a', paneA, 'Channel Agent A');
+    await client.agentRegister('agent-channel-b', paneB, 'Channel Agent B');
+    await client.agentRegister('agent-channel-c', paneC, 'Channel Agent C');
+    await client.agentPingAck('agent-channel-a');
+    await client.agentPingAck('agent-channel-b');
+    await client.agentPingAck('agent-channel-c');
+
+    await client.sendCommand({
+      command: 'message_channel_subscribe',
+      agent_id: 'agent-channel-a',
+      channel_name: '#delivery',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+    await client.sendCommand({
+      command: 'message_channel_subscribe',
+      agent_id: 'agent-channel-b',
+      channel_name: '#delivery',
+      sender_agent_id: rootAgent.agent_id,
+      sender_tile_id: rootAgent.tile_id,
+    });
+
+    const subA = await openAgentEventSubscription(runtime.socketPath, 'agent-channel-a');
+    const subB = await openAgentEventSubscription(runtime.socketPath, 'agent-channel-b');
+
+    try {
+      await client.sendCommand({
+        command: 'message_channel',
+        channel_name: '#delivery',
+        message: 'channel hello',
+        sender_agent_id: 'agent-channel-a',
+        sender_tile_id: paneA,
+      });
+
+      const deliveredA = await collectAgentEvents(
+        subA,
+        (events) => events.some((event) => event.kind === 'channel' && event.message === 'channel hello'),
+        15_000,
+      );
+      expect(
+        deliveredA.some((event) => event.kind === 'channel' && event.channels.includes('#delivery')),
+      ).toBe(true);
+
+      const deliveredB = await collectAgentEvents(
+        subB,
+        (events) => events.some((event) => event.kind === 'channel' && event.message === 'channel hello'),
+        15_000,
+      );
+      expect(
+        deliveredB.some((event) => event.kind === 'channel' && event.channels.includes('#delivery')),
+      ).toBe(true);
+
+      await client.sendCommand({
+        command: 'message_channel_subscribe',
+        agent_id: 'agent-channel-c',
+        channel_name: '#delivery',
+        sender_agent_id: rootAgent.agent_id,
+        sender_tile_id: rootAgent.tile_id,
+      });
+
+      const replaySubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-channel-c');
+      try {
+        const replayed = await collectAgentEvents(
+          replaySubscription,
+          (events) => events.some((event) => event.kind === 'channel' && event.replay && event.message === 'channel hello'),
+          15_000,
+        );
+        expect(
+          replayed.some((event) => event.kind === 'channel' && event.replay && event.channels.includes('#delivery')),
+        ).toBe(true);
+      } finally {
+        replaySubscription.close();
+      }
+
+      await client.sendCommand({
+        command: 'message_channel_unsubscribe',
+        agent_id: 'agent-channel-b',
+        channel_name: '#delivery',
+        sender_agent_id: rootAgent.agent_id,
+        sender_tile_id: rootAgent.tile_id,
+      });
+
+      await expect(
+        client.sendCommand({
+          command: 'message_channel',
+          channel_name: '#delivery',
+          message: 'blocked send',
+          sender_agent_id: 'agent-channel-b',
+          sender_tile_id: paneB,
+        }),
+      ).rejects.toThrow(/subscribed/i);
+
+      await client.sendCommand({
+        command: 'message_channel',
+        channel_name: '#delivery',
+        message: 'channel follow-up',
+        sender_agent_id: 'agent-channel-a',
+        sender_tile_id: paneA,
+      });
+
+      const followUpA = await collectAgentEvents(
+        subA,
+        (events) => events.some((event) => event.kind === 'channel' && event.message === 'channel follow-up'),
+        15_000,
+      );
+      expect(followUpA.some((event) => event.message === 'channel follow-up')).toBe(true);
+
+      await expect(
+        collectAgentEvents(
+          subB,
+          (events) => events.some((event) => event.kind === 'channel' && event.message === 'channel follow-up'),
+          1_000,
+        ),
+      ).rejects.toThrow(/timed out/i);
+    } finally {
+      subA.close();
+      subB.close();
     }
   });
 });

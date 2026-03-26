@@ -1,0 +1,43 @@
+body {
+  margin: 0;
+  font-family: "Iowan Old Style", Georgia, serif;
+  background: linear-gradient(180deg, #0f172a, #0b1120 55%, #220f18);
+  color: #f9f2e7;
+}
+
+.app {
+  min-height: 100vh;
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.toolbar,
+.actions,
+.players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.toolbar label,
+.actions-wrap label {
+  display: grid;
+  gap: 4px;
+}
+
+.toolbar input,
+.toolbar select,
+.toolbar button,
+.actions button,
+.actions-wrap input {
+  font: inherit;
+  padding: 6px 10px;
+}
+
+.player-card {
+  min-width: 240px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}

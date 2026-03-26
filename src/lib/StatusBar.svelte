@@ -47,7 +47,7 @@
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">Ctrl+h/j/k/l</span> move</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">Ctrl+H/J/K/L</span> move x2</span>
+      <span class="shortcut"><span class="key">a</span><span class="key">A</span> re-arrange</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">t</span> tab</span>
       <span class="sep">│</span>

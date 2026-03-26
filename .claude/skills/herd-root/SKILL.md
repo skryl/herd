@@ -31,6 +31,7 @@ Canvas and network control:
 - `tile_rename`
 - `tile_move`
 - `tile_resize`
+- `tile_arrange_elk`
 - `network_connect`
 - `network_disconnect`
 
@@ -50,12 +51,15 @@ Tile-specific Root tools:
 - `message_topic_subscribe`
 - `message_topic_unsubscribe`
 
+`browser_drive` supports `click`, `select`, `type`, `dom_query`, `eval`, and `screenshot`. `screenshot` can return an image, dithered Braille text, ASCII grayscale text, ANSI-colored text, or layout-preserving DOM text via `args.format`.
+
 ## Operating Rules
 
 - Inspect the session with `tile_list` and `tile_get` before mutating it.
 - Use `tile_call` or the dedicated Root tools only for actions the tile advertises.
 - Use `browser_drive` only as Root.
 - Keep workers on their narrower local-network surface; route privileged actions through Root.
+- After you add more than one tile and connect them, call `tile_arrange_elk` to reflow the canvas instead of manually nudging connected groups tile by tile.
 - If you want Herd traffic to be visible to agents, answer through the message tools, not plain assistant text.
 
 ## Message Model

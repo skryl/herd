@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd JSNES</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Shared Browser Extension</p>
+          <h1>JSNES</h1>
+          <p class="summary">
+            Load a local <code>.nes</code> cartridge or an API-provided ROM payload. Caller tiles can
+            claim player 1 or player 2 and drive the shared emulator through the extension API.
+          </p>
+        </div>
+        <div class="toolbar">
+          <label class="file-pill">
+            <span>Choose ROM</span>
+            <input id="rom-file" type="file" accept=".nes,application/octet-stream" />
+          </label>
+          <button id="load-bundled-rom" type="button">Load Contra</button>
+          <button id="fullscreen-toggle" class="fullscreen-toggle" type="button">Full Screen</button>
+          <button id="reset-rom" type="button" disabled>Reset</button>
+          <button id="toggle-pause" type="button" disabled>Pause</button>
+        </div>
+      </header>
+
+      <section class="status-panel">
+        <div class="status-card">
+          <span class="meta-label">Status</span>
+          <strong id="status" class="status-line" data-tone="info">Choose an NES ROM to begin.</strong>
+        </div>
+        <div class="status-card">
+          <span class="meta-label">ROM</span>
+          <strong id="rom-name" class="status-line">No ROM loaded.</strong>
+        </div>
+      </section>
+
+      <section class="play-area">
+        <section class="monitor">
+          <div class="monitor-topline">
+            <span class="section-label">Viewport</span>
+            <span class="microcopy">Keyboard works locally. API control is caller-owned.</span>
+          </div>
+          <div class="screen-shell">
+            <div id="screen-host" class="screen-host"></div>
+          </div>
+          <p class="input-hint">
+            Local keyboard: P1 uses arrows, X, Z, Enter, Right Ctrl. P2 uses numpad controls from
+            upstream <code>jsnes</code>.
+          </p>
+        </section>
+
+        <aside class="side-panel">
+          <section class="panel">
+            <p class="section-label">Players</p>
+            <div id="player-cards" class="player-cards"></div>
+          </section>
+          <section class="panel">
+            <p class="section-label">Extension Methods</p>
+            <ul id="api-methods" class="api-methods"></ul>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./roms/bundled-roms.js"></script>
+    <script src="./logic.js"></script>
+    <script src="./jsnes.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>browser-text-layout</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #10141d;
+        color: #f8f5d7;
+        font-family: monospace;
+        overflow: hidden;
+      }
+
+      .hud {
+        position: absolute;
+        top: 24px;
+        font-size: 24px;
+      }
+
+      #score {
+        left: 24px;
+      }
+
+      #lives {
+        right: 24px;
+      }
+
+      #dialog {
+        position: absolute;
+        left: 84px;
+        top: 148px;
+        width: 460px;
+        font-size: 22px;
+        line-height: 1.4;
+      }
+
+      #prompt {
+        position: absolute;
+        left: 164px;
+        top: 312px;
+        font-size: 26px;
+      }
+
+      #status {
+        position: absolute;
+        left: 28px;
+        bottom: 28px;
+        font-size: 22px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="score" class="hud">SCORE 1200</div>
+    <div id="lives" class="hud">LIVES x3</div>
+    <div id="dialog">
+      The gate is locked.<br />
+      Find the silver key.
+    </div>
+    <div id="prompt">PRESS START</div>
+    <div id="status">ZONE 1</div>
+  </body>
+</html>

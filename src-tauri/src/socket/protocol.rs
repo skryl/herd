@@ -216,8 +216,8 @@ pub enum SocketCommand {
     AgentEventsSubscribe { agent_id: String },
     #[serde(rename = "agent_ping_ack")]
     AgentPingAck { agent_id: String },
-    #[serde(rename = "message_topic_list")]
-    MessageTopicList {
+    #[serde(rename = "message_channel_list")]
+    MessageChannelList {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
@@ -270,6 +270,8 @@ pub enum SocketCommand {
         parent_tile_id: Option<String>,
         #[serde(default)]
         browser_incognito: Option<bool>,
+        #[serde(default)]
+        browser_path: Option<String>,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]
@@ -340,6 +342,13 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_tile_id: Option<String>,
     },
+    #[serde(rename = "tile_arrange_elk")]
+    TileArrangeElk {
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
     #[serde(rename = "network_connect")]
     NetworkConnect {
         from_tile_id: String,
@@ -373,7 +382,16 @@ pub enum SocketCommand {
     MessagePublic {
         message: String,
         #[serde(default)]
-        topics: Vec<String>,
+        mentions: Vec<String>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "message_channel")]
+    MessageChannel {
+        channel_name: String,
+        message: String,
         #[serde(default)]
         mentions: Vec<String>,
         #[serde(default)]
@@ -397,17 +415,25 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_tile_id: Option<String>,
     },
-    #[serde(rename = "message_topic_subscribe")]
-    MessageTopicSubscribe {
-        topic: String,
+    #[serde(rename = "message_channel_subscribe")]
+    MessageChannelSubscribe {
+        channel_name: String,
         #[serde(default)]
         agent_id: Option<String>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
-    #[serde(rename = "message_topic_unsubscribe")]
-    MessageTopicUnsubscribe {
-        topic: String,
+    #[serde(rename = "message_channel_unsubscribe")]
+    MessageChannelUnsubscribe {
+        channel_name: String,
         #[serde(default)]
         agent_id: Option<String>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
     },
     #[serde(rename = "work_stage_start")]
     WorkStageStart { work_id: String, agent_id: String },

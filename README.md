@@ -122,7 +122,7 @@ By default, Herd uses the runtime name `herd` and writes:
 - `/tmp/herd.sock`: local newline-delimited JSON socket API
 - `tmp/herd-socket.log`: socket traffic log
 - `tmp/herd-cc.log`: tmux control-mode log
-- `tmp/herd.sqlite`: SQLite store for tile registry/layout state, chatter, agents, topics, network state, and work metadata/stage content
+- `tmp/herd.sqlite`: SQLite store for tile registry/layout state, chatter, agents, channels, network state, and work metadata/stage content
 
 If you set `HERD_RUNTIME_ID`, Herd namespaces those files under `herd-<runtime_id>` instead. The integration suite uses that to run isolated app instances without colliding with the default runtime.
 

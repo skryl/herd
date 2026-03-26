@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Herd Checkers</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <label>Room <input id="room-id" value="checkers-room" /></label>
+        <label>Name <input id="player-name" value="Player" /></label>
+        <label>
+          Seat
+          <select id="seat">
+            <option value="red">red</option>
+            <option value="black">black</option>
+          </select>
+        </label>
+        <label>Seed <input id="seed" value="checkers-seed" /></label>
+        <button id="join" type="button">Join</button>
+        <button id="start" type="button">Start</button>
+      </section>
+      <section class="meta">
+        <div id="status" data-testid="status">No room joined</div>
+        <div id="winner" data-testid="winner"></div>
+        <div id="players" class="players"></div>
+      </section>
+      <section id="board" class="board" data-testid="board"></section>
+    </main>
+    <script src="../game-runtime.js"></script>
+    <script src="./logic.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

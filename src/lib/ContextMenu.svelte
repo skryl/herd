@@ -116,7 +116,7 @@
   .context-menu-backdrop {
     position: absolute;
     inset: 0;
-    z-index: 1500;
+    z-index: 5000;
   }
 
   .context-menu {
@@ -130,6 +130,7 @@
     border: 1px solid var(--component-border);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(6px);
+    z-index: 5001;
   }
 
   .context-action,
@@ -163,7 +164,7 @@
   .context-submenu {
     top: -6px;
     left: calc(100% - 1px);
-    z-index: 1;
+    z-index: 5002;
   }
 
   .submenu-arrow {

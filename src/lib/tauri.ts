@@ -1,5 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentDebugState, ClaudeMenuData, LayoutStateMap, NetworkConnection, TilePort, TmuxSnapshot, WorkItem } from './types';
+import type {
+  AgentDebugState,
+  BrowserExtensionPage,
+  ClaudeMenuData,
+  LayoutStateMap,
+  NetworkConnection,
+  TilePort,
+  TmuxSnapshot,
+  WorkItem,
+} from './types';
 
 export interface BrowserWebviewViewport {
   x: number;
@@ -7,10 +16,20 @@ export interface BrowserWebviewViewport {
   width: number;
   height: number;
   visible: boolean;
+  pageZoom: number;
 }
 
 export interface BrowserWebviewState {
   currentUrl: string;
+}
+
+export type BrowserPreviewFormat = 'text' | 'braille' | 'ansi' | 'ascii';
+
+export interface BrowserTextPreviewResult {
+  format: BrowserPreviewFormat;
+  text: string;
+  columns: number;
+  rows: number;
 }
 
 export async function getTmuxState(): Promise<TmuxSnapshot> {
@@ -103,7 +122,7 @@ export async function newWindow(targetSessionId?: string | null): Promise<string
 
 export async function spawnAgentWindow(targetSessionId?: string | null): Promise<{
   agent_id: string;
-  agent_type: 'claude';
+  agent_type: 'claude' | 'fixture';
   agent_role: 'root' | 'worker';
   pane_id: string;
   window_id: string;
@@ -116,10 +135,12 @@ export async function spawnAgentWindow(targetSessionId?: string | null): Promise
 export async function spawnBrowserWindow(
   targetSessionId?: string | null,
   browserIncognito?: boolean | null,
+  browserPath?: string | null,
 ): Promise<string> {
   return invoke<string>('spawn_browser_window', {
     targetSessionId: targetSessionId ?? null,
     browserIncognito: browserIncognito ?? null,
+    browserPath: browserPath ?? null,
   });
 }
 
@@ -142,6 +163,13 @@ export async function navigateBrowserWebview(
   return invoke<BrowserWebviewState>('browser_webview_navigate', { paneId, url });
 }
 
+export async function loadBrowserWebview(
+  paneId: string,
+  path: string,
+): Promise<BrowserWebviewState> {
+  return invoke<BrowserWebviewState>('browser_webview_load', { paneId, path });
+}
+
 export async function reloadBrowserWebview(paneId: string): Promise<BrowserWebviewState> {
   return invoke<BrowserWebviewState>('browser_webview_reload', { paneId });
 }
@@ -156,6 +184,22 @@ export async function forwardBrowserWebview(paneId: string): Promise<BrowserWebv
 
 export async function hideBrowserWebview(paneId: string): Promise<void> {
   return invoke('browser_webview_hide', { paneId });
+}
+
+export async function readBrowserPreview(
+  paneId: string,
+  format?: BrowserPreviewFormat | null,
+  columns?: number | null,
+): Promise<BrowserTextPreviewResult> {
+  return invoke<BrowserTextPreviewResult>('browser_webview_preview', {
+    paneId,
+    format: format ?? null,
+    columns: columns ?? null,
+  });
+}
+
+export async function getBrowserExtensionPages(): Promise<BrowserExtensionPage[]> {
+  return invoke<BrowserExtensionPage[]>('browser_extension_pages');
 }
 
 export async function splitPane(targetPaneId?: string | null): Promise<string> {

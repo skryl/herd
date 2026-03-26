@@ -7,6 +7,10 @@ import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime'
 const VIEWPORT_WIDTH = 1400;
 const VIEWPORT_HEIGHT = 846;
 
+function rootAgentForProjection(projection: Awaited<ReturnType<HerdTestClient['getProjection']>>) {
+  return projection.agents.find((agent) => agent.agent_role === 'root' && agent.alive);
+}
+
 async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
   const before = await client.getProjection();
   const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
@@ -25,6 +29,69 @@ async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
     throw new Error('failed to locate spawned shell pane');
   }
   return created.id;
+}
+
+async function spawnToolbarShellInActiveTab(client: HerdTestClient): Promise<string> {
+  const before = await client.getProjection();
+  const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
+  await client.toolbarSpawnShell();
+  const projection = await waitFor(
+    'toolbar shell create in active tab',
+    () => client.getProjection(),
+    (nextProjection) => nextProjection.active_tab_terminals.some((terminal) => !knownPaneIds.has(terminal.id)),
+    30_000,
+    150,
+  );
+  const created = projection.active_tab_terminals.find((terminal) => !knownPaneIds.has(terminal.id));
+  if (!created) {
+    throw new Error('failed to locate toolbar-spawned shell pane');
+  }
+  return created.id;
+}
+
+async function spawnBrowserInActiveTab(
+  client: HerdTestClient,
+  options?: { browserPath?: string },
+): Promise<string> {
+  const before = await client.getProjection();
+  const knownPaneIds = new Set(before.active_tab_terminals.map((terminal) => terminal.id));
+  await client.tileCreate('browser', {
+    parentSessionId: before.active_tab_id,
+    browserPath: options?.browserPath ?? null,
+  });
+  const projection = await waitFor(
+    'browser create in active tab',
+    () => client.getProjection(),
+    (nextProjection) =>
+      nextProjection.active_tab_terminals.some(
+        (terminal) => terminal.kind === 'browser' && !knownPaneIds.has(terminal.id),
+      ),
+    30_000,
+    150,
+  );
+  const created = projection.active_tab_terminals.find(
+    (terminal) => terminal.kind === 'browser' && !knownPaneIds.has(terminal.id),
+  );
+  if (!created) {
+    throw new Error('failed to locate spawned browser tile');
+  }
+  return created.id;
+}
+
+async function waitForDomDriver(client: HerdTestClient, label: string): Promise<void> {
+  await waitFor(
+    label,
+    async () => {
+      try {
+        return await client.testDomQuery<boolean>('return true;');
+      } catch {
+        return false;
+      }
+    },
+    (ready) => ready === true,
+    30_000,
+    150,
+  );
 }
 
 describe.sequential('in-app test driver', () => {
@@ -165,7 +232,7 @@ describe.sequential('in-app test driver', () => {
     expect(agent).toBeTruthy();
     await client.agentPingAck('agent-log-test');
 
-    await client.messagePublic('activity projection topic', paneId!, ['#activity']);
+    await client.messagePublic('activity projection topic', paneId!);
 
     const projection = await waitFor(
       'agent activity projection',
@@ -199,6 +266,81 @@ describe.sequential('in-app test driver', () => {
       150,
     );
     expect(drawerVisible).toBe(true);
+
+    const drawerResize = await client.testDomQuery<{ grip: boolean; before: number; gripCenterDelta: number }>(`
+      const drawer = document.querySelector('[data-tile-id="${paneId!}"] .tile-activity');
+      const grip = drawer?.querySelector('.drawer-resize-grip');
+      const header = drawer?.querySelector('.activity-header');
+      const before = drawer?.getBoundingClientRect().height ?? 0;
+      const gripRect = grip?.getBoundingClientRect();
+      const headerRect = header?.getBoundingClientRect();
+      return {
+        grip: Boolean(grip),
+        before,
+        gripCenterDelta: gripRect && headerRect
+          ? Math.abs((gripRect.left + gripRect.width / 2) - (headerRect.left + headerRect.width / 2))
+          : -1,
+      };
+    `);
+    expect(drawerResize.grip).toBe(true);
+    expect(drawerResize.gripCenterDelta).toBeLessThan(10);
+    await client.testDomQuery(`
+      const grip = document.querySelector('[data-tile-id="${paneId!}"] .tile-activity .drawer-resize-grip');
+      grip?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientY: 420 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientY: 360 }));
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0, clientY: 360 }));
+      return true;
+    `);
+    const resizedActivityHeight = await waitFor(
+      'activity drawer resize',
+      () => client.testDomQuery<number>(`
+        return document.querySelector('[data-tile-id="${paneId!}"] .tile-activity')?.getBoundingClientRect().height ?? 0;
+      `),
+      (height) => height > drawerResize.before + 4,
+      10_000,
+      100,
+    );
+    expect(resizedActivityHeight).toBeGreaterThan(drawerResize.before);
+  });
+
+  it('injects HERD_TILE_ID into spawned shell tiles', async () => {
+    const tileId = await spawnShellInActiveTab(client);
+
+    await client.execInShell(
+      tileId,
+      "printf '__HERD_ENV__ tile=%s sock=%s\\n' \"$HERD_TILE_ID\" \"$HERD_SOCK\"",
+    );
+
+    const output = await waitFor(
+      'shell env output',
+      () => client.readOutput(tileId),
+      (nextOutput) => nextOutput.output.includes('__HERD_ENV__ tile='),
+      30_000,
+      150,
+    );
+
+    expect(output.output).toContain(`__HERD_ENV__ tile=${tileId} `);
+    expect(output.output).toMatch(/__HERD_ENV__ tile=\S+ sock=\/tmp\/herd(?:-[^\s]+)?\.sock/);
+  });
+
+  it('injects HERD_TILE_ID into toolbar-spawned shell tiles', async () => {
+    const tileId = await spawnToolbarShellInActiveTab(client);
+
+    await client.execInShell(
+      tileId,
+      "printf '__HERD_TOOLBAR_ENV__ tile=%s sock=%s\\n' \"$HERD_TILE_ID\" \"$HERD_SOCK\"",
+    );
+
+    const output = await waitFor(
+      'toolbar shell env output',
+      () => client.readOutput(tileId),
+      (nextOutput) => nextOutput.output.includes('__HERD_TOOLBAR_ENV__ tile='),
+      30_000,
+      150,
+    );
+
+    expect(output.output).toContain(`__HERD_TOOLBAR_ENV__ tile=${tileId} `);
+    expect(output.output).toMatch(/__HERD_TOOLBAR_ENV__ tile=\S+ sock=\/tmp\/herd(?:-[^\s]+)?\.sock/);
   });
 
   it('clears persisted logs from the debug pane', async () => {
@@ -285,6 +427,151 @@ describe.sequential('in-app test driver', () => {
     expect(projection.context_menu?.target).toBe('tile');
     expect(projection.context_menu?.tile_id).toBe(selectedTileId);
     expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close Shell']);
+  });
+
+  it('shows browser Load submenu entries and suppresses browser webviews while context menus and motion are active', async () => {
+    await createIsolatedTab(client, 'browser-context-menu');
+    const browserTileId = await spawnBrowserInActiveTab(client);
+    await client.waitForIdle(30_000, 250);
+
+    await client.driverTileContextMenu(browserTileId, 480, 260);
+    let projection = await waitFor(
+      'browser tile context menu opens',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.context_menu?.tile_id === browserTileId
+        && nextProjection.context_menu.items.some((item) => item.id === 'browser-load'),
+      30_000,
+      150,
+    );
+
+    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Load', '', 'Close Browser']);
+    const loadLabels = projection.context_menu?.items[0]?.children?.map((item) => item.label) ?? [];
+    expect(loadLabels).toEqual(expect.arrayContaining([
+      'Checkers',
+      'Draw Poker',
+      'Game Boy',
+      'Pong',
+      'Snake Arena',
+      'Texas Holdem',
+    ]));
+    expect(loadLabels.indexOf('Game Boy')).toBeGreaterThan(loadLabels.indexOf('Draw Poker'));
+    expect(loadLabels.indexOf('Game Boy')).toBeLessThan(loadLabels.indexOf('Pong'));
+
+    const menuStackState = await client.testDomQuery<{ suppressed: boolean }>(`
+      return {
+        suppressed: document.querySelector('[data-tile-id="${browserTileId}"]')?.classList.contains('webview-suppressed') ?? false,
+      };
+    `);
+    expect(menuStackState.suppressed).toBe(true);
+
+    await client.contextMenuSelect('browser-load:extensions/browser/checkers/index.html');
+
+    const loadedUrlState = await waitFor(
+      'browser extension page loads from context menu',
+      () => client.testDomQuery<{ value: string; placeholder: string; suppressed: boolean }>(`
+        const tile = document.querySelector('[data-tile-id="${browserTileId}"]');
+        const input = tile?.querySelector('.url-input');
+        const placeholder = tile?.querySelector('.placeholder-url');
+        return {
+          value: input instanceof HTMLInputElement ? input.value : '',
+          placeholder: placeholder?.textContent ?? '',
+          suppressed: tile?.classList.contains('webview-suppressed') ?? false,
+        };
+      `),
+      (nextState) =>
+        (nextState.value.includes('extensions/browser/checkers/index.html')
+          || nextState.placeholder.includes('extensions/browser/checkers/index.html'))
+        && nextState.suppressed === false,
+      30_000,
+      150,
+    );
+    expect(loadedUrlState.value || loadedUrlState.placeholder).toContain('extensions/browser/checkers/index.html');
+
+    projection = await client.getProjection();
+    expect(projection.context_menu).toBeNull();
+
+    await client.canvasPan(24, 16);
+    const motionSuppressedState = await waitFor(
+      'browser webview suppresses during canvas motion',
+      () => client.testDomQuery<{ suppressed: boolean }>(`
+        return {
+          suppressed: document.querySelector('[data-tile-id="${browserTileId}"]')?.classList.contains('webview-suppressed') ?? false,
+        };
+      `),
+      (nextState) => nextState.suppressed,
+      10_000,
+      50,
+    );
+    expect(motionSuppressedState.suppressed).toBe(true);
+
+    const motionRestoredState = await waitFor(
+      'browser webview restores after canvas motion settles',
+      () => client.testDomQuery<{ suppressed: boolean }>(`
+        return {
+          suppressed: document.querySelector('[data-tile-id="${browserTileId}"]')?.classList.contains('webview-suppressed') ?? false,
+        };
+      `),
+      (nextState) => nextState.suppressed === false,
+      10_000,
+      50,
+    );
+    expect(motionRestoredState.suppressed).toBe(false);
+
+    await client.driverTileDrag(browserTileId, 80, 40);
+    const dragSuppressedState = await waitFor(
+      'browser webview suppresses during tile drag motion',
+      () => client.testDomQuery<{ suppressed: boolean }>(`
+        return {
+          suppressed: document.querySelector('[data-tile-id="${browserTileId}"]')?.classList.contains('webview-suppressed') ?? false,
+        };
+      `),
+      (nextState) => nextState.suppressed,
+      10_000,
+      50,
+    );
+    expect(dragSuppressedState.suppressed).toBe(true);
+
+    const dragRestoredState = await waitFor(
+      'browser webview restores after tile drag motion settles',
+      () => client.testDomQuery<{ suppressed: boolean }>(`
+        return {
+          suppressed: document.querySelector('[data-tile-id="${browserTileId}"]')?.classList.contains('webview-suppressed') ?? false,
+        };
+      `),
+      (nextState) => nextState.suppressed === false,
+      10_000,
+      50,
+    );
+    expect(dragRestoredState.suppressed).toBe(false);
+  });
+
+  it('creates a browser tile already loaded with an extension page', async () => {
+    await createIsolatedTab(client, 'browser-create-with-extension');
+    const browserTileId = await spawnBrowserInActiveTab(client, {
+      browserPath: 'extensions/browser/checkers/index.html',
+    });
+    await client.waitForIdle(30_000, 250);
+    await waitForDomDriver(client, 'dom driver after browser create-time extension load');
+
+    const loadedUrlState = await waitFor(
+      'browser extension page loads on create',
+      () => client.testDomQuery<{ value: string; placeholder: string }>(`
+        const tile = document.querySelector('[data-tile-id="${browserTileId}"]');
+        const input = tile?.querySelector('.url-input');
+        const placeholder = tile?.querySelector('.placeholder-url');
+        return {
+          value: input instanceof HTMLInputElement ? input.value : '',
+          placeholder: placeholder?.textContent ?? '',
+        };
+      `),
+      (nextState) =>
+        nextState.value.includes('extensions/browser/checkers/index.html')
+        || nextState.placeholder.includes('extensions/browser/checkers/index.html'),
+      30_000,
+      150,
+    );
+    expect(loadedUrlState.value || loadedUrlState.placeholder).toContain('extensions/browser/checkers/index.html');
   });
 
   it('creates a shell at the clicked point and closes a regular shell through context-menu selection', async () => {
@@ -548,6 +835,501 @@ describe.sequential('in-app test driver', () => {
     expect(projection.mode).toBe('command');
   });
 
+  it('gates browser tile address bar focus behind input mode', async () => {
+    let projection = await client.getProjection();
+    const shellTileId = projection.active_tab_terminals.find((terminal) => terminal.kind !== 'browser')?.id;
+    expect(shellTileId).toBeTruthy();
+
+    const browserTileId = await spawnBrowserInActiveTab(client);
+    await client.waitForIdle(30_000, 250);
+    await waitForDomDriver(client, 'dom driver after browser spawn');
+    await client.driverTileSelect(browserTileId);
+
+    let focusState = await client.testDomQuery<{
+      activeMatches: boolean;
+      readOnly: boolean;
+      tabIndex: number;
+    }>(`
+      const input = document.querySelector('[data-tile-id="${browserTileId}"] .url-input');
+      return {
+        activeMatches: document.activeElement === input,
+        readOnly: input instanceof HTMLInputElement ? input.readOnly : false,
+        tabIndex: input instanceof HTMLInputElement ? input.tabIndex : -999,
+      };
+    `);
+    expect(focusState.activeMatches).toBe(false);
+    expect(focusState.readOnly).toBe(true);
+    expect(focusState.tabIndex).toBe(-1);
+
+    await waitForDomDriver(client, 'dom driver before browser input mode keypress');
+    await client.pressKeys([{ key: 'i' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    projection = await waitFor(
+      'browser input mode after i',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.mode === 'input' && nextProjection.selected_tile_id === browserTileId,
+      30_000,
+      150,
+    );
+    expect(projection.mode).toBe('input');
+
+    focusState = await waitFor(
+      'browser url focus after i',
+      () => client.testDomQuery<{
+        activeMatches: boolean;
+        readOnly: boolean;
+        tabIndex: number;
+      }>(`
+        const input = document.querySelector('[data-tile-id="${browserTileId}"] .url-input');
+        return {
+          activeMatches: document.activeElement === input,
+          readOnly: input instanceof HTMLInputElement ? input.readOnly : false,
+          tabIndex: input instanceof HTMLInputElement ? input.tabIndex : -999,
+        };
+      `),
+      (nextState) => nextState.activeMatches,
+      30_000,
+      150,
+    );
+    expect(focusState.readOnly).toBe(false);
+    expect(focusState.tabIndex).toBe(0);
+
+    await client.testDomQuery(`
+      const input = document.querySelector('[data-tile-id="${browserTileId}"] .url-input');
+      input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', shiftKey: true, bubbles: true, cancelable: true }));
+      return true;
+    `);
+    projection = await waitFor(
+      'command mode after browser shift escape',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.mode === 'command',
+      30_000,
+      150,
+    );
+    expect(projection.mode).toBe('command');
+
+    await client.driverTileSelect(shellTileId!);
+    await waitForDomDriver(client, 'dom driver before shell input mode keypress');
+    await client.pressKeys([{ key: 'i' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    projection = await waitFor(
+      'input mode on shell before reselecting browser',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.mode === 'input' && nextProjection.selected_tile_id === shellTileId,
+      30_000,
+      150,
+    );
+    expect(projection.mode).toBe('input');
+
+    await client.driverTileSelect(browserTileId);
+    focusState = await waitFor(
+      'browser url focus after selecting while already in input mode',
+      () => client.testDomQuery<{
+        activeMatches: boolean;
+        readOnly: boolean;
+      }>(`
+        const input = document.querySelector('[data-tile-id="${browserTileId}"] .url-input');
+        return {
+          activeMatches: document.activeElement === input,
+          readOnly: input instanceof HTMLInputElement ? input.readOnly : false,
+        };
+      `),
+      (nextState) => nextState.activeMatches,
+      30_000,
+      150,
+    );
+    expect(focusState.readOnly).toBe(false);
+  });
+
+  it('shows a live browser DOM text preview immediately left of the activity toggle', async () => {
+    const projection = await createIsolatedTab(client, 'browser-text-preview');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in browser-text-preview tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      150,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection);
+    expect(rootAgent).toBeTruthy();
+
+    const browserTileId = await spawnBrowserInActiveTab(client);
+    await client.sendCommand({
+      command: 'browser_load',
+      tile_id: browserTileId,
+      path: 'tests/fixtures/browser-text-layout.html',
+      sender_agent_id: rootAgent!.agent_id,
+      sender_tile_id: rootAgent!.tile_id,
+    });
+    await waitFor(
+      'browser text layout fixture loaded',
+      () => client.browserDrive<string>(
+        browserTileId,
+        'dom_query',
+        { js: 'document.title' },
+        rootAgent!.tile_id,
+        rootAgent!.agent_id,
+      ),
+      (response) => response.result === 'browser-text-layout',
+      30_000,
+      150,
+    );
+    await client.waitForIdle(30_000, 250);
+    await waitForDomDriver(client, 'dom driver after browser preview fixture load');
+
+    const browserChromeState = await client.testDomQuery<{
+      overlayPresent: boolean;
+      insideCanvasWorld: boolean;
+      buttonOrder: string[];
+      zoomLabel: string | null;
+    }>(`
+      const tile = document.querySelector('[data-tile-id="${browserTileId}"]');
+      return {
+        overlayPresent: Boolean(document.querySelector('.browser-tile-overlay-layer')),
+        insideCanvasWorld: Boolean(tile?.closest('.canvas-world')),
+        buttonOrder: Array.from(tile?.querySelectorAll('.info-cluster-right button') ?? [])
+          .map((button) => button.textContent?.trim() ?? ''),
+        zoomLabel: tile?.getAttribute('data-browser-page-zoom') ?? null,
+      };
+    `);
+    expect(browserChromeState.overlayPresent).toBe(true);
+    expect(browserChromeState.insideCanvasWorld).toBe(false);
+    expect(browserChromeState.zoomLabel).toBe('100%');
+    expect(browserChromeState.buttonOrder[0]).toBe('Z-');
+    expect(browserChromeState.buttonOrder[1]).toBe('Z+');
+    expect(browserChromeState.buttonOrder[2]).toBe('TXT');
+    expect(browserChromeState.buttonOrder[3]?.startsWith('ACT')).toBe(true);
+
+    const browserTileRectBeforeCanvasZoom = await client.testDomQuery<{ width: number; height: number }>(`
+      const rect = document.querySelector('[data-tile-id="${browserTileId}"]')?.getBoundingClientRect();
+      return {
+        width: rect?.width ?? 0,
+        height: rect?.height ?? 0,
+      };
+    `);
+    const beforeCanvasZoom = await client.getProjection();
+    await client.canvasZoomAt(400, 300, 1.1);
+    const afterCanvasZoom = await waitFor(
+      'canvas zoom after browser tile measurement',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.canvas.zoom > beforeCanvasZoom.canvas.zoom,
+      10_000,
+      100,
+    );
+    expect(afterCanvasZoom.canvas.zoom).toBeGreaterThan(beforeCanvasZoom.canvas.zoom);
+    const browserTileRectAfterCanvasZoom = await waitFor(
+      'browser tile size grows with canvas zoom',
+      () => client.testDomQuery<{ width: number; height: number }>(`
+        const rect = document.querySelector('[data-tile-id="${browserTileId}"]')?.getBoundingClientRect();
+        return {
+          width: rect?.width ?? 0,
+          height: rect?.height ?? 0,
+        };
+      `),
+      (nextRect) =>
+        nextRect.width > browserTileRectBeforeCanvasZoom.width + 2
+        && nextRect.height > browserTileRectBeforeCanvasZoom.height + 2,
+      10_000,
+      100,
+    );
+    expect(browserTileRectAfterCanvasZoom.width).toBeGreaterThan(browserTileRectBeforeCanvasZoom.width);
+    expect(browserTileRectAfterCanvasZoom.height).toBeGreaterThan(browserTileRectBeforeCanvasZoom.height);
+    const zoomLabelAfterCanvasZoom = await client.testDomQuery<string | null>(`
+      return document.querySelector('[data-tile-id="${browserTileId}"]')?.getAttribute('data-browser-page-zoom') ?? null;
+    `);
+    expect(zoomLabelAfterCanvasZoom).toBe('100%');
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .browser-page-zoom-in-btn')?.click();
+      return true;
+    `);
+    const zoomedInLabel = await waitFor(
+      'browser page zoom label after zoom in',
+      () => client.testDomQuery<string | null>(`
+        return document.querySelector('[data-tile-id="${browserTileId}"]')?.getAttribute('data-browser-page-zoom') ?? null;
+      `),
+      (label) => label === '110%',
+      10_000,
+      100,
+    );
+    expect(zoomedInLabel).toBe('110%');
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .browser-page-zoom-out-btn')?.click();
+      return true;
+    `);
+    const resetZoomLabel = await waitFor(
+      'browser page zoom label after zoom out',
+      () => client.testDomQuery<string | null>(`
+        return document.querySelector('[data-tile-id="${browserTileId}"]')?.getAttribute('data-browser-page-zoom') ?? null;
+      `),
+      (label) => label === '100%',
+      10_000,
+      100,
+    );
+    expect(resetZoomLabel).toBe('100%');
+    const buttonOrder = await client.testDomQuery<string[]>(`
+      return Array.from(document.querySelectorAll('[data-tile-id="${browserTileId}"] .info-cluster-right button'))
+        .map((button) => button.textContent?.trim() ?? '');
+    `);
+    expect(buttonOrder[0]).toBe('Z-');
+    expect(buttonOrder[1]).toBe('Z+');
+    expect(buttonOrder[2]).toBe('TXT');
+    expect(buttonOrder[3]?.startsWith('ACT')).toBe(true);
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .text-preview-toggle-btn')?.click();
+      return true;
+    `);
+
+    const afterClickState = await client.testDomQuery<{ active: boolean; open: boolean }>(`
+      const button = document.querySelector('[data-tile-id="${browserTileId}"] .text-preview-toggle-btn');
+      const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+      return {
+        active: button?.classList.contains('active') ?? false,
+        open: Boolean(preview),
+      };
+    `);
+    expect(afterClickState.active).toBe(true);
+
+    let previewTextState = await waitFor(
+      'browser text preview opens with content',
+      () => client.testDomQuery<{ open: boolean; text: string }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const body = preview?.querySelector('.preview-text');
+        return {
+          open: Boolean(preview),
+          text: body?.textContent ?? '',
+        };
+      `),
+      (nextState) =>
+        nextState.open
+        && nextState.text.includes('SCORE')
+        && nextState.text.includes('1200')
+        && nextState.text.includes('LIVES')
+        && nextState.text.includes('x3')
+        && nextState.text.includes('PRESS')
+        && nextState.text.includes('START'),
+      30_000,
+      150,
+    );
+    expect(previewTextState.open).toBe(true);
+
+    const previewControls = await waitFor(
+      'browser preview header controls render',
+      () => client.testDomQuery<{
+        formats: string[];
+        activeFormat: string | null;
+        refreshLabel: string | null;
+      }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const formatButtons = Array.from(preview?.querySelectorAll('.preview-format-toggle') ?? []);
+        const refreshButton = preview?.querySelector('.preview-refresh-rate-btn');
+        return {
+          formats: formatButtons.map((button) => button.textContent?.trim() ?? ''),
+          activeFormat: preview?.getAttribute('data-preview-format') ?? null,
+          refreshLabel: refreshButton?.textContent?.trim() ?? null,
+        };
+      `),
+      (nextState) =>
+        nextState.formats.join(',') === 'Text,Braille,ANSI,ASCII'
+        && nextState.activeFormat === 'text'
+        && nextState.refreshLabel !== null,
+      30_000,
+      150,
+    );
+    expect(previewControls.formats).toEqual(['Text', 'Braille', 'ANSI', 'ASCII']);
+    expect(previewControls.activeFormat).toBe('text');
+    expect(previewControls.refreshLabel).toBe('1s');
+
+    const refreshSequence = [previewControls.refreshLabel];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const previousLabel = refreshSequence[refreshSequence.length - 1];
+      await client.testDomQuery(`
+        document.querySelector('[data-tile-id="${browserTileId}"] .preview-refresh-rate-btn')?.click();
+        return true;
+      `);
+      const nextLabel = await waitFor(
+        `browser preview refresh rate cycle ${attempt + 1}`,
+        () => client.testDomQuery<string | null>(`
+          return document.querySelector('[data-tile-id="${browserTileId}"] .preview-refresh-rate-btn')?.textContent?.trim() ?? null;
+        `),
+        (label) => Boolean(label) && label !== previousLabel,
+        10_000,
+        100,
+      );
+      refreshSequence.push(nextLabel);
+    }
+    expect(refreshSequence).toEqual(['1s', '3s', '0.5s', '1s']);
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .preview-format-toggle[data-format="braille"]')?.click();
+      return true;
+    `);
+    let activeFormatState = await waitFor(
+      'browser preview switches to braille',
+      () => client.testDomQuery<{ format: string | null; text: string }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const body = preview?.querySelector('.preview-text');
+        return {
+          format: preview?.getAttribute('data-preview-format') ?? null,
+          text: body?.textContent ?? '',
+        };
+      `),
+      (nextState) =>
+        Boolean(nextState)
+        && nextState.format === 'braille'
+        && /[\u2800-\u28FF]/.test(nextState.text),
+      30_000,
+      150,
+    );
+    expect(activeFormatState.format).toBe('braille');
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .preview-format-toggle[data-format="ansi"]')?.click();
+      return true;
+    `);
+    activeFormatState = await waitFor(
+      'browser preview switches to ansi',
+      () => client.testDomQuery<{
+        format: string | null;
+        text: string;
+        renderedAnsi: boolean;
+        segmentCount: number;
+        firstStyle: string | null;
+      }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const body = preview?.querySelector('.preview-text');
+        const ansi = preview?.querySelector('.preview-ansi');
+        const firstSegment = ansi?.querySelector('[data-ansi-segment="true"]');
+        return {
+          format: preview?.getAttribute('data-preview-format') ?? null,
+          text: body?.textContent ?? '',
+          renderedAnsi: Boolean(ansi),
+          segmentCount: ansi?.querySelectorAll('[data-ansi-segment="true"]').length ?? 0,
+          firstStyle: firstSegment?.getAttribute('style') ?? null,
+        };
+      `),
+      (nextState) =>
+        Boolean(nextState)
+        && nextState.format === 'ansi'
+        && nextState.renderedAnsi
+        && nextState.segmentCount > 0
+        && Boolean(nextState.firstStyle)
+        && !nextState.text.includes('\u001b['),
+      30_000,
+      150,
+    );
+    expect(activeFormatState.format).toBe('ansi');
+    expect(activeFormatState.renderedAnsi).toBe(true);
+    expect(activeFormatState.firstStyle).toContain('rgb(');
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .preview-format-toggle[data-format="ascii"]')?.click();
+      return true;
+    `);
+    activeFormatState = await waitFor(
+      'browser preview switches to ascii',
+      () => client.testDomQuery<{ format: string | null; text: string }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const body = preview?.querySelector('.preview-text');
+        return {
+          format: preview?.getAttribute('data-preview-format') ?? null,
+          text: body?.textContent ?? '',
+        };
+      `),
+      (nextState) =>
+        Boolean(nextState)
+        && nextState.format === 'ascii',
+      30_000,
+      150,
+    );
+    expect(activeFormatState.format).toBe('ascii');
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${browserTileId}"] .preview-format-toggle[data-format="text"]')?.click();
+      return true;
+    `);
+    const restoredTextState = await waitFor(
+      'browser preview switches back to text',
+      () => client.testDomQuery<{ format: string | null; text: string }>(`
+        const preview = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+        const body = preview?.querySelector('.preview-text');
+        return {
+          format: preview?.getAttribute('data-preview-format') ?? null,
+          text: body?.textContent ?? '',
+        };
+      `),
+      (nextState) =>
+        Boolean(nextState)
+        && nextState.format === 'text'
+        && nextState.text.includes('SCORE')
+        && nextState.text.includes('1200'),
+      30_000,
+      150,
+    );
+    expect(restoredTextState.format).toBe('text');
+
+    const previewResize = await client.testDomQuery<{ grip: boolean; before: number; gripCenterDelta: number }>(`
+      const drawer = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview');
+      const grip = drawer?.querySelector('.drawer-resize-grip');
+      const header = drawer?.querySelector('.preview-header');
+      const before = drawer?.getBoundingClientRect().height ?? 0;
+      const gripRect = grip?.getBoundingClientRect();
+      const headerRect = header?.getBoundingClientRect();
+      return {
+        grip: Boolean(grip),
+        before,
+        gripCenterDelta: gripRect && headerRect
+          ? Math.abs((gripRect.left + gripRect.width / 2) - (headerRect.left + headerRect.width / 2))
+          : -1,
+      };
+    `);
+    expect(previewResize.grip).toBe(true);
+    expect(previewResize.gripCenterDelta).toBeLessThan(10);
+    await client.testDomQuery(`
+      const grip = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview .drawer-resize-grip');
+      grip?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientY: 420 }));
+      window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientY: 340 }));
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0, clientY: 340 }));
+      return true;
+    `);
+    const resizedPreviewHeight = await waitFor(
+      'browser preview drawer resize',
+      () => client.testDomQuery<number>(`
+        return document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview')?.getBoundingClientRect().height ?? 0;
+      `),
+      (height) => height > previewResize.before + 4,
+      10_000,
+      100,
+    );
+    expect(resizedPreviewHeight).toBeGreaterThan(previewResize.before);
+
+    await client.browserDrive<string>(
+      browserTileId,
+      'eval',
+      {
+        js: `
+document.querySelector('#score').textContent = 'SCORE 9800';
+return document.querySelector('#score').textContent;
+`,
+      },
+      rootAgent!.tile_id,
+      rootAgent!.agent_id,
+    );
+
+    previewTextState = await waitFor(
+      'browser text preview refreshes after dom mutation',
+      () => client.testDomQuery<{ text: string }>(`
+        const body = document.querySelector('[data-tile-id="${browserTileId}"] .browser-text-preview .preview-text');
+        return { text: body?.textContent ?? '' };
+      `),
+      (nextState) => nextState.text.includes('9800'),
+      30_000,
+      150,
+    );
+    expect(previewTextState.text).toContain('SCORE');
+    expect(previewTextState.text).toContain('9800');
+  });
+
   it('renders work cards on the canvas, keeps the sidebar compact, and scopes tmux items to the active tab', async () => {
     let projection = await createIsolatedTab(client, 'canvas-work-a');
     const firstSessionId = projection.active_tab_id!;
@@ -695,6 +1477,121 @@ describe.sequential('in-app test driver', () => {
     );
 
     expect(projection.work_items.some((item) => item.work_id === work.work_id)).toBe(false);
+  });
+
+  it('minimizes tiles into a dock above the status bar and restores them', async () => {
+    let projection = await createIsolatedTab(client, 'minimize-dock');
+    const shellTileId = await spawnShellInActiveTab(client);
+    const work = await client.toolbarSpawnWork('Minimize Me');
+
+    projection = await waitFor(
+      'work card for minimize test',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_work_cards.some((card) => card.workId === work.work_id),
+      30_000,
+      150,
+    );
+
+    const minimizeButtons = await client.testDomQuery<{
+      shell: boolean;
+      work: boolean;
+    }>(`
+      return {
+        shell: document.querySelector('[data-tile-id="${shellTileId}"] .minimize-btn') instanceof HTMLButtonElement,
+        work: document.querySelector('[data-work-id="${work.work_id}"] .work-card-minimize') instanceof HTMLButtonElement,
+      };
+    `);
+    expect(minimizeButtons).toEqual({ shell: true, work: true });
+
+    await client.testDomQuery(`
+      const shellButton = document.querySelector('[data-tile-id="${shellTileId}"] .minimize-btn');
+      const workButton = document.querySelector('[data-work-id="${work.work_id}"] .work-card-minimize');
+      if (!(shellButton instanceof HTMLButtonElement) || !(workButton instanceof HTMLButtonElement)) {
+        throw new Error('missing minimize buttons');
+      }
+      shellButton.click();
+      workButton.click();
+      return true;
+    `);
+
+    projection = await waitFor(
+      'shell and work minimized',
+      () => client.getProjection(),
+      (nextProjection) => {
+        const shell = nextProjection.active_tab_terminals.find((terminal) => terminal.id === shellTileId);
+        const card = nextProjection.active_tab_work_cards.find((entry) => entry.workId === work.work_id);
+        return shell?.minimized === true && card?.minimized === true;
+      },
+      30_000,
+      150,
+    );
+
+    const minimizedDom = await client.testDomQuery<{
+      dockIds: string[];
+      shellVisible: boolean;
+      workVisible: boolean;
+      dockBottom: number | null;
+      statusTop: number | null;
+    }>(`
+      const dockItems = Array.from(document.querySelectorAll('[data-minimized-tile-id]'));
+      const firstDock = dockItems[0];
+      const statusBar = document.querySelector('.status-bar');
+      return {
+        dockIds: dockItems.map((item) => item.getAttribute('data-minimized-tile-id') ?? ''),
+        shellVisible: document.querySelector('[data-tile-id="${shellTileId}"]') !== null,
+        workVisible: document.querySelector('[data-work-id="${work.work_id}"]') !== null,
+        dockBottom: firstDock instanceof HTMLElement ? firstDock.getBoundingClientRect().bottom : null,
+        statusTop: statusBar instanceof HTMLElement ? statusBar.getBoundingClientRect().top : null,
+      };
+    `);
+
+    expect(minimizedDom.dockIds).toEqual(expect.arrayContaining([shellTileId, work.tile_id]));
+    expect(minimizedDom.shellVisible).toBe(false);
+    expect(minimizedDom.workVisible).toBe(false);
+    expect(minimizedDom.dockBottom).not.toBeNull();
+    expect(minimizedDom.statusTop).not.toBeNull();
+    expect(minimizedDom.dockBottom!).toBeLessThanOrEqual(minimizedDom.statusTop!);
+
+    await client.testDomQuery(`
+      const shellDock = document.querySelector('[data-minimized-tile-id="${shellTileId}"]');
+      const workDock = document.querySelector('[data-minimized-tile-id="${work.tile_id}"]');
+      if (!(shellDock instanceof HTMLButtonElement) || !(workDock instanceof HTMLButtonElement)) {
+        throw new Error('missing minimized dock buttons');
+      }
+      shellDock.click();
+      workDock.click();
+      return true;
+    `);
+
+    projection = await waitFor(
+      'shell and work restored',
+      () => client.getProjection(),
+      (nextProjection) => {
+        const shell = nextProjection.active_tab_terminals.find((terminal) => terminal.id === shellTileId);
+        const card = nextProjection.active_tab_work_cards.find((entry) => entry.workId === work.work_id);
+        return shell?.minimized !== true && card?.minimized !== true;
+      },
+      30_000,
+      150,
+    );
+
+    const restoredDom = await client.testDomQuery<{
+      dockCount: number;
+      shellVisible: boolean;
+      workVisible: boolean;
+    }>(`
+      return {
+        dockCount: document.querySelectorAll('[data-minimized-tile-id]').length,
+        shellVisible: document.querySelector('[data-tile-id="${shellTileId}"]') !== null,
+        workVisible: document.querySelector('[data-work-id="${work.work_id}"]') !== null,
+      };
+    `);
+
+    expect(restoredDom).toEqual({
+      dockCount: 0,
+      shellVisible: true,
+      workVisible: true,
+    });
   });
 
   it('renders tile ports with the right modes and supports drag-connect plus disconnect on the canvas', async () => {
@@ -884,6 +1781,62 @@ describe.sequential('in-app test driver', () => {
       30_000,
       150,
     );
+  });
+
+  it('shows a Ports setting below spawn dir and updates the selected tile port count', async () => {
+    const projection = await createIsolatedTab(client, 'ports-setting');
+    const selectedTileId = projection.selected_tile_id;
+    await client.sidebarOpen();
+
+    const initialSettings = await client.testDomQuery<{
+      labels: string[];
+      selected: string;
+      selectedTilePortCount: number;
+    }>(`
+      const tileId = ${JSON.stringify(selectedTileId)};
+      return {
+        labels: Array.from(document.querySelectorAll('.sidebar .settings-card-label')).map((element) => element.textContent?.trim() ?? ''),
+        selected: document.querySelector('.tile-port-count-toggle.selected')?.textContent?.trim() ?? '',
+        selectedTilePortCount: tileId
+          ? document.querySelectorAll(\`[data-tile-id="\${tileId}"] [data-port]\`).length
+          : 0,
+      };
+    `);
+
+    expect(initialSettings.labels).toEqual(['SPAWN DIR', 'PORTS']);
+    expect(initialSettings.selected).toBe('4');
+    expect(initialSettings.selectedTilePortCount).toBe(4);
+
+    await client.testDomQuery(`
+      document.querySelector('.tile-port-count-toggle[data-port-count="12"]')?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      return true;
+    `);
+
+    const updatedSettings = await waitFor(
+      'ports setting changes selected tile port count',
+      () =>
+        client.testDomQuery<{
+          selected: string;
+          selectedTilePortCount: number;
+        }>(`
+          const tileId = ${JSON.stringify(selectedTileId)};
+          return {
+            selected: document.querySelector('.tile-port-count-toggle.selected')?.textContent?.trim() ?? '',
+            selectedTilePortCount: tileId
+              ? document.querySelectorAll(\`[data-tile-id="\${tileId}"] [data-port]\`).length
+              : 0,
+          };
+        `),
+      (nextState) => nextState.selected === '12' && nextState.selectedTilePortCount === 12,
+      30_000,
+      150,
+    );
+
+    expect(updatedSettings.selected).toBe('12');
+    expect(updatedSettings.selectedTilePortCount).toBe(12);
   });
 
   it('covers shell create, tile selection/close, sidebar rename, and canvas actions through the typed driver', async () => {

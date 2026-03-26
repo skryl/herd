@@ -2,6 +2,15 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onDestroy, onMount } from 'svelte';
+  import {
+    browserWebviewPageZoom,
+    DEFAULT_BROWSER_PAGE_ZOOM,
+    MAX_BROWSER_PAGE_ZOOM,
+    MIN_BROWSER_PAGE_ZOOM,
+    formatBrowserPageZoom,
+    stepBrowserPageZoom,
+  } from './browserViewport';
+  import BrowserTextPreviewDrawer from './BrowserTextPreviewDrawer.svelte';
   import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import type { TerminalInfo } from './types';
@@ -10,14 +19,20 @@
     forwardBrowserWebview,
     hideBrowserWebview,
     navigateBrowserWebview,
+    readBrowserPreview,
     reloadBrowserWebview,
     syncBrowserWebview,
+    type BrowserPreviewFormat,
+    type BrowserTextPreviewResult,
     type BrowserWebviewState,
     type BrowserWebviewViewport,
   } from './tauri';
   import {
+    browserWebviewsSuspended,
     canvasState,
     clientDeltaToWorldDelta,
+    contextMenuState,
+    mode,
     openPaneContextMenu,
     persistPaneLayout,
     registerPaneDriverHandle,
@@ -25,6 +40,7 @@
     selectTile,
     selectedTerminalId,
     tileActivityById,
+    togglePaneMinimized,
     updateTerminal,
     zoomCanvasToTile,
   } from './stores/appState';
@@ -40,6 +56,7 @@
   }
 
   const DEFAULT_BROWSER_URL = 'https://example.com/';
+  const PREVIEW_REFRESH_INTERVALS_MS = [500, 1000, 3000] as const;
   const appWindow = getCurrentWindow();
 
   let { info }: Props = $props();
@@ -68,12 +85,33 @@
   let windowLogicalHeight = $state(0);
 
   let isSelected = $derived($selectedTerminalId === info.id);
+  let canEditUrl = $derived($mode === 'input' && isSelected && !info.readOnly);
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
   let componentTypeLabel = $derived(info.readOnly ? 'VIEW' : 'WEB');
   let locationLabel = $derived(browserLocationLabel(currentUrl));
   let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
+  let previewColumns = $derived(Math.max(40, Math.min(160, Math.round(Math.max(240, info.width - 20) / 6))));
+  let browserPageZoom = $state(DEFAULT_BROWSER_PAGE_ZOOM);
+  let browserPageZoomLabel = $derived(formatBrowserPageZoom(browserPageZoom));
+  let effectiveBrowserPageZoom = $derived(browserWebviewPageZoom(browserPageZoom, $canvasState.zoom));
+  let browserTileX = $derived(info.x * $canvasState.zoom + $canvasState.panX);
+  let browserTileY = $derived(info.y * $canvasState.zoom + $canvasState.panY);
+  let contextMenuOpen = $derived(Boolean($contextMenuState?.open));
+  let webviewSuppressed = $derived(contextMenuOpen || $browserWebviewsSuspended);
+  let canZoomBrowserPageOut = $derived(browserPageZoom > MIN_BROWSER_PAGE_ZOOM);
+  let canZoomBrowserPageIn = $derived(browserPageZoom < MAX_BROWSER_PAGE_ZOOM);
   let activityOpen = $state(false);
+  let previewOpen = $state(false);
+  let previewFormat = $state<BrowserPreviewFormat>('text');
+  let previewRefreshMs = $state<(typeof PREVIEW_REFRESH_INTERVALS_MS)[number]>(1000);
+  let previewLoading = $state(false);
+  let previewText = $state('');
+  let previewRows = $state(0);
+  let previewError = $state<string | null>(null);
+  let previewRefreshInFlight = false;
+  let previewRefreshQueued = false;
+  let previewRefreshLabel = $derived(formatPreviewRefreshLabel(previewRefreshMs));
 
   let isDragging = false;
   let dragStartX = 0;
@@ -117,7 +155,7 @@
   function intersectRects(
     target: DOMRect,
     clip: DOMRect,
-  ): BrowserWebviewViewport {
+  ): Pick<BrowserWebviewViewport, 'x' | 'y' | 'width' | 'height' | 'visible'> {
     const left = Math.max(target.left, clip.left);
     const top = Math.max(target.top, clip.top);
     const right = Math.min(target.right, clip.right);
@@ -179,16 +217,19 @@
         y: hostRect.top * zoomFactorY,
         width: hostRect.width * zoomFactorX,
         height: hostRect.height * zoomFactorY,
-        visible: hostRect.width > 1 && hostRect.height > 1 && document.visibilityState === 'visible',
+        visible: hostRect.width > 1 && hostRect.height > 1 && document.visibilityState === 'visible' && !webviewSuppressed,
+        pageZoom: effectiveBrowserPageZoom,
       };
     }
     const clipped = intersectRects(hostRect, clipRect);
     return {
       ...clipped,
+      visible: clipped.visible && !webviewSuppressed,
       x: clipped.x * zoomFactorX,
       y: clipped.y * zoomFactorY,
       width: clipped.width * zoomFactorX,
       height: clipped.height * zoomFactorY,
+      pageZoom: effectiveBrowserPageZoom,
     };
   }
 
@@ -220,6 +261,7 @@
           Math.round(viewport.width),
           Math.round(viewport.height),
           viewport.visible ? '1' : '0',
+          viewport.pageZoom.toFixed(2),
         ].join(':');
         if (viewportKey === lastViewportKey) {
           continue;
@@ -298,6 +340,86 @@
     }
   }
 
+  function formatPreviewRefreshLabel(value: number) {
+    return value === 500 ? '0.5s' : `${value / 1000}s`;
+  }
+
+  function applyPreview(preview: BrowserTextPreviewResult) {
+    previewText = preview.text;
+    previewRows = preview.rows;
+    previewError = null;
+  }
+
+  function selectPreviewFormat(nextFormat: BrowserPreviewFormat) {
+    if (previewFormat === nextFormat) {
+      return;
+    }
+    previewFormat = nextFormat;
+    previewError = null;
+    void refreshPreview();
+  }
+
+  function cyclePreviewRefreshRate() {
+    const currentIndex = PREVIEW_REFRESH_INTERVALS_MS.indexOf(previewRefreshMs);
+    const nextIndex = (currentIndex + 1) % PREVIEW_REFRESH_INTERVALS_MS.length;
+    previewRefreshMs = PREVIEW_REFRESH_INTERVALS_MS[nextIndex];
+  }
+
+  async function refreshPreview() {
+    if (!previewOpen || destroyed) {
+      return;
+    }
+    if (previewRefreshInFlight) {
+      previewRefreshQueued = true;
+      return;
+    }
+
+    previewRefreshInFlight = true;
+    previewLoading = !previewText;
+    try {
+      do {
+        previewRefreshQueued = false;
+        const requestedFormat = previewFormat;
+        const requestedColumns = previewColumns;
+        const preview = await readBrowserPreview(info.paneId, requestedFormat, requestedColumns);
+        if (destroyed || !previewOpen) {
+          return;
+        }
+        if (requestedFormat !== previewFormat || requestedColumns !== previewColumns) {
+          previewRefreshQueued = true;
+          continue;
+        }
+        applyPreview(preview);
+      } while (previewRefreshQueued && !destroyed && previewOpen);
+    } catch (error) {
+      if (!destroyed) {
+        previewError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      previewLoading = false;
+      previewRefreshInFlight = false;
+    }
+  }
+
+  function toggleTextPreview(event: MouseEvent) {
+    event.stopPropagation();
+    previewOpen = !previewOpen;
+    if (previewOpen) {
+      void refreshPreview();
+    }
+  }
+
+  function adjustBrowserPageZoom(direction: 'out' | 'in', event: MouseEvent) {
+    event.stopPropagation();
+    const nextZoom = stepBrowserPageZoom(browserPageZoom, direction);
+    if (nextZoom === browserPageZoom) {
+      return;
+    }
+    browserPageZoom = nextZoom;
+    lastViewportKey = '';
+    queueBrowserSync();
+  }
+
   function handleTitleDblClick(e: MouseEvent) {
     zoomCanvasToTile(info.paneId, window.innerWidth, window.innerHeight - 32);
     e.stopPropagation();
@@ -361,6 +483,10 @@
 
   function handleClose() {
     removeTerminal(info.id);
+  }
+
+  function handleMinimize() {
+    togglePaneMinimized(info.id);
   }
 
   function handleContextMenu(e: MouseEvent) {
@@ -455,6 +581,16 @@
   });
 
   $effect(() => {
+    webviewSuppressed;
+    lastViewportKey = '';
+    if (webviewSuppressed) {
+      void hideBrowserWebview(info.paneId);
+      return;
+    }
+    queueBrowserSync();
+  });
+
+  $effect(() => {
     info.x;
     info.y;
     info.width;
@@ -462,10 +598,52 @@
     $canvasState.panX;
     $canvasState.panY;
     $canvasState.zoom;
+    browserPageZoom;
     windowScaleFactor;
     windowLogicalWidth;
     windowLogicalHeight;
     queueBrowserSync();
+  });
+
+  $effect(() => {
+    if (!urlInputRef) {
+      return;
+    }
+
+    if (canEditUrl) {
+      if (document.activeElement !== urlInputRef) {
+        urlInputRef.focus();
+      }
+      return;
+    }
+
+    if (document.activeElement === urlInputRef) {
+      urlInputRef.blur();
+    }
+  });
+
+  $effect(() => {
+    if (!previewOpen) {
+      return;
+    }
+    currentUrl;
+    loading;
+    previewColumns;
+    previewFormat;
+    void refreshPreview();
+  });
+
+  $effect(() => {
+    if (!previewOpen) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshPreview();
+    }, previewRefreshMs);
+    return () => {
+      window.clearInterval(intervalId);
+    };
   });
 </script>
 
@@ -476,8 +654,10 @@
   class="pcb-component"
   class:selected={isSelected}
   class:kind-browser={true}
+  class:webview-suppressed={webviewSuppressed}
   data-tile-id={info.tileId}
-  style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
+  data-browser-page-zoom={browserPageZoomLabel}
+  style="left: 0; top: 0; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1}; transform: translate({browserTileX}px, {browserTileY}px) scale({$canvasState.zoom});"
   onmousedown={(e) => {
     selectTile(info.id);
     e.stopPropagation();
@@ -497,7 +677,22 @@
       </div>
       <div class="header-right">
         <span class="coord-info">{Math.round(info.x)},{Math.round(info.y)}</span>
-        <button class="close-btn" type="button" onclick={handleClose}>
+        <button
+          class="header-control-btn minimize-btn"
+          type="button"
+          title="Minimize Browser"
+          aria-label="Minimize Browser"
+          onmousedown={(event) => event.stopPropagation()}
+          onclick={handleMinimize}
+        >
+          <span class="control-glyph">_</span>
+        </button>
+        <button
+          class="header-control-btn close-btn"
+          type="button"
+          onmousedown={(event) => event.stopPropagation()}
+          onclick={handleClose}
+        >
           <span class="close-x">x</span>
         </button>
       </div>
@@ -538,17 +733,41 @@
         bind:this={urlInputRef}
         bind:value={urlDraft}
         class="url-input"
+        class:locked={!canEditUrl}
         spellcheck="false"
         placeholder="https://example.com"
-        onfocus={() => {
+        readonly={!canEditUrl}
+        tabindex={canEditUrl ? 0 : -1}
+        onfocus={(event) => {
+          if (!canEditUrl) {
+            (event.currentTarget as HTMLInputElement).blur();
+            return;
+          }
           isEditingUrl = true;
         }}
         onblur={() => {
           isEditingUrl = false;
           urlDraft = currentUrl;
         }}
-        onmousedown={(event) => event.stopPropagation()}
+        onmousedown={(event) => {
+          if (!canEditUrl) {
+            selectTile(info.id);
+            event.preventDefault();
+          }
+          event.stopPropagation();
+        }}
         onkeydown={(event) => {
+          if (!canEditUrl) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          if (event.key === 'Escape' && event.shiftKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            mode.set('command');
+            return;
+          }
           event.stopPropagation();
           if (event.key === 'Enter') {
             void navigate();
@@ -577,6 +796,20 @@
       </div>
     </div>
 
+    {#if previewOpen}
+      <BrowserTextPreviewDrawer
+        text={previewText}
+        loading={previewLoading}
+        error={previewError}
+        format={previewFormat}
+        columns={previewColumns}
+        rows={previewRows}
+        refreshRateLabel={previewRefreshLabel}
+        onSelectFormat={selectPreviewFormat}
+        onCycleRefreshRate={cyclePreviewRefreshRate}
+      />
+    {/if}
+
     {#if activityOpen}
       <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
     {/if}
@@ -601,6 +834,36 @@
         <span class="info-item">
           <span class="info-label">{Math.round(info.width)}x{Math.round(info.height)}</span>
         </span>
+        <button
+          class="browser-page-zoom-btn browser-page-zoom-out-btn"
+          type="button"
+          title={`Zoom browser page out (${browserPageZoomLabel})`}
+          aria-label={`Zoom browser page out (${browserPageZoomLabel})`}
+          disabled={!canZoomBrowserPageOut}
+          onclick={(event) => adjustBrowserPageZoom('out', event)}
+        >
+          Z-
+        </button>
+        <button
+          class="browser-page-zoom-btn browser-page-zoom-in-btn"
+          type="button"
+          title={`Zoom browser page in (${browserPageZoomLabel})`}
+          aria-label={`Zoom browser page in (${browserPageZoomLabel})`}
+          disabled={!canZoomBrowserPageIn}
+          onclick={(event) => adjustBrowserPageZoom('in', event)}
+        >
+          Z+
+        </button>
+        <button
+          class="text-preview-toggle-btn"
+          class:active={previewOpen}
+          type="button"
+          title={previewOpen ? 'Hide live text preview' : 'Show live text preview'}
+          aria-label={previewOpen ? 'Hide live text preview' : 'Show live text preview'}
+          onclick={toggleTextPreview}
+        >
+          TXT
+        </button>
         <button
           class="activity-toggle-btn"
           class:active={activityOpen}
@@ -634,6 +897,8 @@
     display: flex;
     align-items: stretch;
     filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.6));
+    transform-origin: 0 0;
+    pointer-events: auto;
     --tile-port-contour: rgba(102, 225, 255, 0.34);
   }
 
@@ -644,6 +909,10 @@
 
   .pcb-component.selected .component-body {
     border-color: rgba(102, 225, 255, 0.5);
+  }
+
+  .pcb-component.webview-suppressed .browser-surface-placeholder {
+    opacity: 1;
   }
 
   .component-body {
@@ -660,6 +929,13 @@
     --activity-text: var(--silk-dim);
     --activity-empty: rgba(102, 225, 255, 0.62);
     --activity-bg: rgba(6, 15, 20, 0.96);
+    --preview-border: rgba(102, 225, 255, 0.22);
+    --preview-border-soft: rgba(102, 225, 255, 0.18);
+    --preview-accent: #66e1ff;
+    --preview-text: #d8f8ff;
+    --preview-meta: rgba(102, 225, 255, 0.65);
+    --preview-empty: rgba(102, 225, 255, 0.62);
+    --preview-bg: rgba(6, 15, 20, 0.96);
   }
 
   .ic-notch {
@@ -731,7 +1007,7 @@
     color: var(--copper-dim);
   }
 
-  .close-btn {
+  .header-control-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -745,9 +1021,28 @@
     text-transform: uppercase;
   }
 
+  .minimize-btn {
+    color: rgba(102, 225, 255, 0.7);
+  }
+
+  .minimize-btn:hover {
+    color: #66e1ff;
+    border-color: rgba(102, 225, 255, 0.2);
+  }
+
+  .close-btn {
+    color: var(--silk-dim);
+  }
+
   .close-btn:hover {
     color: var(--phosphor-red);
     border-color: rgba(255, 51, 51, 0.2);
+  }
+
+  .control-glyph {
+    font-size: 10px;
+    line-height: 1;
+    transform: translateY(-1px);
   }
 
   .close-x {
@@ -794,6 +1089,11 @@
     font-family: var(--font-mono);
     font-size: 10px;
     outline: none;
+  }
+
+  .url-input.locked {
+    color: rgba(228, 251, 255, 0.72);
+    cursor: default;
   }
 
   .url-input:focus {
@@ -891,6 +1191,8 @@
     flex: 1;
   }
 
+  .browser-page-zoom-btn,
+  .text-preview-toggle-btn,
   .activity-toggle-btn {
     height: 16px;
     padding: 0 6px;
@@ -903,7 +1205,19 @@
     cursor: pointer;
   }
 
+  .browser-page-zoom-btn {
+    min-width: 22px;
+  }
+
+  .browser-page-zoom-btn:disabled {
+    opacity: 0.42;
+    cursor: default;
+  }
+
+  .browser-page-zoom-btn:not(:disabled):hover,
+  .text-preview-toggle-btn.active,
   .activity-toggle-btn.active,
+  .text-preview-toggle-btn:hover,
   .activity-toggle-btn:hover {
     border-color: var(--activity-accent);
     background: color-mix(in srgb, var(--activity-accent) 10%, rgba(0, 0, 0, 0.18));

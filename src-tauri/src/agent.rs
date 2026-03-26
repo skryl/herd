@@ -10,6 +10,7 @@ use crate::tile_message::TileMessageLogEntry;
 pub enum AgentType {
     #[default]
     Claude,
+    Fixture,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -36,13 +37,13 @@ pub struct AgentInfo {
     pub display_name: String,
     pub alive: bool,
     pub chatter_subscribed: bool,
-    pub topics: Vec<String>,
+    pub channels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TopicInfo {
+pub struct ChannelInfo {
     pub session_id: String,
     pub name: String,
     pub subscriber_count: usize,
@@ -55,6 +56,7 @@ pub struct TopicInfo {
 pub enum ChatterKind {
     Direct,
     Public,
+    Channel,
     Network,
     Root,
     SignOn,
@@ -93,7 +95,7 @@ pub struct ChatterEntry {
     pub to_display_name: Option<String>,
     pub message: String,
     #[serde(default)]
-    pub topics: Vec<String>,
+    pub channels: Vec<String>,
     #[serde(default)]
     pub mentions: Vec<String>,
     pub timestamp_ms: i64,
@@ -106,6 +108,7 @@ pub struct ChatterEntry {
 pub enum AgentChannelEventKind {
     Direct,
     Public,
+    Channel,
     Network,
     Root,
     System,
@@ -124,7 +127,7 @@ pub struct AgentChannelEvent {
     pub to_display_name: Option<String>,
     pub message: String,
     #[serde(default)]
-    pub topics: Vec<String>,
+    pub channels: Vec<String>,
     #[serde(default)]
     pub mentions: Vec<String>,
     #[serde(default)]
@@ -143,7 +146,7 @@ pub enum AgentStreamEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentDebugState {
     pub agents: Vec<AgentInfo>,
-    pub topics: Vec<TopicInfo>,
+    pub channels: Vec<ChannelInfo>,
     pub chatter: Vec<ChatterEntry>,
     #[serde(default)]
     pub agent_logs: Vec<AgentLogEntry>,
@@ -157,8 +160,8 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-pub fn normalize_topic(topic: &str) -> Option<String> {
-    let trimmed = topic.trim();
+pub fn normalize_channel(channel_name: &str) -> Option<String> {
+    let trimmed = channel_name.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -195,22 +198,22 @@ pub fn normalize_mention(agent_id: &str) -> Option<String> {
     }
 }
 
-pub fn collect_topics(message: &str, explicit_topics: &[String]) -> Vec<String> {
-    let mut topics = BTreeSet::new();
-    for topic in explicit_topics {
-        if let Some(normalized) = normalize_topic(topic) {
-            topics.insert(normalized);
+pub fn collect_channels(message: &str, explicit_channels: &[String]) -> Vec<String> {
+    let mut channels = BTreeSet::new();
+    for channel_name in explicit_channels {
+        if let Some(normalized) = normalize_channel(channel_name) {
+            channels.insert(normalized);
         }
     }
     for token in message.split_whitespace() {
         let trimmed = token.trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}' | '"' | '\''));
         if let Some(rest) = trimmed.strip_prefix('#') {
-            if let Some(normalized) = normalize_topic(rest) {
-                topics.insert(normalized);
+            if let Some(normalized) = normalize_channel(rest) {
+                channels.insert(normalized);
             }
         }
     }
-    topics.into_iter().collect()
+    channels.into_iter().collect()
 }
 
 pub fn collect_mentions(message: &str, explicit_mentions: &[String]) -> Vec<String> {
@@ -239,6 +242,10 @@ pub fn format_public_display(from: &str, message: &str) -> String {
     format!("{from} -> Chatter: {message}")
 }
 
+pub fn format_channel_display(from: &str, channel_name: &str, message: &str) -> String {
+    format!("{from} -> {channel_name}: {message}")
+}
+
 pub fn format_network_display(from: &str, message: &str) -> String {
     format!("{from} -> Network: {message}")
 }
@@ -258,16 +265,16 @@ pub fn format_sign_off_display(display_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_mentions, collect_topics, format_direct_display, format_network_display,
-        format_public_display, format_root_display, format_sign_off_display,
-        format_sign_on_display, normalize_topic,
+        collect_channels, collect_mentions, format_channel_display, format_direct_display,
+        format_network_display, format_public_display, format_root_display,
+        format_sign_off_display, format_sign_on_display, normalize_channel,
     };
 
     #[test]
-    fn normalizes_topics_and_mentions() {
-        assert_eq!(normalize_topic("#PrD-1"), Some("#prd-1".to_string()));
+    fn normalizes_channels_and_mentions() {
+        assert_eq!(normalize_channel("#PrD-1"), Some("#prd-1".to_string()));
         assert_eq!(
-            collect_topics("working on #PRD-7 and #Agents", &["#Other".into()]),
+            collect_channels("working on #PRD-7 and #Agents", &["#Other".into()]),
             vec!["#agents".to_string(), "#other".to_string(), "#prd-7".to_string()]
         );
         assert_eq!(
@@ -284,6 +291,7 @@ mod tests {
     fn formats_debug_display_lines() {
         assert_eq!(format_direct_display("Agent 1", "Agent 2", "hello"), "Agent 1 -> Agent 2: hello");
         assert_eq!(format_public_display("Agent 1", "sync on #prd-1"), "Agent 1 -> Chatter: sync on #prd-1");
+        assert_eq!(format_channel_display("Agent 1", "#prd-1", "sync"), "Agent 1 -> #prd-1: sync");
         assert_eq!(format_network_display("Agent 1", "sync on #prd-1"), "Agent 1 -> Network: sync on #prd-1");
         assert_eq!(format_root_display("Agent 1", "please inspect"), "Agent 1 -> Root: please inspect");
         assert_eq!(format_sign_on_display("Agent 1"), "Agent 1: Signed On");

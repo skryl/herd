@@ -1,14 +1,21 @@
 <script lang="ts">
   import BrowserTile from './BrowserTile.svelte';
   import ContextMenu from './ContextMenu.svelte';
+  import MinimizedTileDock from './MinimizedTileDock.svelte';
   import TerminalTile from './TerminalTile.svelte';
   import WorkCard from './WorkCard.svelte';
+  import type { TileMessageLogEntry, TilePort } from './types';
+  import { simplePortCurvePath } from './wireCurves';
   import {
     activeNetworkDrag,
+    appState,
     activeTabConnections,
     activeTabWorkCards,
     activeSessionWorkItems,
     activeTabTerminals,
+    activeTabVisibleTerminals,
+    activeTabVisibleWorkCards,
+    buildNetworkCallSignals,
     canvasState,
     clearNetworkReleaseAnimation,
     completeNetworkPortDrag,
@@ -20,6 +27,8 @@
     openCanvasContextMenu,
     panCanvasBy,
     sidebarOpen,
+    suspendBrowserWebviewsForMotion,
+    type NetworkCallSignal,
     updateNetworkPortDrag,
     visibleActiveTabNetworkConnections,
     wheelCanvas,
@@ -28,18 +37,22 @@
   let isPanning = false;
   let lastX = 0;
   let lastY = 0;
+  let viewportRef = $state<HTMLDivElement | null>(null);
   let cursorWorldX = $state(0);
   let cursorWorldY = $state(0);
-  let workCardLayouts = $derived(new Map($activeTabWorkCards.map((card) => [card.workId, card])));
+  let workCardLayouts = $derived(new Map($activeTabVisibleWorkCards.map((card) => [card.workId, card])));
   let releaseAnimationProgress = $state(1);
+  let networkCallSignals = $state<NetworkCallSignal[]>([]);
   let effectiveSidebarWidth = $derived($sidebarOpen ? 240 : 0);
   let effectiveDebugHeight = $derived(
     $debugPaneOpen && Number.isFinite($debugPaneHeight) && $debugPaneHeight > 0 ? $debugPaneHeight : 0,
   );
 
   const NETWORK_RELEASE_DURATION_MS = 180;
-
-  type TilePort = 'left' | 'top' | 'right' | 'bottom';
+  const NETWORK_SIGNAL_REMOVE_BUFFER_MS = 120;
+  const seenNetworkCallLogKeysBySession = new Map<string, Set<string>>();
+  const networkSignalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let networkSignalSessionId: string | null = null;
 
   function draftTargetPort() {
     const drag = $activeNetworkDrag;
@@ -53,33 +66,33 @@
     return dy >= 0 ? 'top' : 'bottom';
   }
 
-  function portVector(port: TilePort) {
-    switch (port) {
-      case 'left':
-        return { x: -1, y: 0 };
-      case 'top':
-        return { x: 0, y: -1 };
-      case 'right':
-        return { x: 1, y: 0 };
-      case 'bottom':
-        return { x: 0, y: 1 };
-    }
-  }
-
-  function curvedPath(x1: number, y1: number, fromPort: TilePort, x2: number, y2: number, toPort: TilePort) {
-    const distance = Math.hypot(x2 - x1, y2 - y1);
-    const handle = Math.max(36, Math.min(120, distance * 0.45));
-    const fromVector = portVector(fromPort);
-    const toVector = portVector(toPort);
-    const cx1 = x1 + fromVector.x * handle;
-    const cy1 = y1 + fromVector.y * handle;
-    const cx2 = x2 + toVector.x * handle;
-    const cy2 = y2 + toVector.y * handle;
-    return `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`;
-  }
-
   function easedReleaseProgress(progress: number) {
     return 1 - (1 - progress) ** 3;
+  }
+
+  function clearNetworkSignalTimers() {
+    for (const timer of networkSignalTimers.values()) {
+      clearTimeout(timer);
+    }
+    networkSignalTimers.clear();
+  }
+
+  function clearActiveNetworkCallSignals() {
+    clearNetworkSignalTimers();
+    networkCallSignals = [];
+  }
+
+  function networkCallLogKey(entry: TileMessageLogEntry, index: number) {
+    return [
+      entry.session_id,
+      entry.timestamp_ms,
+      entry.caller_tile_id ?? '-',
+      entry.target_id,
+      entry.message_name,
+      entry.wrapper_command,
+      entry.channel,
+      index,
+    ].join(':');
   }
 
   $effect(() => {
@@ -109,6 +122,77 @@
     };
   });
 
+  $effect(() => {
+    const state = $appState;
+    const activeSessionId = state.tmux.activeSessionId;
+
+    if (!activeSessionId) {
+      networkSignalSessionId = null;
+      clearActiveNetworkCallSignals();
+      return;
+    }
+
+    const currentLogs = state.tileMessageLogs.filter(
+      (entry) =>
+        entry.session_id === activeSessionId
+        && entry.layer === 'network'
+        && entry.wrapper_command === 'network_call'
+        && entry.outcome === 'ok'
+        && Boolean(entry.caller_tile_id)
+        && Boolean(entry.target_id),
+    );
+
+    if (networkSignalSessionId !== activeSessionId) {
+      networkSignalSessionId = activeSessionId;
+      clearActiveNetworkCallSignals();
+      seenNetworkCallLogKeysBySession.set(
+        activeSessionId,
+        new Set(currentLogs.map((entry, index) => networkCallLogKey(entry, index))),
+      );
+      return;
+    }
+
+    let seenLogKeys = seenNetworkCallLogKeysBySession.get(activeSessionId);
+    if (!seenLogKeys) {
+      seenLogKeys = new Set<string>();
+      seenNetworkCallLogKeysBySession.set(activeSessionId, seenLogKeys);
+    }
+
+    const unseenEntries: TileMessageLogEntry[] = [];
+    for (const [index, entry] of currentLogs.entries()) {
+      const key = networkCallLogKey(entry, index);
+      if (seenLogKeys.has(key)) {
+        continue;
+      }
+      seenLogKeys.add(key);
+      unseenEntries.push(entry);
+    }
+
+    if (unseenEntries.length === 0) {
+      return;
+    }
+
+    const nextSignals = buildNetworkCallSignals(state, unseenEntries);
+    if (nextSignals.length === 0) {
+      return;
+    }
+
+    networkCallSignals = [...networkCallSignals, ...nextSignals];
+    for (const signal of nextSignals) {
+      const timer = setTimeout(() => {
+        networkSignalTimers.delete(signal.id);
+        networkCallSignals = networkCallSignals.filter((candidate) => candidate.id !== signal.id);
+      }, signal.totalDurationMs + NETWORK_SIGNAL_REMOVE_BUFFER_MS);
+      networkSignalTimers.set(signal.id, timer);
+    }
+  });
+
+  $effect(() => {
+    return () => {
+      clearNetworkSignalTimers();
+    };
+  });
+
   function handleWheel(e: WheelEvent) {
     if ($mode === 'input') {
       return;
@@ -126,18 +210,48 @@
       isPanning = true;
       lastX = e.clientX;
       lastY = e.clientY;
+      suspendBrowserWebviewsForMotion();
       e.preventDefault();
     }
   }
 
-  function handleMouseMove(e: MouseEvent) {
-    const state = $canvasState;
-    const rect = (e.currentTarget as HTMLElement)?.getBoundingClientRect();
-    if (rect) {
-      cursorWorldX = Math.round((e.clientX - rect.left - state.panX) / state.zoom);
-      cursorWorldY = Math.round((e.clientY - rect.top - state.panY) / state.zoom);
-      updateNetworkPortDrag(e.clientX - rect.left, e.clientY - rect.top);
+  function updateCanvasPointer(clientX: number, clientY: number) {
+    if (!viewportRef) {
+      return null;
     }
+
+    const state = $canvasState;
+    const rect = viewportRef.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+    cursorWorldX = Math.round((localX - state.panX) / state.zoom);
+    cursorWorldY = Math.round((localY - state.panY) / state.zoom);
+    updateNetworkPortDrag(localX, localY);
+    return { localX, localY };
+  }
+
+  function handleMouseMove(e: MouseEvent) {
+    updateCanvasPointer(e.clientX, e.clientY);
+
+    if (!isPanning) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    panCanvasBy(dx, dy);
+  }
+
+  function handleWindowMouseMove(e: MouseEvent) {
+    if (!$activeNetworkDrag && !isPanning) {
+      return;
+    }
+
+    const target = e.target;
+    if (viewportRef && target instanceof Node && viewportRef.contains(target)) {
+      return;
+    }
+
+    updateCanvasPointer(e.clientX, e.clientY);
 
     if (!isPanning) return;
     const dx = e.clientX - lastX;
@@ -159,10 +273,11 @@
   }
 </script>
 
-<svelte:window onmouseup={handleMouseUp} />
+<svelte:window onmousemove={handleWindowMouseMove} onmouseup={handleMouseUp} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={viewportRef}
   class="canvas-viewport"
   style={`left: ${effectiveSidebarWidth}px; bottom: ${22 + effectiveDebugHeight}px;`}
   onwheel={handleWheel}
@@ -180,7 +295,7 @@
       <svg class="connections-svg">
         {#each $activeTabConnections as conn (conn.childWindowId)}
           <path
-            d="M {conn.x1} {conn.y1} C {conn.cx1} {conn.cy1}, {conn.cx2} {conn.cy2}, {conn.x2} {conn.y2}"
+            d={conn.path}
             class="conn-line"
           />
           <circle cx={conn.x1} cy={conn.y1} r="3" class="conn-dot-parent" />
@@ -193,7 +308,7 @@
       <svg class="network-svg">
         {#each $visibleActiveTabNetworkConnections as conn (`${conn.fromTileId}:${conn.fromPort}-${conn.toTileId}:${conn.toPort}`)}
           <path
-            d={`M ${conn.x1} ${conn.y1} C ${conn.cx1} ${conn.cy1}, ${conn.cx2} ${conn.cy2}, ${conn.x2} ${conn.y2}`}
+            d={conn.path}
             class="network-line"
             class:network-line-read-only={conn.wireMode === 'read_only'}
             class:network-line-full-duplex={conn.wireMode === 'full_duplex'}
@@ -215,6 +330,38 @@
             class:network-dot-full-duplex={conn.wireMode === 'full_duplex'}
           />
         {/each}
+        {#each networkCallSignals as signal (signal.id)}
+          {#each signal.segments as segment (segment.id)}
+            <path
+              d={segment.path}
+              class="network-signal-line"
+              class:network-signal-line-read-only={segment.wireMode === 'read_only'}
+              class:network-signal-line-full-duplex={segment.wireMode === 'full_duplex'}
+              data-from-tile-id={signal.fromTileId}
+              data-to-tile-id={signal.toTileId}
+              data-connection-key={segment.connectionKey}
+              style={`animation-delay: ${segment.delayMs}ms; animation-duration: ${segment.durationMs}ms;`}
+            />
+            <circle
+              r="4.5"
+              class="network-signal-dot"
+              class:network-signal-dot-read-only={segment.wireMode === 'read_only'}
+              class:network-signal-dot-full-duplex={segment.wireMode === 'full_duplex'}
+              data-from-tile-id={signal.fromTileId}
+              data-to-tile-id={signal.toTileId}
+              data-connection-key={segment.connectionKey}
+              style={`animation-delay: ${segment.delayMs}ms; animation-duration: ${segment.durationMs}ms;`}
+            >
+              <animateMotion
+                begin={`${segment.delayMs}ms`}
+                dur={`${segment.durationMs}ms`}
+                path={segment.motionPath}
+                fill="freeze"
+                rotate="auto"
+              />
+            </circle>
+          {/each}
+        {/each}
       </svg>
     {/if}
 
@@ -224,10 +371,8 @@
       <span class="origin-label">0,0</span>
     </div>
 
-    {#each $activeTabTerminals as term (term.id)}
-      {#if term.kind === 'browser'}
-        <BrowserTile info={term} />
-      {:else}
+    {#each $activeTabVisibleTerminals as term (term.id)}
+      {#if term.kind !== 'browser'}
         <TerminalTile info={term} />
       {/if}
     {/each}
@@ -240,15 +385,23 @@
     {/each}
   </div>
 
+  <div class="browser-tile-overlay-layer">
+    {#each $activeTabVisibleTerminals as term (term.id)}
+      {#if term.kind === 'browser'}
+        <BrowserTile info={term} />
+      {/if}
+    {/each}
+  </div>
+
+  <MinimizedTileDock />
+
   {#if $activeNetworkDrag}
     <svg class="network-draft-svg">
       <path
-        d={curvedPath(
-          $activeNetworkDrag.startX,
-          $activeNetworkDrag.startY,
+        d={simplePortCurvePath(
+          { x: $activeNetworkDrag.startX, y: $activeNetworkDrag.startY },
           $activeNetworkDrag.port,
-          $activeNetworkDrag.snappedX ?? $activeNetworkDrag.currentX,
-          $activeNetworkDrag.snappedY ?? $activeNetworkDrag.currentY,
+          { x: $activeNetworkDrag.snappedX ?? $activeNetworkDrag.currentX, y: $activeNetworkDrag.snappedY ?? $activeNetworkDrag.currentY },
           draftTargetPort(),
         )}
         class="network-draft-line"
@@ -274,12 +427,10 @@
     {@const looseY = $networkReleaseAnimation.looseY + ($networkReleaseAnimation.anchorY - $networkReleaseAnimation.looseY) * retract}
     <svg class="network-draft-svg">
       <path
-        d={curvedPath(
-          $networkReleaseAnimation.anchorX,
-          $networkReleaseAnimation.anchorY,
+        d={simplePortCurvePath(
+          { x: $networkReleaseAnimation.anchorX, y: $networkReleaseAnimation.anchorY },
           $networkReleaseAnimation.anchorPort,
-          looseX,
-          looseY,
+          { x: looseX, y: looseY },
           $networkReleaseAnimation.loosePort,
         )}
         class="network-release-line"
@@ -349,6 +500,13 @@
     pointer-events: none;
   }
 
+  .browser-tile-overlay-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 20;
+  }
+
   .network-svg {
     position: absolute;
     inset: 0;
@@ -406,6 +564,45 @@
     pointer-events: none;
     overflow: visible;
     z-index: 50;
+  }
+
+  .network-signal-line {
+    fill: none;
+    stroke-width: 5;
+    stroke-linecap: round;
+    opacity: 0;
+    animation-name: network-signal-line-pulse;
+    animation-timing-function: ease-out;
+    animation-fill-mode: both;
+    pointer-events: none;
+  }
+
+  .network-signal-line-read-only {
+    stroke: rgba(140, 236, 255, 0.96);
+    filter: drop-shadow(0 0 10px rgba(92, 200, 255, 0.6));
+  }
+
+  .network-signal-line-full-duplex {
+    stroke: rgba(255, 221, 130, 0.96);
+    filter: drop-shadow(0 0 10px rgba(240, 184, 92, 0.55));
+  }
+
+  .network-signal-dot {
+    opacity: 0;
+    pointer-events: none;
+    animation-name: network-signal-dot-visibility;
+    animation-timing-function: linear;
+    animation-fill-mode: both;
+  }
+
+  .network-signal-dot-read-only {
+    fill: rgba(166, 244, 255, 1);
+    filter: drop-shadow(0 0 12px rgba(92, 200, 255, 0.78));
+  }
+
+  .network-signal-dot-full-duplex {
+    fill: rgba(255, 235, 171, 1);
+    filter: drop-shadow(0 0 12px rgba(240, 184, 92, 0.78));
   }
 
   .network-draft-line {
@@ -478,5 +675,45 @@
 
   .coord-label {
     color: var(--copper);
+  }
+
+  @keyframes network-signal-line-pulse {
+    0% {
+      opacity: 0;
+      stroke-width: 2.5;
+    }
+
+    18% {
+      opacity: 1;
+      stroke-width: 5.5;
+    }
+
+    72% {
+      opacity: 0.9;
+      stroke-width: 4.25;
+    }
+
+    100% {
+      opacity: 0;
+      stroke-width: 3;
+    }
+  }
+
+  @keyframes network-signal-dot-visibility {
+    0% {
+      opacity: 0;
+    }
+
+    12% {
+      opacity: 1;
+    }
+
+    88% {
+      opacity: 1;
+    }
+
+    100% {
+      opacity: 0;
+    }
   }
 </style>

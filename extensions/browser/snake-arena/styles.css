@@ -1,0 +1,46 @@
+body {
+  margin: 0;
+  font-family: "IBM Plex Mono", monospace;
+  background: linear-gradient(180deg, #143601, #0b1304 60%);
+  color: #efffed;
+}
+
+.app {
+  min-height: 100vh;
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.toolbar,
+.controls,
+.players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.toolbar label {
+  display: grid;
+  gap: 4px;
+}
+
+.toolbar input,
+.toolbar select,
+.toolbar button,
+.controls button {
+  font: inherit;
+  padding: 6px 10px;
+}
+
+.player-card {
+  padding: 6px 10px;
+  border: 1px solid rgba(239, 255, 237, 0.2);
+}
+
+.arena {
+  padding: 16px;
+  width: fit-content;
+  background: rgba(1, 22, 7, 0.85);
+  border: 1px solid rgba(190, 242, 100, 0.5);
+}

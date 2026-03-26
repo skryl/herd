@@ -89,6 +89,7 @@ Browser operations:
 ```bash
 herd tile create browser --parent-tile-id AbCdEf
 herd tile create browser --browser-incognito true --parent-tile-id AbCdEf
+herd tile create browser --browser-path extensions/browser/checkers/index.html --parent-tile-id AbCdEf
 herd browser navigate MnOpQr https://example.com
 herd browser load MnOpQr ./index.html
 herd tile destroy MnOpQr
@@ -136,7 +137,7 @@ Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain 
 - `network_connect`
 - `network_disconnect`
 
-`tile_create` accepts `tile_type = shell | agent | browser | work`, plus optional `title`, `x`, `y`, `width`, `height`, `parent_session_id`, and `parent_tile_id`. Browser creation also accepts optional `browser_incognito` / CLI `--browser-incognito true` to start the browser tile in incognito mode instead of the shared default profile.
+`tile_create` accepts `tile_type = shell | agent | browser | work`, plus optional `title`, `x`, `y`, `width`, `height`, `parent_session_id`, and `parent_tile_id`. Browser creation also accepts optional `browser_incognito` / CLI `--browser-incognito true` to start the browser tile in incognito mode instead of the shared default profile, plus optional `browser_path` / CLI `--browser-path <path>` to immediately load a local page such as an existing browser extension.
 
 `tile_list` returns every tile in the current session. `network_list` returns the sender tile's connected component. Both accept optional `tile_type` filter `shell | agent | browser | work`.
 
@@ -144,9 +145,9 @@ Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain 
 
 `tile_rename` is root-only and accepts `tile_id` and `title`. It works for shell, browser, agent, and work tiles and returns the updated tile object.
 
-`network_get` is a worker-safe lookup by `tile_id` inside the sender's current connected component. It returns the same tile object shape used by `network_list.tiles`.
+`network_get` is a worker-safe lookup by `tile_id` inside the sender's current connected component. It returns the same tile object shape used by `network_list.tiles`, including `message_api` for the network-visible interface. On browser tiles, that `message_api` advertises the `drive > screenshot` formats for PNG image plus Braille, ASCII, ANSI, and layout-preserving text output.
 
-`tile_get` is a root-only lookup by `tile_id` in the current session. It returns the full tile object, including `details` for that tile type.
+`tile_get` is a root-only lookup by `tile_id` in the current session. It returns the full tile object, including `details` for that tile type and the full `message_api`. On browser tiles, that interface also advertises the full `drive > screenshot` format set.
 
 `tile_move` is root-only and accepts `tile_id`, `x`, and `y`. It updates the canvas position for the tile and returns the updated tile object.
 
@@ -177,6 +178,9 @@ Supported `action` values:
 
 - `click`
   - requires `args.selector`
+- `select`
+  - requires `args.selector`
+  - requires `args.value`
 - `type`
   - requires `args.selector`
   - requires `args.text`
@@ -187,6 +191,15 @@ Supported `action` values:
 - `eval`
   - requires `args.js`
   - evaluates arbitrary child-page JavaScript and returns serialized data when possible
+- `screenshot`
+  - captures the current browser tile view
+  - accepts optional `args.format` of `image`, `braille`, `ascii`, `ansi`, or `text`
+  - accepts optional `args.columns` when `args.format` is `braille`, `ascii`, `ansi`, or `text`
+  - returns `{ "mimeType": "image/png", "dataBase64": "<base64 png>" }` by default on the socket/test-driver surface
+  - returns `{ "format": "braille", "text": "<braille>", "columns": 80, "rows": 24 }` when `args.format` is `braille`
+  - returns `{ "format": "ascii", "text": "<ascii>", "columns": 80, "rows": 24 }` when `args.format` is `ascii`
+  - returns `{ "format": "ansi", "text": "<ansi escape text>", "columns": 80, "rows": 24 }` when `args.format` is `ansi`
+  - returns `{ "format": "text", "text": "<layout-preserving text grid>", "columns": 80, "rows": 24 }` when `args.format` is `text`
 
 `browser_drive` targets the child browser webview directly. It does not use `test_dom_query` or `test_dom_keys`, which only operate on the main Herd UI webview.
 
@@ -203,11 +216,12 @@ Supported `action` values:
 - `tile_resize`
 - `message_direct`
 - `message_public`
+- `message_channel`
 - `message_network`
 - `message_root`
-- `message_topic_list`
-- `message_topic_subscribe`
-- `message_topic_unsubscribe`
+- `message_channel_list`
+- `message_channel_subscribe`
+- `message_channel_unsubscribe`
 - `sudo` on the CLI is an alias that routes to `message_root`
 
 Use `tile_list` with `tile_type = agent` for session-scoped agent discovery and `network_list` with `tile_type = agent` for connected-component agent discovery. Agent metadata is returned inside the tile `details` payload.
@@ -227,18 +241,19 @@ Permission boundary:
 Message-channel behavior:
 
 - Herd delivers incoming agent traffic through `notifications/claude/channel`.
-- Event metadata includes `from_agent_id`, `from_display_name`, `to_agent_id`, `to_display_name`, `topics`, `mentions`, `replay`, and `timestamp_ms`.
+- Event metadata includes `from_agent_id`, `from_display_name`, `to_agent_id`, `to_display_name`, `channels`, `mentions`, `replay`, and `timestamp_ms`.
 - `replay=true` means historical context, usually last-hour chatter replay, not a fresh request.
 - `replay=false` means live traffic.
-- Replies that should be seen by Herd or other agents must go back out through `message_direct`, `message_public`, `message_network`, or `message_root`.
+- Replies that should be seen by Herd or other agents must go back out through `message_direct`, `message_public`, `message_channel`, `message_network`, or `message_root`.
 
-### Topic messaging
+### Channel messaging
 
-- `message_topic_list`
-- `message_topic_subscribe`
-- `message_topic_unsubscribe`
+- `message_channel_list`
+- `message_channel_subscribe`
+- `message_channel_unsubscribe`
+- `message_channel`
 
-Topics are normalized lowercase and always stored with a leading `#`. Topic list and subscription data are session-private. Subscribing to a missing topic creates it in the caller's current session.
+Channels are normalized lowercase and always stored with a leading `#`. Channel list and subscription data are session-private. Subscribing to a missing channel creates it in the caller's current session. `message_public` remains session-wide chatter; `message_channel` is the subscription-gated path.
 
 ### Work
 
@@ -326,7 +341,7 @@ For shell tiles, `exec` submits `<command>` plus Enter to the existing pane. It 
 
 For generic `network_call` / `tile_call`, browser `drive` expects:
 
-- `action`: `click` | `type` | `dom_query` | `eval`
+- `action`: `click` | `select` | `type` | `dom_query` | `eval` | `screenshot`
 - optional nested `args` object for that browser-drive action
 
 Browser tile `message_api` now spells this out directly:
@@ -336,10 +351,13 @@ Browser tile `message_api` now spells this out directly:
 - `load`
   - `path: string`
 - `drive`
-  - `action: "click" | "type" | "dom_query" | "eval"`
+  - `action: "click" | "select" | "type" | "dom_query" | "eval" | "screenshot"`
   - optional `args: object`
   - `click`
     - `selector: string`
+  - `select`
+    - `selector: string`
+    - `value: string`
   - `type`
     - `selector: string`
     - `text: string`
@@ -348,6 +366,14 @@ Browser tile `message_api` now spells this out directly:
     - `js: string`
   - `eval`
     - `js: string`
+  - `screenshot`
+    - optional `format: "image" | "braille" | "ascii" | "ansi" | "text"`
+    - optional `columns: number`
+    - returns `{ "mimeType": "image/png", "dataBase64": "<base64 png>" }` by default
+    - returns `{ "format": "braille", "text": "<braille>", "columns": 80, "rows": 24 }` when `format` is `braille`
+    - returns `{ "format": "ascii", "text": "<ascii>", "columns": 80, "rows": 24 }` when `format` is `ascii`
+    - returns `{ "format": "ansi", "text": "<ansi escape text>", "columns": 80, "rows": 24 }` when `format` is `ansi`
+    - returns `{ "format": "text", "text": "<layout-preserving text grid>", "columns": 80, "rows": 24 }` when `format` is `text`
 
 Generic tile messages reject:
 
@@ -444,7 +470,7 @@ The projection now includes debug and agent state such as:
 
 - `debug_tab`
 - `agents`
-- `topics`
+- `channels`
 - `chatter`
 - `connections`
 - per-tile port/network-derived state used by the canvas and activity views

@@ -89,7 +89,7 @@ Usage:
   herd [--socket <path>] [--agent-pid <pid>] network call <tile_id> <action> [json_args]
   herd [--socket <path>] [--agent-pid <pid>] network connect <from_tile> <from_port> <to_tile> <to_port>
   herd [--socket <path>] [--agent-pid <pid>] network disconnect <tile> <port>
-  herd [--socket <path>] [--agent-pid <pid>] tile create <shell|agent|browser|work> [--title <text>] [--x <n>] [--y <n>] [--width <n>] [--height <n>] [--parent-session-id <id>] [--parent-tile-id <id>]
+  herd [--socket <path>] [--agent-pid <pid>] tile create <shell|agent|browser|work> [--title <text>] [--x <n>] [--y <n>] [--width <n>] [--height <n>] [--parent-session-id <id>] [--parent-tile-id <id>] [--browser-incognito <true|false>] [--browser-path <path>]
   herd [--socket <path>] [--agent-pid <pid>] tile list [shell|agent|browser|work]
   herd [--socket <path>] [--agent-pid <pid>] tile destroy <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] tile get <tile_id>
@@ -98,20 +98,20 @@ Usage:
   herd [--socket <path>] [--agent-pid <pid>] tile resize <tile_id> <width> <height>
   herd [--socket <path>] [--agent-pid <pid>] tile rename <tile_id> <title>
   herd [--socket <path>] [--agent-pid <pid>] message direct <agent_id> <message>
-  herd [--socket <path>] [--agent-pid <pid>] message public <message> [--topic <topic>...] [--mention <agent_id>...]
+  herd [--socket <path>] [--agent-pid <pid>] message public <message> [--mention <agent_id>...]
+  herd [--socket <path>] [--agent-pid <pid>] message channel list
+  herd [--socket <path>] [--agent-pid <pid>] message channel subscribe <agent_id> <channel>
+  herd [--socket <path>] [--agent-pid <pid>] message channel unsubscribe <agent_id> <channel>
+  herd [--socket <path>] [--agent-pid <pid>] message channel <channel> <message>
   herd [--socket <path>] [--agent-pid <pid>] message network <message>
   herd [--socket <path>] [--agent-pid <pid>] message root <message>
-  herd [--socket <path>] [--agent-pid <pid>] message topic list
-  herd [--socket <path>] [--agent-pid <pid>] message topic subscribe <topic>
-  herd [--socket <path>] [--agent-pid <pid>] message topic unsubscribe <topic>
-  herd [--socket <path>] [--agent-pid <pid>] message topic <topic> <message>
   herd [--socket <path>] [--agent-pid <pid>] shell send <tile_id> <input>
   herd [--socket <path>] [--agent-pid <pid>] shell exec <tile_id> <command>
   herd [--socket <path>] [--agent-pid <pid>] shell read <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] shell role <tile_id> <regular|claude|output>
   herd [--socket <path>] [--agent-pid <pid>] browser navigate <tile_id> <url>
   herd [--socket <path>] [--agent-pid <pid>] browser load <tile_id> <path>
-  herd [--socket <path>] [--agent-pid <pid>] browser drive <tile_id> <click|type|dom_query|eval> [json_args]
+  herd [--socket <path>] [--agent-pid <pid>] browser drive <tile_id> <click|select|type|dom_query|eval> [json_args]
   herd [--socket <path>] [--agent-pid <pid>] work stage start <work_id>
   herd [--socket <path>] [--agent-pid <pid>] work stage complete <work_id>
   herd [--socket <path>] [--agent-pid <pid>] raw <json>
@@ -180,6 +180,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
     let mut parent_session_id = None;
     let mut parent_tile_id = None;
     let mut browser_incognito = None;
+    let mut browser_path = None;
     let mut index = 1usize;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -195,6 +196,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
             "--parent-session-id" => parent_session_id = Some(value),
             "--parent-tile-id" => parent_tile_id = Some(value),
             "--browser-incognito" => browser_incognito = value.parse::<bool>().ok(),
+            "--browser-path" => browser_path = Some(value),
             _ => return Err(format!("unknown tile create flag: {flag}")),
         }
     }
@@ -212,6 +214,7 @@ fn tile_create_payload(args: &[String]) -> Result<Value, String> {
         "parent_session_id": parent_session_id,
         "parent_tile_id": parent_tile_id,
         "browser_incognito": browser_incognito,
+        "browser_path": browser_path,
         "sender_agent_id": env_agent_id(),
         "sender_tile_id": env_tile_id(),
     }))
@@ -435,16 +438,11 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     }))
                 }
                 "public" | "chatter" => {
-                    let mut topics = Vec::new();
                     let mut mentions = Vec::new();
                     let mut message_parts = Vec::new();
                     let mut index = 2usize;
                     while index < args.len() {
                         match args[index].as_str() {
-                            "--topic" => {
-                                index += 1;
-                                topics.push(args.get(index).ok_or("--topic requires a value")?.clone());
-                            }
                             "--mention" => {
                                 index += 1;
                                 mentions.push(args.get(index).ok_or("--mention requires a value")?.clone());
@@ -459,7 +457,6 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     Ok(json!({
                         "command": "message_public",
                         "message": message_parts.join(" "),
-                        "topics": topics,
                         "mentions": mentions,
                         "sender_agent_id": env_agent_id(),
                         "sender_tile_id": env_tile_id(),
@@ -480,40 +477,47 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                     "sender_tile_id": env_tile_id(),
                     "sender_agent_pid": ctx.agent_pid,
                 })),
-                "topic" => {
+                "channel" => {
                     match args.get(2).map(String::as_str) {
                         Some("list") => {
                             return Ok(json!({
-                                "command": "message_topic_list",
+                                "command": "message_channel_list",
                                 "sender_agent_id": env_agent_id(),
                                 "sender_tile_id": env_tile_id(),
                             }));
                         }
                         Some("subscribe") => {
-                            let topic = args.get(3).ok_or("message topic subscribe requires a topic")?;
+                            let agent_id = args.get(3).ok_or("message channel subscribe requires <agent_id> <channel>")?;
+                            let channel_name = args.get(4).ok_or("message channel subscribe requires a channel")?;
                             return Ok(json!({
-                                "command": "message_topic_subscribe",
-                                "agent_id": require_env_agent_id()?,
-                                "topic": topic,
+                                "command": "message_channel_subscribe",
+                                "agent_id": agent_id,
+                                "channel_name": channel_name,
+                                "sender_agent_id": env_agent_id(),
+                                "sender_tile_id": env_tile_id(),
+                                "sender_agent_pid": ctx.agent_pid,
                             }));
                         }
                         Some("unsubscribe") => {
-                            let topic = args.get(3).ok_or("message topic unsubscribe requires a topic")?;
+                            let agent_id = args.get(3).ok_or("message channel unsubscribe requires <agent_id> <channel>")?;
+                            let channel_name = args.get(4).ok_or("message channel unsubscribe requires a channel")?;
                             return Ok(json!({
-                                "command": "message_topic_unsubscribe",
-                                "agent_id": require_env_agent_id()?,
-                                "topic": topic,
+                                "command": "message_channel_unsubscribe",
+                                "agent_id": agent_id,
+                                "channel_name": channel_name,
+                                "sender_agent_id": env_agent_id(),
+                                "sender_tile_id": env_tile_id(),
+                                "sender_agent_pid": ctx.agent_pid,
                             }));
                         }
                         _ => {}
                     }
-                    let topic = args.get(2).ok_or("message topic requires <topic> <message>")?;
-                    let message = args.get(3..).ok_or("message topic requires a message")?.join(" ");
+                    let channel_name = args.get(2).ok_or("message channel requires <channel> <message>")?;
+                    let message = args.get(3..).ok_or("message channel requires a message")?.join(" ");
                     Ok(json!({
-                        "command": "message_public",
+                        "command": "message_channel",
+                        "channel_name": channel_name,
                         "message": message,
-                        "topics": [topic],
-                        "mentions": [],
                         "sender_agent_id": env_agent_id(),
                         "sender_tile_id": env_tile_id(),
                         "sender_agent_pid": ctx.agent_pid,
@@ -620,11 +624,17 @@ mod tests {
     fn with_agent_env<R>(agent_id: &str, f: impl FnOnce() -> R) -> R {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let previous = std::env::var("HERD_AGENT_ID").ok();
+        let previous_tile = std::env::var("HERD_TILE_ID").ok();
         std::env::set_var("HERD_AGENT_ID", agent_id);
+        std::env::remove_var("HERD_TILE_ID");
         let result = f();
         match previous {
             Some(value) => std::env::set_var("HERD_AGENT_ID", value),
             None => std::env::remove_var("HERD_AGENT_ID"),
+        }
+        match previous_tile {
+            Some(value) => std::env::set_var("HERD_TILE_ID", value),
+            None => std::env::remove_var("HERD_TILE_ID"),
         }
         result
     }
@@ -724,6 +734,7 @@ mod tests {
                     "parent_session_id": "$7",
                     "parent_tile_id": "tile7",
                     "browser_incognito": null,
+                    "browser_path": null,
                     "sender_agent_id": null,
                     "sender_tile_id": null,
                 })
@@ -978,13 +989,13 @@ mod tests {
     }
 
     #[test]
-    fn serializes_message_topic_list_payload_with_sender_context() {
+    fn serializes_message_channel_list_payload_with_sender_context() {
         with_agent_and_tile_env("agent-7", "tile7", || {
-            let payload = build_command_payload(&ctx(), &["message".into(), "topic".into(), "list".into()]).unwrap();
+            let payload = build_command_payload(&ctx(), &["message".into(), "channel".into(), "list".into()]).unwrap();
             assert_eq!(
                 payload,
                 json!({
-                    "command": "message_topic_list",
+                    "command": "message_channel_list",
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                 })
@@ -1027,6 +1038,7 @@ mod tests {
                     "parent_session_id": null,
                     "parent_tile_id": "tile1",
                     "browser_incognito": null,
+                    "browser_path": null,
                     "sender_agent_id": null,
                     "sender_tile_id": null,
                 })
@@ -1061,6 +1073,7 @@ mod tests {
                     "parent_session_id": "$1",
                     "parent_tile_id": null,
                     "browser_incognito": null,
+                    "browser_path": null,
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                 })
@@ -1090,6 +1103,37 @@ mod tests {
                     "parent_session_id": null,
                     "parent_tile_id": null,
                     "browser_incognito": true,
+                    "browser_path": null,
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+
+            let extension_create = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "create".into(),
+                    "browser".into(),
+                    "--browser-path".into(),
+                    "extensions/browser/checkers/index.html".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                extension_create,
+                json!({
+                    "command": "tile_create",
+                    "tile_type": "browser",
+                    "title": null,
+                    "x": null,
+                    "y": null,
+                    "width": null,
+                    "height": null,
+                    "parent_session_id": null,
+                    "parent_tile_id": null,
+                    "browser_incognito": null,
+                    "browser_path": "extensions/browser/checkers/index.html",
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                 })
@@ -1180,8 +1224,6 @@ mod tests {
                     "sync".into(),
                     "on".into(),
                     "#prd-7".into(),
-                    "--topic".into(),
-                    "#alpha".into(),
                     "--mention".into(),
                     "agent-2".into(),
                 ],
@@ -1195,8 +1237,35 @@ mod tests {
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                     "sender_agent_pid": "4242",
-                    "topics": ["#alpha"],
                     "mentions": ["agent-2"],
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_message_channel_payload() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "message".into(),
+                    "channel".into(),
+                    "#alpha".into(),
+                    "sync".into(),
+                    "now".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "message_channel",
+                    "channel_name": "#alpha",
+                    "message": "sync now",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                    "sender_agent_pid": "4242",
                 })
             );
         });
@@ -1333,6 +1402,7 @@ mod tests {
                     "parent_session_id": null,
                     "parent_tile_id": null,
                     "browser_incognito": null,
+                    "browser_path": null,
                     "sender_agent_id": "agent-1",
                     "sender_tile_id": "tile7",
                 })
@@ -1386,33 +1456,39 @@ mod tests {
     }
 
     #[test]
-    fn serializes_message_topic_subscribe_and_unsubscribe_payloads() {
+    fn serializes_message_channel_subscribe_and_unsubscribe_payloads() {
         with_agent_env("owner-1", || {
             let subscribe = build_command_payload(
                 &ctx(),
-                &["message".into(), "topic".into(), "subscribe".into(), "#prd-7".into()],
+                &["message".into(), "channel".into(), "subscribe".into(), "agent-9".into(), "#prd-7".into()],
             )
             .unwrap();
             assert_eq!(
                 subscribe,
                 json!({
-                    "command": "message_topic_subscribe",
-                    "agent_id": "owner-1",
-                    "topic": "#prd-7",
+                    "command": "message_channel_subscribe",
+                    "agent_id": "agent-9",
+                    "channel_name": "#prd-7",
+                    "sender_agent_id": "owner-1",
+                    "sender_tile_id": serde_json::Value::Null,
+                    "sender_agent_pid": "4242",
                 })
             );
 
             let unsubscribe = build_command_payload(
                 &ctx(),
-                &["message".into(), "topic".into(), "unsubscribe".into(), "#prd-7".into()],
+                &["message".into(), "channel".into(), "unsubscribe".into(), "agent-9".into(), "#prd-7".into()],
             )
             .unwrap();
             assert_eq!(
                 unsubscribe,
                 json!({
-                    "command": "message_topic_unsubscribe",
-                    "agent_id": "owner-1",
-                    "topic": "#prd-7",
+                    "command": "message_channel_unsubscribe",
+                    "agent_id": "agent-9",
+                    "channel_name": "#prd-7",
+                    "sender_agent_id": "owner-1",
+                    "sender_tile_id": serde_json::Value::Null,
+                    "sender_agent_pid": "4242",
                 })
             );
         });

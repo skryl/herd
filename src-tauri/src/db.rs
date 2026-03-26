@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS work_review (
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistedTopicRecord {
+pub struct PersistedChannelRecord {
     #[serde(default)]
     pub session_id: String,
     pub name: String,
@@ -136,7 +136,7 @@ struct PersistedAgentInfo {
     alive: bool,
     chatter_subscribed: bool,
     #[serde(default)]
-    topics: Vec<String>,
+    channels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_pid: Option<u32>,
 }
@@ -155,7 +155,7 @@ impl From<PersistedAgentInfo> for AgentInfo {
             display_name: value.display_name,
             alive: value.alive,
             chatter_subscribed: value.chatter_subscribed,
-            topics: value.topics,
+            channels: value.channels,
             agent_pid: value.agent_pid,
         }
     }
@@ -175,7 +175,7 @@ impl From<&AgentInfo> for PersistedAgentInfo {
             display_name: value.display_name.clone(),
             alive: value.alive,
             chatter_subscribed: value.chatter_subscribed,
-            topics: value.topics.clone(),
+            channels: value.channels.clone(),
             agent_pid: value.agent_pid,
         }
     }
@@ -386,33 +386,33 @@ pub fn replace_agents_at(path: &Path, agents: &[AgentInfo]) -> Result<(), String
     Ok(())
 }
 
-pub fn load_topics() -> Result<Vec<PersistedTopicRecord>, String> {
-    load_topics_at(Path::new(runtime::database_path()))
+pub fn load_channels() -> Result<Vec<PersistedChannelRecord>, String> {
+    load_channels_at(Path::new(runtime::database_path()))
 }
 
-pub fn load_topics_at(path: &Path) -> Result<Vec<PersistedTopicRecord>, String> {
+pub fn load_channels_at(path: &Path) -> Result<Vec<PersistedChannelRecord>, String> {
     let conn = open_at(path)?;
     let mut stmt = conn
         .prepare("SELECT data_json FROM topic ORDER BY name")
         .map_err(|error| format!("failed to prepare topic query: {error}"))?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("failed to query topics: {error}"))?;
-    let mut topics = Vec::new();
+        .map_err(|error| format!("failed to query channels: {error}"))?;
+    let mut channels = Vec::new();
     for row in rows {
         let json = row.map_err(|error| format!("failed to decode topic row: {error}"))?;
-        let topic = serde_json::from_str::<PersistedTopicRecord>(&json)
+        let channel = serde_json::from_str::<PersistedChannelRecord>(&json)
             .map_err(|error| format!("failed to parse topic json: {error}"))?;
-        topics.push(topic);
+        channels.push(channel);
     }
-    Ok(topics)
+    Ok(channels)
 }
 
-pub fn replace_topics(topics: &[PersistedTopicRecord]) -> Result<(), String> {
-    replace_topics_at(Path::new(runtime::database_path()), topics)
+pub fn replace_channels(channels: &[PersistedChannelRecord]) -> Result<(), String> {
+    replace_channels_at(Path::new(runtime::database_path()), channels)
 }
 
-pub fn replace_topics_at(path: &Path, topics: &[PersistedTopicRecord]) -> Result<(), String> {
+pub fn replace_channels_at(path: &Path, channels: &[PersistedChannelRecord]) -> Result<(), String> {
     let mut conn = open_at(path)?;
     let tx = conn
         .transaction()
@@ -420,15 +420,15 @@ pub fn replace_topics_at(path: &Path, topics: &[PersistedTopicRecord]) -> Result
     tx.execute("DELETE FROM topic", [])
         .map_err(|error| format!("failed to clear topic rows: {error}"))?;
     let updated_at = now_ms();
-    for topic in topics {
-        let data_json = serde_json::to_string(topic)
-            .map_err(|error| format!("failed to serialize topic {}: {error}", topic.name))?;
-        let storage_key = format!("{}::{}", topic.session_id, topic.name);
+    for channel in channels {
+        let data_json = serde_json::to_string(channel)
+            .map_err(|error| format!("failed to serialize topic {}: {error}", channel.name))?;
+        let storage_key = format!("{}::{}", channel.session_id, channel.name);
         tx.execute(
             "INSERT INTO topic (name, data_json, updated_at) VALUES (?1, ?2, ?3)",
             params![storage_key, data_json, updated_at],
         )
-        .map_err(|error| format!("failed to insert topic {}: {error}", topic.name))?;
+        .map_err(|error| format!("failed to insert topic {}: {error}", channel.name))?;
     }
     tx.commit()
         .map_err(|error| format!("failed to commit topic transaction: {error}"))?;
@@ -451,8 +451,8 @@ pub fn reset_runtime_presence_state_at(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_agents_at, load_topics_at, open_at, replace_agents_at, replace_topics_at,
-        reset_runtime_presence_state_at, PersistedTopicRecord,
+        load_agents_at, load_channels_at, open_at, replace_agents_at, replace_channels_at,
+        reset_runtime_presence_state_at, PersistedChannelRecord,
     };
     use crate::agent::{AgentInfo, AgentRole, AgentType};
     use rusqlite::{params, Connection};
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_and_topics_round_trip_through_sqlite() {
+    fn agents_and_channels_round_trip_through_sqlite() {
         let path = temp_db_path("registry");
         let agents = vec![AgentInfo {
             agent_id: "agent-1".to_string(),
@@ -509,15 +509,15 @@ mod tests {
             display_name: "Agent 1".to_string(),
             alive: true,
             chatter_subscribed: true,
-            topics: vec!["#work-s1-001".to_string()],
+            channels: vec!["#work-s1-001".to_string()],
             agent_pid: Some(42),
         }];
-        let topics = vec![PersistedTopicRecord {
+        let channels = vec![PersistedChannelRecord {
             session_id: "$1".to_string(),
             name: "#work-s1-001".to_string(),
             subscribers: vec!["agent-1".to_string()],
             last_activity_at: Some(123),
-        }, PersistedTopicRecord {
+        }, PersistedChannelRecord {
             session_id: "$2".to_string(),
             name: "#work-s1-001".to_string(),
             subscribers: vec!["agent-2".to_string()],
@@ -525,10 +525,10 @@ mod tests {
         }];
 
         replace_agents_at(&path, &agents).unwrap();
-        replace_topics_at(&path, &topics).unwrap();
+        replace_channels_at(&path, &channels).unwrap();
 
         assert_eq!(load_agents_at(&path).unwrap(), agents);
-        assert_eq!(load_topics_at(&path).unwrap(), topics);
+        assert_eq!(load_channels_at(&path).unwrap(), channels);
 
         let _ = fs::remove_file(path);
     }
@@ -548,7 +548,7 @@ mod tests {
             display_name: "Agent 1".to_string(),
             alive: true,
             chatter_subscribed: true,
-            topics: vec![],
+            channels: vec![],
             agent_pid: None,
         }];
         replace_agents_at(&path, &agents).unwrap();
