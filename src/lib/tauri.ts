@@ -5,6 +5,9 @@ import type {
   ClaudeMenuData,
   LayoutStateMap,
   NetworkConnection,
+  PortMode,
+  PortNetworkingMode,
+  TilePortSetting,
   TilePort,
   TmuxSnapshot,
   WorkItem,
@@ -94,6 +97,20 @@ export async function disconnectNetworkPort(
   port: TilePort,
 ): Promise<NetworkConnection | null> {
   return invoke<NetworkConnection | null>('disconnect_network_port', { tileId, port });
+}
+
+export async function setNetworkPortSettings(
+  tileId: string,
+  port: TilePort,
+  accessMode?: PortMode | null,
+  networkingMode?: PortNetworkingMode | null,
+): Promise<TilePortSetting> {
+  return invoke<TilePortSetting>('set_network_port_settings', {
+    tileId,
+    port,
+    accessMode: accessMode ?? null,
+    networkingMode: networkingMode ?? null,
+  });
 }
 
 export async function newSession(name?: string): Promise<string> {

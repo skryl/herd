@@ -57,6 +57,12 @@ Sidebar section order is:
 - `AGENTS`
 - `TMUX`
 
+The `SETTINGS` section currently includes:
+
+- `SPAWN DIR`
+- `PORTS`
+  - toggle between `4`, `8`, `12`, and `16` total visible ports per tile
+
 ## Command Bar
 
 Examples:

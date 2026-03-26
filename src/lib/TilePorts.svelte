@@ -1,11 +1,14 @@
 <script lang="ts">
   import {
     activeNetworkDrag,
+    activeNetworkCallPortActivity,
     appState,
     beginNetworkPortDrag,
     clearCurrentNetworkDragPortSnap,
     completeNetworkPortDrag,
+    openPortContextMenu,
     portCanAcceptCurrentDrag,
+    portNetworkingModeForTile,
     portModeForTile,
     snapCurrentNetworkDragToPort,
   } from './stores/appState';
@@ -28,6 +31,7 @@
   );
   let visibleSlotsBySide = $derived(visibleTilePortSlotsBySide($appState.ui.tilePortCount, occupiedPorts));
   let ports = $derived(visibleTilePorts($appState.ui.tilePortCount, occupiedPorts));
+  let localPortActivity = $derived($activeNetworkCallPortActivity.filter((activity) => activity.tileId === tileId));
 
   function occupied(port: TilePort) {
     if ($activeNetworkDrag?.startedOccupied && $activeNetworkDrag.grabbedTileId === tileId && $activeNetworkDrag.grabbedPort === port) {
@@ -52,6 +56,14 @@
     return portCanAcceptCurrentDrag(tileId, port);
   }
 
+  function sending(port: TilePort) {
+    return localPortActivity.some((activity) => activity.port === port && activity.direction === 'send');
+  }
+
+  function receiving(port: TilePort) {
+    return localPortActivity.some((activity) => activity.port === port && activity.direction === 'receive');
+  }
+
   function portStyle(port: TilePort) {
     const side = tilePortSide(port);
     const ratio = tilePortOffsetRatio(port, visibleSlotsBySide[side]) * 100;
@@ -66,8 +78,11 @@
   }
 
   function handleMouseDown(port: TilePort, event: MouseEvent) {
-    event.preventDefault();
     event.stopPropagation();
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
     const portRect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const viewport = (event.currentTarget as HTMLElement).closest('.canvas-viewport') as HTMLElement | null;
     const viewportRect = viewport?.getBoundingClientRect();
@@ -80,8 +95,11 @@
   }
 
   function handleMouseUp(port: TilePort, event: MouseEvent) {
-    event.preventDefault();
     event.stopPropagation();
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
     if ($activeNetworkDrag && !connectable(port)) {
       void completeNetworkPortDrag();
       return;
@@ -108,6 +126,12 @@
     event.stopPropagation();
     clearCurrentNetworkDragPortSnap(tileId, port);
   }
+
+  function handleContextMenu(port: TilePort, event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    openPortContextMenu(tileId, port, event.clientX, event.clientY);
+  }
 </script>
 
 {#each ports as port}
@@ -115,22 +139,31 @@
     role="button"
     tabindex="-1"
     aria-label={`${tileId} ${port} port`}
-    class={`tile-port port-${tilePortSide(port)} ${portModeForTile(tileId, port) === 'read_write' ? 'port-read-write' : 'port-read'} ${occupied(port) ? 'port-occupied' : connectable(port) ? 'port-open' : 'port-unavailable'} ${snapped(port) ? 'port-snapped' : ''} ${detached(port) ? 'port-detached' : ''}`}
+    class={`tile-port port-${tilePortSide(port)} ${portModeForTile(tileId, port) === 'read_write' ? 'port-read-write' : 'port-read'} ${occupied(port) ? 'port-occupied' : connectable(port) ? 'port-open' : 'port-unavailable'} ${snapped(port) ? 'port-snapped' : ''} ${detached(port) ? 'port-detached' : ''} ${portModeForTile(tileId, port) === 'read' ? 'port-access-read' : ''} ${portNetworkingModeForTile(tileId, port) === 'gateway' ? 'port-networking-gateway' : ''}`}
     data-port-tile={tileId}
     data-port={port}
+    data-port-access={portModeForTile(tileId, port)}
+    data-port-networking={portNetworkingModeForTile(tileId, port)}
+    data-port-send-active={sending(port) ? 'true' : 'false'}
+    data-port-receive-active={receiving(port) ? 'true' : 'false'}
     style={portStyle(port)}
     onmousedown={(event) => handleMouseDown(port, event)}
     onmouseenter={(event) => handleMouseEnter(port, event)}
     onmousemove={(event) => handleMouseEnter(port, event)}
     onmouseleave={(event) => handleMouseLeave(port, event)}
     onmouseup={(event) => handleMouseUp(port, event)}
-  ></div>
+    oncontextmenu={(event) => handleContextMenu(port, event)}
+  >
+    <span class={`port-light port-light-left ${sending(port) ? 'light-active-send' : portModeForTile(tileId, port) === 'read' ? 'light-active-read' : ''}`}></span>
+    <span class={`port-light port-light-right ${receiving(port) ? 'light-active-receive' : portNetworkingModeForTile(tileId, port) === 'gateway' ? 'light-active-gateway' : ''}`}></span>
+  </div>
 {/each}
 
 <style>
   .tile-port {
     position: absolute;
     box-sizing: border-box;
+    overflow: visible;
     border: 1px solid var(--tile-port-contour, var(--socket-border));
     background:
       linear-gradient(180deg, rgba(7, 11, 13, 0.94), rgba(5, 8, 10, 0.95));
@@ -160,6 +193,98 @@
       opacity 0.14s ease,
       box-shadow 0.14s ease,
       transform 0.14s ease;
+  }
+
+  .port-light {
+    position: absolute;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    border-radius: 999px;
+    transform: translateY(-50%);
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 0 0 1px rgba(5, 8, 10, 0.3);
+    z-index: 2;
+  }
+
+  .port-light-left {
+    left: 2px;
+  }
+
+  .port-light-right {
+    right: 2px;
+  }
+
+  .port-left .port-light,
+  .port-right .port-light {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+  }
+
+  .port-left .port-light-left,
+  .port-right .port-light-left {
+    top: 4px;
+  }
+
+  .port-left .port-light-right,
+  .port-right .port-light-right {
+    top: auto;
+    bottom: 4px;
+  }
+
+  .light-active-read {
+    background: rgba(255, 94, 94, 0.95);
+    box-shadow:
+      0 0 0 1px rgba(84, 14, 14, 0.48),
+      0 0 10px rgba(255, 94, 94, 0.45);
+  }
+
+  .light-active-gateway {
+    background: rgba(255, 163, 61, 0.95);
+    box-shadow:
+      0 0 0 1px rgba(92, 48, 0, 0.42),
+      0 0 10px rgba(255, 163, 61, 0.42);
+  }
+
+  .light-active-send,
+  .light-active-receive {
+    background: rgba(84, 255, 142, 0.98);
+    box-shadow:
+      0 0 0 1px rgba(8, 64, 24, 0.54),
+      0 0 12px rgba(84, 255, 142, 0.64);
+    animation: network-port-traffic-blink 0.34s ease-in-out infinite alternate;
+  }
+
+  @keyframes network-port-traffic-blink {
+    from {
+      opacity: 0.35;
+      transform: translateY(-50%) scale(0.88);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(-50%) scale(1.16);
+    }
+  }
+
+  .port-left .light-active-send,
+  .port-right .light-active-send,
+  .port-left .light-active-receive,
+  .port-right .light-active-receive {
+    animation-name: network-port-traffic-blink-vertical;
+  }
+
+  @keyframes network-port-traffic-blink-vertical {
+    from {
+      opacity: 0.35;
+      transform: translateX(-50%) scale(0.88);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateX(-50%) scale(1.16);
+    }
   }
 
   .tile-port:hover {

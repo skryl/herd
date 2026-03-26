@@ -1037,22 +1037,324 @@ describe.sequential('worker/root mcp and permissions', () => {
           dotCount: number;
           fromTileId: string | null;
           toTileId: string | null;
+          senderPortBlink: boolean;
+          receiverPortBlink: boolean;
         }>(`
           const line = document.querySelector('.network-signal-line');
+          const senderPort = document.querySelector('[data-port-tile="${worker.paneId}"][data-port="left"]');
+          const receiverPort = document.querySelector('[data-port-tile="${shellPaneId}"][data-port="right"]');
           return {
             lineCount: document.querySelectorAll('.network-signal-line').length,
             dotCount: document.querySelectorAll('.network-signal-dot').length,
             fromTileId: line?.getAttribute('data-from-tile-id') ?? null,
             toTileId: line?.getAttribute('data-to-tile-id') ?? null,
+            senderPortBlink: senderPort?.getAttribute('data-port-send-active') === 'true'
+              && senderPort?.querySelector('.port-light-left')?.classList.contains('light-active-send'),
+            receiverPortBlink: receiverPort?.getAttribute('data-port-receive-active') === 'true'
+              && receiverPort?.querySelector('.port-light-right')?.classList.contains('light-active-receive'),
           };
         `),
-      (snapshot) => snapshot.lineCount > 0 && snapshot.dotCount > 0,
+      (snapshot) =>
+        snapshot.lineCount > 0
+        && snapshot.dotCount > 0
+        && snapshot.senderPortBlink
+        && snapshot.receiverPortBlink,
       30_000,
       75,
     );
 
     expect(signalSnapshot.fromTileId).toBe(worker.paneId);
     expect(signalSnapshot.toTileId).toBe(shellPaneId);
+    expect(signalSnapshot.senderPortBlink).toBe(true);
+    expect(signalSnapshot.receiverPortBlink).toBe(true);
+  });
+
+  it('suppresses network sparks when disabled in the sidebar settings', async () => {
+    const projection = await createIsolatedTab(client, 'worker-network-signal-disabled');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in worker-network-signal-disabled tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const shellPaneId = await spawnWorkerShellInActiveTab(client);
+
+    await client.networkConnect(worker.paneId, 'left', shellPaneId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+
+    await waitFor(
+      'network wire is visible on canvas',
+      () => client.testDomQuery<number>('return document.querySelectorAll(".network-line").length;'),
+      (count) => count > 0,
+      30_000,
+      100,
+    );
+
+    await client.sidebarOpen();
+    await client.testDomQuery(`
+      document.querySelector('.wire-sparks-toggle')?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      return document.querySelector('.wire-sparks-toggle')?.getAttribute('aria-pressed') ?? '';
+    `);
+
+    await waitFor(
+      'wire sparks setting disables spark rendering',
+      () => client.testDomQuery<boolean>('return document.querySelector(".wire-sparks-toggle")?.getAttribute("aria-pressed") === "true";'),
+      (enabled) => enabled === false,
+      30_000,
+      100,
+    );
+
+    await client.networkCall(shellPaneId, 'output_read', {}, worker.paneId, worker.agentId);
+
+    await waitFor(
+      'network call log arrives while sparks are disabled',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.tile_message_logs.some(
+          (entry) =>
+            entry.wrapper_command === 'network_call'
+            && entry.target_id === shellPaneId
+            && entry.related_tile_ids.includes(worker.paneId),
+        ),
+      30_000,
+      150,
+    );
+
+    const sparkSnapshot = await client.testDomQuery<{ lineCount: number; dotCount: number }>(`
+      return {
+        lineCount: document.querySelectorAll('.network-signal-line').length,
+        dotCount: document.querySelectorAll('.network-signal-dot').length,
+      };
+    `);
+
+    expect(sparkSnapshot.lineCount).toBe(0);
+    expect(sparkSnapshot.dotCount).toBe(0);
+  });
+
+  it('returns self_info for a worker tile and renders an agent-local self_display_draw frame in the terminal display drawer', async () => {
+    const projection = await createIsolatedTab(client, 'agent-display-draw');
+    const sessionId = projection.active_tab_id!;
+    await waitFor(
+      'root agent in agent-display-draw tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const frameText = '\u001b[38;2;255;90;90mAB\u001b[0m\n\u001b[48;2;40;120;255mCD\u001b[0m';
+
+    const selfInfo = await client.sendCommand<{
+      tile_id: string;
+      kind: string;
+      message_api: Array<{ name: string }>;
+    }>({
+      command: 'self_info',
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+
+    expect(selfInfo.tile_id).toBe(worker.paneId);
+    expect(selfInfo.kind).toBe('agent');
+    expect(selfInfo.message_api.some((message) => message.name === 'get')).toBe(true);
+
+    await client.sendCommand({
+      command: 'self_display_draw',
+      text: frameText,
+      columns: 2,
+      rows: 2,
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${worker.paneId}"] .display-toggle-btn')?.click();
+      return true;
+    `);
+
+    const displayState = await waitFor(
+      'agent display drawer renders centered ansi frame',
+      () =>
+        client.testDomQuery<{
+          open: boolean;
+          text: string;
+          ansiSegments: number;
+          horizontalCenterDelta: number;
+          verticalCenterDelta: number;
+        }>(`
+          const tile = document.querySelector('[data-tile-id="${worker.paneId}"]');
+          const drawer = tile?.querySelector('.terminal-display');
+          const body = drawer?.querySelector('.terminal-display-body');
+          const frame = drawer?.querySelector('.terminal-display-frame');
+          const bodyRect = body?.getBoundingClientRect();
+          const frameRect = frame?.getBoundingClientRect();
+          return {
+            open: Boolean(drawer),
+            text: frame?.textContent ?? '',
+            ansiSegments: frame?.querySelectorAll('[data-ansi-segment="true"]').length ?? 0,
+            horizontalCenterDelta: bodyRect && frameRect
+              ? Math.abs((frameRect.left + frameRect.width / 2) - (bodyRect.left + bodyRect.width / 2))
+              : -1,
+            verticalCenterDelta: bodyRect && frameRect
+              ? Math.abs((frameRect.top + frameRect.height / 2) - (bodyRect.top + bodyRect.height / 2))
+              : -1,
+          };
+        `),
+      (state) =>
+        state.open
+        && state.text.includes('AB')
+        && state.text.includes('CD')
+        && state.ansiSegments >= 2
+        && state.horizontalCenterDelta >= 0
+        && state.horizontalCenterDelta < 3
+        && state.verticalCenterDelta >= 0
+        && state.verticalCenterDelta < 3,
+      30_000,
+      150,
+    );
+
+    expect(displayState.text).toContain('AB');
+    expect(displayState.text).toContain('CD');
+    expect(displayState.ansiSegments).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders tile-local LED and status strips for both agent and plain shell tiles', async () => {
+    const projection = await createIsolatedTab(client, 'tile-signal-strip');
+    const sessionId = projection.active_tab_id!;
+    await waitFor(
+      'root agent in tile-signal-strip tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const worker = await spawnWorkerAgentInActiveTab(client);
+    const shellTileId = await spawnWorkerShellInActiveTab(client);
+    await client.driverTileResize(worker.paneId, 320, 420);
+    await client.waitForIdle(30_000, 150);
+
+    await client.sendCommand({
+      command: 'self_led_control',
+      commands: [
+        { op: 'on', led: 1, color: 'red' },
+        { op: 'on', led: 3, color: 'lime' },
+        { op: 'sleep', ms: 200 },
+      ],
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+    await client.sendCommand({
+      command: 'self_display_status',
+      text: '\u001b[33mATTENTION ATTENTION ATTENTION ATTENTION ATTENTION ATTENTION ATTENTION ATTENTION\u001b[0m',
+      sender_agent_id: worker.agentId,
+      sender_tile_id: worker.paneId,
+    });
+
+    await client.sendCommand({
+      command: 'self_led_control',
+      pattern_name: 'solid',
+      pattern_args: {
+        primary_color: 'rgb(0, 170, 255)',
+        delay_ms: 180,
+      },
+      sender_tile_id: shellTileId,
+    });
+
+    const initialSignalState = await waitFor(
+      'tile-local LED strips render with idle shell status',
+      () =>
+        client.testDomQuery<{
+          agentHeaderLedCount: number;
+          agentInfoStripLedCount: number;
+          agentColors: string[];
+          agentStatusText: string;
+          agentMarqueeActive: boolean;
+          agentTitleToLedGap: number;
+          shellHeaderLedCount: number;
+          shellInfoStripLedCount: number;
+          shellStatusText: string;
+          shellTitleToLedGap: number;
+          headerIdentityCount: number;
+        }>(`
+          const summarize = (tileId) => {
+            const tile = document.querySelector('[data-tile-id="' + tileId + '"]');
+            const headerLeds = Array.from(tile?.querySelectorAll('.header-bar .tile-signal-led[data-on="true"]') ?? []);
+            const infoStripLeds = Array.from(tile?.querySelectorAll('.info-strip .tile-signal-led[data-on="true"]') ?? []);
+            const titleRect = tile?.querySelector('.header-bar .designator')?.getBoundingClientRect();
+            const ledBarRect = tile?.querySelector('.header-bar .tile-signal-led-bar')?.getBoundingClientRect();
+            return {
+              headerLedCount: headerLeds.length,
+              infoStripLedCount: infoStripLeds.length,
+              colors: headerLeds.map((led) => led.getAttribute('data-color') ?? ''),
+              statusText: tile?.querySelector('.tile-signal-status-viewport')?.textContent ?? '',
+              marqueeActive: tile?.querySelector('.tile-signal-status')?.getAttribute('data-marquee-active') === 'true',
+              titleToLedGap: titleRect && ledBarRect ? Math.abs(ledBarRect.left - titleRect.right) : -1,
+              identityCount: tile?.querySelectorAll('.header-identity-item').length ?? 0,
+            };
+          };
+          const agent = summarize('${worker.paneId}');
+          const shell = summarize('${shellTileId}');
+          return {
+            agentHeaderLedCount: agent.headerLedCount,
+            agentInfoStripLedCount: agent.infoStripLedCount,
+            agentColors: agent.colors,
+            agentStatusText: agent.statusText,
+            agentMarqueeActive: agent.marqueeActive,
+            agentTitleToLedGap: agent.titleToLedGap,
+            shellHeaderLedCount: shell.headerLedCount,
+            shellInfoStripLedCount: shell.infoStripLedCount,
+            shellStatusText: shell.statusText,
+            shellTitleToLedGap: shell.titleToLedGap,
+            headerIdentityCount: agent.identityCount + shell.identityCount,
+          };
+        `),
+      (state) =>
+        state.agentHeaderLedCount >= 2
+        && state.agentInfoStripLedCount === 0
+        && state.agentColors.includes('red')
+        && state.agentColors.includes('lime')
+        && state.agentTitleToLedGap >= 0
+        && state.agentTitleToLedGap < 12
+        && state.shellHeaderLedCount === 8
+        && state.shellInfoStripLedCount === 0
+        && state.shellStatusText.includes('ONLINE')
+        && state.shellStatusText.includes(shellTileId)
+        && state.shellTitleToLedGap >= 0
+        && state.shellTitleToLedGap < 12
+        && state.headerIdentityCount === 0,
+      30_000,
+      150,
+    );
+
+    expect(initialSignalState.agentHeaderLedCount).toBeGreaterThanOrEqual(2);
+    expect(initialSignalState.shellHeaderLedCount).toBe(8);
+    expect(initialSignalState.shellStatusText).toContain('ONLINE');
+    expect(initialSignalState.shellStatusText).toContain(shellTileId);
+
+    await client.sendCommand({
+      command: 'self_display_status',
+      text: '\u001b[36mSHELL READY\u001b[0m',
+      sender_tile_id: shellTileId,
+    });
+
+    const shellStatusUpdated = await waitFor(
+      'plain shell status strip updates',
+      () =>
+        client.testDomQuery<string>(`
+          return document.querySelector('[data-tile-id="${shellTileId}"] .tile-signal-status-viewport')?.textContent ?? '';
+        `),
+      (text) => text.includes('SHELL READY'),
+      30_000,
+      150,
+    );
+
+    expect(shellStatusUpdated).toContain('SHELL READY');
   });
 
   it('allows shared shell access from multiple workers on one local network', async () => {

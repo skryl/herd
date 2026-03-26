@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::network::NetworkConnection;
+use crate::network::{NetworkConnection, TilePortSetting};
 use crate::tile_message::TileMessageLogEntry;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -40,6 +40,55 @@ pub struct AgentInfo {
     pub channels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentDisplayFrame {
+    pub agent_id: String,
+    pub tile_id: String,
+    pub session_id: String,
+    pub text: String,
+    pub columns: usize,
+    pub rows: usize,
+    pub updated_at: i64,
+}
+
+pub const TILE_SIGNAL_LED_COUNT: usize = 8;
+const DEFAULT_LED_PATTERN_DELAY_MS: u64 = 120;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TileSignalLed {
+    pub index: usize,
+    pub on: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TileSignalState {
+    pub tile_id: String,
+    pub session_id: String,
+    pub leds: Vec<TileSignalLed>,
+    pub status_text: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LedPatternArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum LedControlCommand {
+    On { led: usize, color: String },
+    Off { led: usize },
+    Sleep { ms: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,10 +203,255 @@ pub struct AgentDebugState {
     pub tile_message_logs: Vec<TileMessageLogEntry>,
     #[serde(default)]
     pub connections: Vec<NetworkConnection>,
+    #[serde(default)]
+    pub agent_displays: Vec<AgentDisplayFrame>,
+    #[serde(default)]
+    pub tile_signals: Vec<TileSignalState>,
+    #[serde(default)]
+    pub port_settings: Vec<TilePortSetting>,
 }
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+pub fn default_tile_signal_leds() -> Vec<TileSignalLed> {
+    (1..=TILE_SIGNAL_LED_COUNT)
+        .map(|index| TileSignalLed {
+            index,
+            on: false,
+            color: None,
+        })
+        .collect()
+}
+
+pub fn normalize_status_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\t' => ' ',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn normalized_delay_ms(value: Option<u64>) -> Result<u64, String> {
+    let delay = value.unwrap_or(DEFAULT_LED_PATTERN_DELAY_MS);
+    if delay == 0 {
+        return Err("self_led_control delay must be greater than zero".to_string());
+    }
+    if delay > 60_000 {
+        return Err("self_led_control delay must be 60 seconds or less".to_string());
+    }
+    Ok(delay)
+}
+
+fn normalize_color(color: &str) -> Result<String, String> {
+    let normalized = color.trim();
+    if normalized.is_empty() {
+        return Err("self_led_control color values must be non-empty".to_string());
+    }
+    Ok(normalized.to_string())
+}
+
+pub fn normalize_led_control_commands(commands: Vec<LedControlCommand>) -> Result<Vec<LedControlCommand>, String> {
+    if commands.is_empty() {
+        return Err("self_led_control requires at least one command".to_string());
+    }
+    let mut saw_sleep = false;
+    let mut normalized = Vec::with_capacity(commands.len());
+    for command in commands {
+        match command {
+            LedControlCommand::On { led, color } => {
+                if !(1..=TILE_SIGNAL_LED_COUNT).contains(&led) {
+                    return Err(format!("self_led_control led index must be between 1 and {TILE_SIGNAL_LED_COUNT}"));
+                }
+                normalized.push(LedControlCommand::On {
+                    led,
+                    color: normalize_color(&color)?,
+                });
+            }
+            LedControlCommand::Off { led } => {
+                if !(1..=TILE_SIGNAL_LED_COUNT).contains(&led) {
+                    return Err(format!("self_led_control led index must be between 1 and {TILE_SIGNAL_LED_COUNT}"));
+                }
+                normalized.push(LedControlCommand::Off { led });
+            }
+            LedControlCommand::Sleep { ms } => {
+                if ms == 0 {
+                    return Err("self_led_control sleep must be greater than zero".to_string());
+                }
+                if ms > 60_000 {
+                    return Err("self_led_control sleep must be 60 seconds or less".to_string());
+                }
+                saw_sleep = true;
+                normalized.push(LedControlCommand::Sleep { ms });
+            }
+        }
+    }
+    if !saw_sleep {
+        return Err("self_led_control requires at least one sleep command".to_string());
+    }
+    Ok(normalized)
+}
+
+pub fn expand_led_pattern(pattern_name: &str, pattern_args: Option<&LedPatternArgs>) -> Result<Vec<LedControlCommand>, String> {
+    let normalized_name = pattern_name.trim().to_ascii_lowercase();
+    if normalized_name.is_empty() {
+        return Err("self_led_control pattern_name must be non-empty".to_string());
+    }
+
+    let args = pattern_args.cloned().unwrap_or_default();
+    let delay = normalized_delay_ms(args.delay_ms)?;
+    let primary = normalize_color(args.primary_color.as_deref().unwrap_or("#33ff33"))?;
+    let secondary = normalize_color(args.secondary_color.as_deref().unwrap_or("#ffaa00"))?;
+    let rainbow = [
+        "#ff595e",
+        "#ff924c",
+        "#ffca3a",
+        "#8ac926",
+        "#52a675",
+        "#1982c4",
+        "#4267ac",
+        "#6a4c93",
+    ];
+
+    let off_all = || {
+        (1..=TILE_SIGNAL_LED_COUNT)
+            .map(|led| LedControlCommand::Off { led })
+            .collect::<Vec<_>>()
+    };
+    let on_all = |color: &str| {
+        (1..=TILE_SIGNAL_LED_COUNT)
+            .map(|led| LedControlCommand::On {
+                led,
+                color: color.to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let frame_for_leds = |assignments: &[(usize, String)]| {
+        let mut frame = off_all();
+        for (led, color) in assignments {
+            frame.push(LedControlCommand::On {
+                led: *led,
+                color: color.clone(),
+            });
+        }
+        frame.push(LedControlCommand::Sleep { ms: delay });
+        frame
+    };
+
+    let commands = match normalized_name.as_str() {
+        "off" => {
+            let mut commands = off_all();
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "solid" => {
+            let mut commands = on_all(&primary);
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "blink" => {
+            let mut commands = on_all(&primary);
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands.extend(off_all());
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "scan" => {
+            let mut commands = Vec::new();
+            for led in 1..=TILE_SIGNAL_LED_COUNT {
+                commands.extend(frame_for_leds(&[(led, primary.clone())]));
+            }
+            commands
+        }
+        "alternate" => {
+            let odd_frame = (1..=TILE_SIGNAL_LED_COUNT)
+                .filter(|led| led % 2 == 1)
+                .map(|led| (led, primary.clone()))
+                .chain(
+                    (1..=TILE_SIGNAL_LED_COUNT)
+                        .filter(|led| led % 2 == 0)
+                        .map(|led| (led, secondary.clone())),
+                )
+                .collect::<Vec<_>>();
+            let even_frame = (1..=TILE_SIGNAL_LED_COUNT)
+                .filter(|led| led % 2 == 1)
+                .map(|led| (led, secondary.clone()))
+                .chain(
+                    (1..=TILE_SIGNAL_LED_COUNT)
+                        .filter(|led| led % 2 == 0)
+                        .map(|led| (led, primary.clone())),
+                )
+                .collect::<Vec<_>>();
+            let mut commands = frame_for_leds(&odd_frame);
+            commands.extend(frame_for_leds(&even_frame));
+            commands
+        }
+        "rainbow" => {
+            let mut commands = Vec::new();
+            for offset in 0..TILE_SIGNAL_LED_COUNT {
+                let frame = (0..TILE_SIGNAL_LED_COUNT)
+                    .map(|slot| (slot + 1, rainbow[(slot + offset) % TILE_SIGNAL_LED_COUNT].to_string()))
+                    .collect::<Vec<_>>();
+                commands.extend(frame_for_leds(&frame));
+            }
+            commands
+        }
+        "success" => {
+            let mut commands = Vec::new();
+            let mut frame = Vec::new();
+            for led in 1..=TILE_SIGNAL_LED_COUNT {
+                frame.push((led, primary.clone()));
+                commands.extend(frame_for_leds(&frame));
+            }
+            commands.extend(off_all());
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "warning" => {
+            let mut commands = on_all(&secondary);
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands.extend(off_all());
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "error" => {
+            let mut commands = on_all("#ff5555");
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands.extend(off_all());
+            commands.push(LedControlCommand::Sleep { ms: delay });
+            commands
+        }
+        "alert" => {
+            let frame_a = vec![
+                (1, "#ff5555".to_string()),
+                (3, "#ff5555".to_string()),
+                (5, "#ff5555".to_string()),
+                (7, "#ff5555".to_string()),
+                (2, secondary.clone()),
+                (4, secondary.clone()),
+                (6, secondary.clone()),
+                (8, secondary.clone()),
+            ];
+            let frame_b = vec![
+                (1, secondary.clone()),
+                (3, secondary.clone()),
+                (5, secondary.clone()),
+                (7, secondary.clone()),
+                (2, "#ff5555".to_string()),
+                (4, "#ff5555".to_string()),
+                (6, "#ff5555".to_string()),
+                (8, "#ff5555".to_string()),
+            ];
+            let mut commands = frame_for_leds(&frame_a);
+            commands.extend(frame_for_leds(&frame_b));
+            commands
+        }
+        _ => return Err(format!("unknown self_led_control pattern: {pattern_name}")),
+    };
+
+    normalize_led_control_commands(commands)
 }
 
 pub fn normalize_channel(channel_name: &str) -> Option<String> {

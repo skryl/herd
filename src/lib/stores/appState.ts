@@ -3,7 +3,6 @@ import { derived, get, writable, type Readable, type Writable } from 'svelte/sto
 import ELK from 'elkjs/lib/elk.bundled.js';
 import {
   routeWireGeometries,
-  wirePathFromPoints,
   type RoutedWireGeometry,
   type WireRouteSpec,
 } from '../wireRouting';
@@ -38,6 +37,7 @@ import {
   sendRootMessageCommand,
   selectSession,
   selectWindow,
+  setNetworkPortSettings,
   setPaneTitle,
   loadBrowserWebview,
   spawnBrowserWindow,
@@ -46,6 +46,7 @@ import {
 } from '../tauri';
 import type {
   AgentDebugState,
+  AgentDisplayFrame,
   AgentInfo,
   ArrangementMode,
   AppStateTree,
@@ -66,6 +67,7 @@ import type {
   NetworkConnection,
   NetworkTileKind,
   PortMode,
+  PortNetworkingMode,
   PendingSpawnPlacement,
   PaneViewportHint,
   PaneKind,
@@ -80,6 +82,8 @@ import type {
   TileMessageLogEntry,
   TilePortCount,
   TilePort,
+  TilePortSetting,
+  TileSignalState,
   WorkCanvasCard,
   WorkItem,
   TmuxPane,
@@ -120,6 +124,7 @@ type TmuxEffect =
   | { type: 'rename-window'; windowId: string; name: string }
   | { type: 'write-pane'; paneId: string; data: string }
   | { type: 'load-browser-file'; paneId: string; path: string }
+  | { type: 'set-network-port-settings'; tileId: string; port: TilePort; accessMode?: PortMode | null; networkingMode?: PortNetworkingMode | null }
   | { type: 'open-work-dialog'; placement: PendingSpawnPlacement | null };
 
 export type UiIntent =
@@ -180,6 +185,7 @@ const initialUiState: UiState = {
   sidebarSection: 'tmux',
   sidebarSelectedIdx: 0,
   tilePortCount: DEFAULT_TILE_PORT_COUNT,
+  networkCallSparksEnabled: true,
   debugPaneOpen: false,
   debugPaneHeight: DEFAULT_DEBUG_PANE_HEIGHT,
   debugTab: 'logs',
@@ -219,6 +225,8 @@ export const initialAppState: AppStateTree = {
     entries: {},
   },
   agents: {},
+  agentDisplays: {},
+  tileSignals: {},
   channels: {},
   browserExtensionPages: [],
   chatter: [],
@@ -226,6 +234,7 @@ export const initialAppState: AppStateTree = {
   tileMessageLogs: [],
   network: {
     connections: [],
+    portSettings: [],
   },
   work: {
     items: {},
@@ -1188,6 +1197,8 @@ export function openCanvasContextMenuInState(
     open: true,
     target: 'canvas',
     paneId: null,
+    tileId: null,
+    portId: null,
     clientX,
     clientY,
     worldX,
@@ -1217,6 +1228,8 @@ export function openPaneContextMenuInState(
     open: true,
     target: 'pane',
     paneId,
+    tileId: paneTileId(state, paneId),
+    portId: null,
     clientX,
     clientY,
     worldX: null,
@@ -1231,6 +1244,38 @@ export function openPaneContextMenuInState(
     ui: {
       ...state.ui,
       selectedPaneId: paneId,
+      contextMenu,
+    },
+  };
+}
+
+export function openPortContextMenuInState(
+  state: AppStateTree,
+  tileId: string,
+  portId: TilePort,
+  clientX: number,
+  clientY: number,
+): AppStateTree {
+  const contextMenu: ContextMenuState = {
+    open: true,
+    target: 'port',
+    paneId: paneIdForTileId(state, tileId),
+    tileId,
+    portId,
+    clientX,
+    clientY,
+    worldX: null,
+    worldY: null,
+    claudeCommands: [],
+    claudeSkills: [],
+    loadingClaudeCommands: false,
+    claudeCommandsError: null,
+  };
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      selectedPaneId: contextMenu.paneId ?? state.ui.selectedPaneId,
       contextMenu,
     },
   };
@@ -1259,6 +1304,34 @@ export function buildContextMenuItems(state: AppStateTree): ContextMenuItem[] {
       { id: 'new-agent', label: 'New Agent', kind: 'action', disabled: false },
       { id: 'new-browser', label: 'New Browser', kind: 'action', disabled: false },
       { id: 'new-work', label: 'New Work', kind: 'action', disabled: false },
+    ];
+  }
+
+  if (contextMenu.target === 'port' && contextMenu.tileId && contextMenu.portId) {
+    const accessMode = effectivePortModeForTile(state, contextMenu.tileId, contextMenu.portId);
+    const networkingMode = effectivePortNetworkingModeForTile(state, contextMenu.tileId, contextMenu.portId);
+    return [
+      { id: 'port-label', label: `Port ${contextMenu.portId}`, kind: 'label', disabled: true },
+      {
+        id: 'port-access',
+        label: 'Access',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-access:read', label: 'Read', kind: 'action', disabled: false, selected: accessMode === 'read' },
+          { id: 'port-access:read_write', label: 'Read/Write', kind: 'action', disabled: false, selected: accessMode === 'read_write' },
+        ],
+      },
+      {
+        id: 'port-networking',
+        label: 'Networking',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-networking:broadcast', label: 'Broadcast', kind: 'action', disabled: false, selected: networkingMode === 'broadcast' },
+          { id: 'port-networking:gateway', label: 'Gateway', kind: 'action', disabled: false, selected: networkingMode === 'gateway' },
+        ],
+      },
     ];
   }
 
@@ -1444,6 +1517,37 @@ export function reduceContextMenuSelection(
         },
       },
       effects: [{ type: 'write-pane', paneId: contextMenu.paneId, data: commandText }],
+    };
+  }
+
+  if (
+    contextMenu.target === 'port'
+    && contextMenu.tileId
+    && contextMenu.portId
+    && (itemId.startsWith('port-access:') || itemId.startsWith('port-networking:'))
+  ) {
+    const accessMode = itemId.startsWith('port-access:')
+      ? itemId.slice('port-access:'.length) as PortMode
+      : null;
+    const networkingMode = itemId.startsWith('port-networking:')
+      ? itemId.slice('port-networking:'.length) as PortNetworkingMode
+      : null;
+    const dismissedState = dismissContextMenuInState(state);
+    return {
+      state: {
+        ...dismissedState,
+        ui: {
+          ...dismissedState.ui,
+          selectedPaneId: contextMenu.paneId ?? dismissedState.ui.selectedPaneId,
+        },
+      },
+      effects: [{
+        type: 'set-network-port-settings',
+        tileId: contextMenu.tileId,
+        port: contextMenu.portId,
+        accessMode,
+        networkingMode,
+      }],
     };
   }
 
@@ -1762,6 +1866,8 @@ export function applyTmuxSnapshotToState(
       entries: snappedLayoutEntries,
     },
     agents: previousState.agents,
+    agentDisplays: previousState.agentDisplays,
+    tileSignals: previousState.tileSignals,
     channels: previousState.channels,
     browserExtensionPages: previousState.browserExtensionPages,
     chatter: previousState.chatter,
@@ -2366,6 +2472,15 @@ async function runEffect(effect: TmuxEffect) {
     case 'load-browser-file':
       await loadBrowserWebview(effect.paneId, effect.path);
       break;
+    case 'set-network-port-settings':
+      await setNetworkPortSettings(
+        effect.tileId,
+        effect.port,
+        effect.accessMode ?? null,
+        effect.networkingMode ?? null,
+      );
+      await refreshAgentDebugState();
+      break;
     case 'open-work-dialog':
       workDialogOpener?.(effect.placement);
       break;
@@ -2392,7 +2507,17 @@ export async function bootstrapAppState() {
   const [layout, snapshot, debugState, workItems, browserExtensionPages] = await Promise.all([
     getLayoutState(),
     getTmuxState(),
-    getAgentDebugState().catch(() => ({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] } satisfies AgentDebugState)),
+    getAgentDebugState().catch(() => ({
+      agents: [],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
+    } satisfies AgentDebugState)),
     getWorkItems().catch(() => [] as WorkItem[]),
     getBrowserExtensionPages().catch(() => [] as BrowserExtensionPage[]),
   ]);
@@ -2429,7 +2554,17 @@ export async function refreshWorkItems(sessionId?: string | null) {
 
 export async function refreshAgentDebugState() {
   const debugState = await getAgentDebugState().catch(
-    () => ({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] } satisfies AgentDebugState),
+    () => ({
+      agents: [],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
+    } satisfies AgentDebugState),
   );
   appState.update((state) => applyAgentDebugStateToState(state, debugState));
 }
@@ -2455,6 +2590,24 @@ export function applyPaneRole(paneId: string, role: PaneKind) {
 
 export function applyAgentDebugState(debugState: AgentDebugState) {
   appState.update((state) => applyAgentDebugStateToState(state, debugState));
+}
+
+export function applyTileSignalStateToState(state: AppStateTree, signal: TileSignalState): AppStateTree {
+  const activeSessionId = state.tmux.activeSessionId;
+  if (activeSessionId && signal.session_id !== activeSessionId) {
+    return state;
+  }
+  return {
+    ...state,
+    tileSignals: {
+      ...state.tileSignals,
+      [signal.tile_id]: signal,
+    },
+  };
+}
+
+export function applyTileSignalState(signal: TileSignalState) {
+  appState.update((state) => applyTileSignalStateToState(state, signal));
 }
 
 export function appendChatterEntry(entry: ChatterEntry) {
@@ -2557,6 +2710,14 @@ export const tilePortCount = createWritableSlice<TilePortCount>(
   (state) => state.ui.tilePortCount,
   (state, value) => ({ ...state, ui: { ...state.ui, tilePortCount: value } }),
 );
+
+export const networkCallSparksEnabled = createWritableSlice<boolean>(
+  (state) => state.ui.networkCallSparksEnabled,
+  (state, value) => ({ ...state, ui: { ...state.ui, networkCallSparksEnabled: value } }),
+);
+
+export const agentDisplayByTileId = derived(appState, ($state) => $state.agentDisplays);
+export const tileSignalByTileId = derived(appState, ($state) => $state.tileSignals);
 
 export const tmuxWindows = derived(appState, ($state) =>
   $state.tmux.windowOrder
@@ -2683,6 +2844,22 @@ function buildAgentRecord(agents: AgentInfo[]): Record<string, AgentInfo> {
   return record;
 }
 
+function buildAgentDisplayRecord(displays: AgentDisplayFrame[]): Record<string, AgentDisplayFrame> {
+  const record: Record<string, AgentDisplayFrame> = {};
+  for (const display of displays) {
+    record[display.tile_id] = display;
+  }
+  return record;
+}
+
+function buildTileSignalRecord(signals: TileSignalState[]): Record<string, TileSignalState> {
+  const record: Record<string, TileSignalState> = {};
+  for (const signal of signals) {
+    record[signal.tile_id] = signal;
+  }
+  return record;
+}
+
 function buildChannelRecord(channels: ChannelInfo[]): Record<string, ChannelInfo> {
   const record: Record<string, ChannelInfo> = {};
   for (const channel of channels) {
@@ -2801,6 +2978,12 @@ export function applyAgentDebugStateToState(state: AppStateTree, debugState: Age
   const agents = activeSessionId
     ? debugState.agents.filter((agent) => agent.session_id === activeSessionId)
     : debugState.agents;
+  const agentDisplays = activeSessionId
+    ? debugState.agent_displays.filter((display) => display.session_id === activeSessionId)
+    : debugState.agent_displays;
+  const tileSignals = activeSessionId
+    ? debugState.tile_signals.filter((signal) => signal.session_id === activeSessionId)
+    : debugState.tile_signals;
   const channels = activeSessionId
     ? debugState.channels.filter((channel) => channel.session_id === activeSessionId)
     : debugState.channels;
@@ -2820,6 +3003,8 @@ export function applyAgentDebugStateToState(state: AppStateTree, debugState: Age
   return {
     ...state,
     agents: buildAgentRecord(agents),
+    agentDisplays: buildAgentDisplayRecord(agentDisplays),
+    tileSignals: buildTileSignalRecord(tileSignals),
     channels: buildChannelRecord(channels),
     chatter,
     agentLogs,
@@ -2827,6 +3012,9 @@ export function applyAgentDebugStateToState(state: AppStateTree, debugState: Age
     network: {
       connections: debugState.connections.filter(
         (connection) => !activeSessionId || connection.session_id === activeSessionId,
+      ),
+      portSettings: debugState.port_settings.filter(
+        (setting) => !activeSessionId || setting.session_id === activeSessionId,
       ),
     },
     ui: {
@@ -3103,10 +3291,14 @@ export interface NetworkCallSignalSegment {
   id: string;
   fromTileId: string;
   toTileId: string;
+  senderTileId: string;
+  senderPort: TilePort;
+  receiverTileId: string;
+  receiverPort: TilePort;
   connectionKey: string;
   wireMode: RenderedNetworkConnection['wireMode'];
   path: string;
-  motionPath: string;
+  reverse: boolean;
   delayMs: number;
   durationMs: number;
 }
@@ -3120,11 +3312,48 @@ export interface NetworkCallSignal {
   segments: NetworkCallSignalSegment[];
 }
 
+export interface ActiveNetworkCallPortActivity {
+  tileId: string;
+  port: TilePort;
+  direction: 'send' | 'receive';
+}
+
 export function portModeForTileKind(kind: NetworkTileKind, port: TilePort): PortMode {
   if (kind === 'work' && tilePortSide(port) !== 'left') {
     return 'read';
   }
   return 'read_write';
+}
+
+export function portNetworkingModeForTileKind(): PortNetworkingMode {
+  return 'broadcast';
+}
+
+function portSettingForTile(
+  state: AppStateTree,
+  tileId: string,
+  port: TilePort,
+): TilePortSetting | null {
+  return state.network.portSettings.find(
+    (setting) => setting.tile_id === tileId && setting.port === port,
+  ) ?? null;
+}
+
+export function effectivePortModeForTile(
+  state: AppStateTree,
+  tileId: string,
+  port: TilePort,
+): PortMode {
+  const kind = tileKindForTileId(state, tileId) ?? 'shell';
+  return portSettingForTile(state, tileId, port)?.access_mode ?? portModeForTileKind(kind, port);
+}
+
+export function effectivePortNetworkingModeForTile(
+  state: AppStateTree,
+  tileId: string,
+  port: TilePort,
+): PortNetworkingMode {
+  return portSettingForTile(state, tileId, port)?.networking_mode ?? portNetworkingModeForTileKind();
 }
 
 function tileKindForTileId(state: AppStateTree, tileId: string): NetworkTileKind | null {
@@ -3161,14 +3390,9 @@ function renderedNetworkConnectionMode(
   state: AppStateTree,
   connection: NetworkConnection,
 ): 'read_only' | 'full_duplex' {
-  const fromKind = tileKindForTileId(state, connection.from_tile_id);
-  const toKind = tileKindForTileId(state, connection.to_tile_id);
-  if (!fromKind || !toKind) {
-    return 'full_duplex';
-  }
   return (
-    portModeForTileKind(fromKind, connection.from_port) === 'read_write'
-    && portModeForTileKind(toKind, connection.to_port) === 'read_write'
+    effectivePortModeForTile(state, connection.from_tile_id, connection.from_port) === 'read_write'
+    && effectivePortModeForTile(state, connection.to_tile_id, connection.to_port) === 'read_write'
   )
     ? 'full_duplex'
     : 'read_only';
@@ -3207,8 +3431,12 @@ function findNetworkConnectionRoute(
     return null;
   }
 
-  const visited = new Set<string>([fromTileId]);
-  const queue: Array<{ tileId: string; hops: NetworkConnectionRouteHop[] }> = [{ tileId: fromTileId, hops: [] }];
+  const visited = new Set<string>([`${fromTileId}:origin`]);
+  const queue: Array<{ tileId: string; ingressPort: TilePort | null; hops: NetworkConnectionRouteHop[] }> = [{
+    tileId: fromTileId,
+    ingressPort: null,
+    hops: [],
+  }];
 
   while (queue.length > 0) {
     const current = queue.shift();
@@ -3216,18 +3444,40 @@ function findNetworkConnectionRoute(
       break;
     }
 
+    if (
+      current.ingressPort
+      && effectivePortNetworkingModeForTile(state, current.tileId, current.ingressPort) === 'gateway'
+    ) {
+      continue;
+    }
+
     for (const connection of scopedConnections) {
       let nextTileId: string | null = null;
+      let localPort: TilePort | null = null;
+      let nextIngressPort: TilePort | null = null;
       let reverse = false;
       if (connection.from_tile_id === current.tileId) {
         nextTileId = connection.to_tile_id;
+        localPort = connection.from_port;
+        nextIngressPort = connection.to_port;
       } else if (connection.to_tile_id === current.tileId) {
         nextTileId = connection.from_tile_id;
+        localPort = connection.to_port;
+        nextIngressPort = connection.from_port;
         reverse = true;
       }
 
-      if (!nextTileId || visited.has(nextTileId)) {
+      if (!nextTileId || !localPort || !nextIngressPort) {
         continue;
+      }
+
+      if (current.ingressPort) {
+        if (localPort === current.ingressPort) {
+          continue;
+        }
+        if (effectivePortNetworkingModeForTile(state, current.tileId, localPort) !== 'broadcast') {
+          continue;
+        }
       }
 
       const nextHops = [...current.hops, { connection, reverse }];
@@ -3235,8 +3485,12 @@ function findNetworkConnectionRoute(
         return nextHops;
       }
 
-      visited.add(nextTileId);
-      queue.push({ tileId: nextTileId, hops: nextHops });
+      const nextStateKey = `${nextTileId}:${nextIngressPort}`;
+      if (visited.has(nextStateKey)) {
+        continue;
+      }
+      visited.add(nextStateKey);
+      queue.push({ tileId: nextTileId, ingressPort: nextIngressPort, hops: nextHops });
     }
   }
 
@@ -3245,7 +3499,7 @@ function findNetworkConnectionRoute(
 
 function networkCallSignalDurationMs(connection: RenderedNetworkConnection) {
   const estimatedPathLength = approximateWirePathLength(connection.points);
-  return Math.max(220, Math.min(480, Math.round(estimatedPathLength * 0.8)));
+  return Math.max(360, Math.min(900, Math.round(estimatedPathLength * 1.35)));
 }
 
 export function buildNetworkCallSignals(
@@ -3292,10 +3546,14 @@ export function buildNetworkCallSignals(
       if (!renderedConnection) {
         return [];
       }
-
       const durationMs = networkCallSignalDurationMs(renderedConnection);
       const delayMs = accumulatedDelayMs;
       accumulatedDelayMs += durationMs + SIGNAL_GAP_MS;
+
+      const senderTileId = hop.reverse ? hop.connection.to_tile_id : hop.connection.from_tile_id;
+      const senderPort = hop.reverse ? hop.connection.to_port : hop.connection.from_port;
+      const receiverTileId = hop.reverse ? hop.connection.from_tile_id : hop.connection.to_tile_id;
+      const receiverPort = hop.reverse ? hop.connection.from_port : hop.connection.to_port;
 
       segments.push({
         id: [
@@ -3309,16 +3567,14 @@ export function buildNetworkCallSignals(
         ].join(':'),
         fromTileId: entry.caller_tile_id,
         toTileId: entry.target_id,
+        senderTileId,
+        senderPort,
+        receiverTileId,
+        receiverPort,
         connectionKey,
         wireMode: renderedConnection.wireMode,
         path: renderedConnection.path,
-        motionPath: hop.reverse
-          ? wirePathFromPoints(
-            [...renderedConnection.points].reverse(),
-            renderedConnection.toPort,
-            renderedConnection.fromPort,
-          )
-          : renderedConnection.path,
+        reverse: hop.reverse,
         delayMs,
         durationMs,
       });
@@ -3382,6 +3638,7 @@ function removeNetworkConnectionFromState(state: AppStateTree, connectionKey: st
   return {
     ...state,
     network: {
+      ...state.network,
       connections: state.network.connections.filter(
         (connection) => networkConnectionKey(connection) !== connectionKey,
       ),
@@ -3394,6 +3651,7 @@ function upsertNetworkConnectionInState(state: AppStateTree, connection: Network
   return {
     ...state,
     network: {
+      ...state.network,
       connections: [
         ...state.network.connections.filter(
           (existing) => networkConnectionKey(existing) !== connectionKey,
@@ -3574,8 +3832,8 @@ function canConnectPorts(
     return false;
   }
 
-  const fromMode = portModeForTileKind(fromKind, fromPort);
-  const toMode = portModeForTileKind(toKind, toPort);
+  const fromMode = effectivePortModeForTile(state, fromTileId, fromPort);
+  const toMode = effectivePortModeForTile(state, toTileId, toPort);
   if (fromMode === 'read' && toMode === 'read') {
     return false;
   }
@@ -3807,11 +4065,14 @@ export const visibleActiveTabNetworkConnections = derived(
     return $connections.filter((connection) => !hidden.has(renderedNetworkConnectionKey(connection)));
   },
 );
+export const activeNetworkCallPortActivity = writable<ActiveNetworkCallPortActivity[]>([]);
 
 export function portModeForTile(tileId: string, port: TilePort): PortMode {
-  const state = get(appState);
-  const kind = tileKindForTileId(state, tileId);
-  return portModeForTileKind(kind ?? 'shell', port);
+  return effectivePortModeForTile(get(appState), tileId, port);
+}
+
+export function portNetworkingModeForTile(tileId: string, port: TilePort): PortNetworkingMode {
+  return effectivePortNetworkingModeForTile(get(appState), tileId, port);
 }
 
 export function portCanAcceptCurrentDrag(tileId: string, port: TilePort): boolean {
@@ -4285,8 +4546,14 @@ function projectContextMenu(state: AppStateTree): TestDriverProjection['context_
     return null;
   }
   return {
-    target: state.ui.contextMenu.target === 'pane' ? 'tile' : 'canvas',
-    tile_id: state.ui.contextMenu.paneId ? paneTileId(state, state.ui.contextMenu.paneId) : null,
+    target:
+      state.ui.contextMenu.target === 'pane'
+        ? 'tile'
+        : state.ui.contextMenu.target === 'port'
+          ? 'port'
+          : 'canvas',
+    tile_id: state.ui.contextMenu.tileId ?? (state.ui.contextMenu.paneId ? paneTileId(state, state.ui.contextMenu.paneId) : null),
+    port_id: state.ui.contextMenu.portId,
     client_x: state.ui.contextMenu.clientX,
     client_y: state.ui.contextMenu.clientY,
     world_x: state.ui.contextMenu.worldX,
@@ -4467,6 +4734,10 @@ export function openPaneContextMenu(paneId: string, clientX: number, clientY: nu
         };
       });
     });
+}
+
+export function openPortContextMenu(tileId: string, portId: TilePort, clientX: number, clientY: number) {
+  appState.update((state) => openPortContextMenuInState(state, tileId, portId, clientX, clientY));
 }
 
 export function dismissContextMenu() {

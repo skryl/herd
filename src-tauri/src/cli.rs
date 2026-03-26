@@ -84,6 +84,9 @@ fn print_help() {
 Usage:
   herd [--socket <path>] [--agent-pid <pid>] sudo <message>
   herd [--socket <path>] [--agent-pid <pid>] agent ack-ping [<agent_id>]
+  herd [--socket <path>] [--agent-pid <pid>] self info
+  herd [--socket <path>] [--agent-pid <pid>] self led-control <json>
+  herd [--socket <path>] [--agent-pid <pid>] self display-status <text>
   herd [--socket <path>] [--agent-pid <pid>] network list [shell|agent|browser|work]
   herd [--socket <path>] [--agent-pid <pid>] network get <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] network call <tile_id> <action> [json_args]
@@ -276,6 +279,34 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
             "sender_tile_id": env_tile_id(),
             "sender_agent_pid": ctx.agent_pid,
         })),
+        "self" => {
+            let sub = args.get(1).map(String::as_str).ok_or("missing self target")?;
+            match sub {
+                "info" => Ok(json!({
+                    "command": "self_info",
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "led-control" => {
+                    let payload = parse_json_object_arg(
+                        args.get(2..).filter(|values| !values.is_empty()).map(|values| values.join(" ")),
+                        "self led-control requires valid JSON args",
+                    )?;
+                    let mut payload = payload;
+                    payload["command"] = json!("self_led_control");
+                    payload["sender_agent_id"] = json!(env_agent_id());
+                    payload["sender_tile_id"] = json!(env_tile_id());
+                    Ok(payload)
+                }
+                "display-status" => Ok(json!({
+                    "command": "self_display_status",
+                    "text": args.get(2..).ok_or("self display-status requires text")?.join(" "),
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                _ => Err(format!("unknown self target: {sub}")),
+            }
+        }
         "network" => {
             let sub = args.get(1).map(String::as_str).ok_or("missing network target")?;
             match sub {
@@ -790,6 +821,72 @@ mod tests {
                 json!({
                     "command": "network_get",
                     "tile_id": "tile9",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_self_info_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &["self".into(), "info".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "self_info",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_self_led_control_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &[
+                    "self".into(),
+                    "led-control".into(),
+                    r#"{"commands":[{"op":"on","led":1,"color":"red"},{"op":"sleep","ms":100}]}"#.into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "self_led_control",
+                    "commands": [
+                        { "op": "on", "led": 1, "color": "red" },
+                        { "op": "sleep", "ms": 100 },
+                    ],
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_self_display_status_payload_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let payload = build_command_payload(
+                &ctx(),
+                &["self".into(), "display-status".into(), "\u{1b}[33mREADY\u{1b}[0m".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({
+                    "command": "self_display_status",
+                    "text": "\u{1b}[33mREADY\u{1b}[0m",
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
                 })

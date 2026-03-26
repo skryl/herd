@@ -31,6 +31,7 @@ const tauriMocks = vi.hoisted(() => ({
   sendRootMessageCommand: vi.fn(),
   selectSession: vi.fn(),
   selectWindow: vi.fn(),
+  setNetworkPortSettings: vi.fn(),
   setPaneTitle: vi.fn(),
   spawnBrowserWindow: vi.fn(),
   spawnAgentWindow: vi.fn(),
@@ -45,6 +46,7 @@ import {
   applyPaneReadOnlyToState,
   applyPaneRoleToState,
   applyAgentDebugStateToState,
+  applyTileSignalStateToState,
   applyTmuxSnapshot,
   applyTmuxSnapshotToState,
   appState,
@@ -80,6 +82,7 @@ import {
   networkReleaseAnimation,
   openCanvasContextMenuInState,
   openPaneContextMenuInState,
+  openPortContextMenuInState,
   openPaneContextMenu,
   parseCommandBarCommand,
   portCanAcceptCurrentDrag,
@@ -321,7 +324,17 @@ beforeEach(() => {
   __resetWindowResizeTrackingForTest();
   Object.values(tauriMocks).forEach((mockFn) => mockFn.mockReset());
   tauriMocks.getClaudeMenuDataForPane.mockResolvedValue({ commands: [], skills: [] });
-  tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
+  tauriMocks.getAgentDebugState.mockResolvedValue({
+    agents: [],
+    channels: [],
+    chatter: [],
+    agent_logs: [],
+    tile_message_logs: [],
+    connections: [],
+    agent_displays: [],
+    tile_signals: [],
+    port_settings: [],
+  });
   tauriMocks.getBrowserExtensionPages.mockResolvedValue([]);
   tauriMocks.getWorkItems.mockResolvedValue([]);
   tauriMocks.loadBrowserWebview.mockResolvedValue(undefined);
@@ -329,6 +342,13 @@ beforeEach(() => {
   tauriMocks.spawnAgentWindow.mockResolvedValue(undefined);
   tauriMocks.connectNetworkTiles.mockResolvedValue(undefined);
   tauriMocks.disconnectNetworkPort.mockResolvedValue(null);
+  tauriMocks.setNetworkPortSettings.mockResolvedValue({
+    session_id: '$1',
+    tile_id: tileForPane('%1'),
+    port: 'left',
+    access_mode: 'read_write',
+    networking_mode: 'broadcast',
+  });
 });
 
 function sampleWorkItem(overrides: Partial<WorkItem> = {}): WorkItem {
@@ -489,6 +509,10 @@ describe('applyTmuxSnapshotToState', () => {
 describe('network connectors', () => {
   it('defaults tile port count to four total ports', () => {
     expect(initialAppState.ui.tilePortCount).toBe(4);
+  });
+
+  it('enables network call sparks by default', () => {
+    expect(initialAppState.ui.networkCallSparksEnabled).toBe(true);
   });
 
   it('builds simple rendered curves when nothing blocks the wire', () => {
@@ -927,7 +951,17 @@ describe('work state', () => {
   it('bootstraps current-session work items from tauri', async () => {
     tauriMocks.getLayoutState.mockResolvedValue({});
     tauriMocks.getTmuxState.mockResolvedValue(baseSnapshot());
-    tauriMocks.getAgentDebugState.mockResolvedValue({ agents: [], channels: [], chatter: [], agent_logs: [], tile_message_logs: [], connections: [] });
+    tauriMocks.getAgentDebugState.mockResolvedValue({
+      agents: [],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
+    });
     tauriMocks.getWorkItems.mockResolvedValue([
       sampleWorkItem(),
       sampleWorkItem({
@@ -1031,6 +1065,9 @@ describe('session-scoped agent debug state', () => {
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
       channels: [
         { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
         { session_id: '$2', name: '#work-s2-001', subscriber_count: 1, last_activity_at: 20 },
@@ -1072,6 +1109,137 @@ describe('session-scoped agent debug state', () => {
     expect(next.chatter.map((entry) => entry.session_id)).toEqual(['$1']);
   });
 
+  it('stores agent display frames by tile id for the active session', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    const next = applyAgentDebugStateToState(state, {
+      agents: [
+        {
+          agent_id: 'agent-1',
+          agent_type: 'claude',
+          agent_role: 'worker',
+          tile_id: tileForPane('%1'),
+          window_id: '@1',
+          session_id: '$1',
+          title: 'Agent',
+          display_name: 'Agent 1',
+          alive: true,
+          chatter_subscribed: true,
+          channels: [],
+        },
+      ],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      port_settings: [],
+      agent_displays: [
+        {
+          agent_id: 'agent-1',
+          tile_id: tileForPane('%1'),
+          session_id: '$1',
+          text: 'AB\\nCD',
+          columns: 2,
+          rows: 2,
+          updated_at: 42,
+        },
+        {
+          agent_id: 'agent-2',
+          tile_id: tileForPane('%3'),
+          session_id: '$2',
+          text: 'ZZ',
+          columns: 2,
+          rows: 1,
+          updated_at: 84,
+        },
+      ],
+      tile_signals: [],
+    });
+
+    expect(next.agentDisplays).toEqual({
+      [tileForPane('%1')]: {
+        agent_id: 'agent-1',
+        tile_id: tileForPane('%1'),
+        session_id: '$1',
+        text: 'AB\\nCD',
+        columns: 2,
+        rows: 2,
+        updated_at: 42,
+      },
+    });
+  });
+
+  it('stores tile signal states by tile id for the active session and applies incremental updates', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    const offLeds = Array.from({ length: 8 }, (_, index) => ({
+      index: index + 1,
+      on: false,
+      color: null,
+    }));
+    const next = applyAgentDebugStateToState(state, {
+      agents: [],
+      channels: [],
+      chatter: [],
+      agent_logs: [],
+      tile_message_logs: [],
+      connections: [],
+      port_settings: [],
+      agent_displays: [],
+      tile_signals: [
+        {
+          tile_id: tileForPane('%1'),
+          session_id: '$1',
+          leds: offLeds,
+          status_text: '\u001b[33mREADY\u001b[0m',
+          updated_at: 42,
+        },
+        {
+          tile_id: tileForPane('%3'),
+          session_id: '$2',
+          leds: offLeds,
+          status_text: 'foreign',
+          updated_at: 84,
+        },
+      ],
+    });
+
+    expect(next.tileSignals).toEqual({
+      [tileForPane('%1')]: {
+        tile_id: tileForPane('%1'),
+        session_id: '$1',
+        leds: offLeds,
+        status_text: '\u001b[33mREADY\u001b[0m',
+        updated_at: 42,
+      },
+    });
+
+    const updated = applyTileSignalStateToState(next, {
+      tile_id: tileForPane('%1'),
+      session_id: '$1',
+      leds: offLeds.map((led) => (led.index === 1 ? { ...led, on: true, color: 'red' } : led)),
+      status_text: '\u001b[31mALERT\u001b[0m',
+      updated_at: 128,
+    });
+
+    expect(updated.tileSignals[tileForPane('%1')]).toEqual({
+      tile_id: tileForPane('%1'),
+      session_id: '$1',
+      leds: offLeds.map((led) => (led.index === 1 ? { ...led, on: true, color: 'red' } : led)),
+      status_text: '\u001b[31mALERT\u001b[0m',
+      updated_at: 128,
+    });
+
+    const ignored = applyTileSignalStateToState(updated, {
+      tile_id: tileForPane('%3'),
+      session_id: '$2',
+      leds: offLeds.map((led) => (led.index === 3 ? { ...led, on: true, color: 'blue' } : led)),
+      status_text: 'ignored',
+      updated_at: 256,
+    });
+
+    expect(ignored.tileSignals).toEqual(updated.tileSignals);
+  });
+
   it('ignores chatter append events from other sessions and derives active-session registry views', () => {
     const seeded = applyAgentDebugStateToState(
       applyTmuxSnapshotToState(freshState(), baseSnapshot()),
@@ -1107,6 +1275,9 @@ describe('session-scoped agent debug state', () => {
         agent_logs: [],
         tile_message_logs: [],
         connections: [],
+        agent_displays: [],
+        tile_signals: [],
+        port_settings: [],
         channels: [
           { session_id: '$1', name: '#work-s1-001', subscriber_count: 1, last_activity_at: 10 },
           { session_id: '$2', name: '#work-s2-001', subscriber_count: 1, last_activity_at: 20 },
@@ -1210,6 +1381,9 @@ describe('session-scoped agent debug state', () => {
           },
         ],
         connections: [],
+        agent_displays: [],
+        tile_signals: [],
+        port_settings: [],
       },
     );
 
@@ -1511,6 +1685,9 @@ describe('reduceIntent', () => {
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
       channels: [],
       chatter: [],
     });
@@ -1652,6 +1829,9 @@ describe('reduceIntent', () => {
       agent_logs: [],
       tile_message_logs: [],
       connections: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
       channels: [],
       chatter: [],
     });
@@ -1722,6 +1902,9 @@ describe('buildNetworkCallSignals', () => {
       chatter: [],
       agent_logs: [],
       tile_message_logs: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
       connections: [
         {
           session_id: '$1',
@@ -1754,7 +1937,12 @@ describe('buildNetworkCallSignals', () => {
     expect(signals).toHaveLength(1);
     expect(signals[0]?.segments).toHaveLength(1);
     expect(signals[0]?.segments[0]?.connectionKey).toBe(`${tileForPane('%1')}:right-${tileForPane('%2')}:left`);
-    expect(signals[0]?.segments[0]?.motionPath.length).toBeGreaterThan(0);
+    expect(signals[0]?.segments[0]?.senderTileId).toBe(tileForPane('%1'));
+    expect(signals[0]?.segments[0]?.senderPort).toBe('right');
+    expect(signals[0]?.segments[0]?.receiverTileId).toBe(tileForPane('%2'));
+    expect(signals[0]?.segments[0]?.receiverPort).toBe('left');
+    expect(signals[0]?.segments[0]?.path).toMatch(/^M [\d.-]+ [\d.-]+(?: (?:L [\d.-]+ [\d.-]+|C [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+ [\d.-]+))+$/);
+    expect(signals[0]?.segments[0]?.reverse).toBe(false);
     expect(signals[0]?.totalDurationMs).toBeGreaterThan(0);
   });
 
@@ -1799,6 +1987,9 @@ describe('buildNetworkCallSignals', () => {
       chatter: [],
       agent_logs: [],
       tile_message_logs: [],
+      agent_displays: [],
+      tile_signals: [],
+      port_settings: [],
       connections: [
         {
           session_id: '$1',
@@ -1837,6 +2028,18 @@ describe('buildNetworkCallSignals', () => {
 
     expect(signals).toHaveLength(1);
     expect(signals[0]?.segments).toHaveLength(2);
+    expect(signals[0]?.segments[0]).toMatchObject({
+      senderTileId: tileForPane('%1'),
+      senderPort: 'right',
+      receiverTileId: tileForPane('%2'),
+      receiverPort: 'left',
+    });
+    expect(signals[0]?.segments[1]).toMatchObject({
+      senderTileId: tileForPane('%2'),
+      senderPort: 'right',
+      receiverTileId: tileForPane('%4'),
+      receiverPort: 'left',
+    });
     expect(signals[0]?.segments[1]?.delayMs).toBeGreaterThan(signals[0]?.segments[0]?.delayMs ?? 0);
   });
 });
@@ -1979,6 +2182,8 @@ describe('context menu state', () => {
       open: true,
       target: 'canvas',
       paneId: null,
+      tileId: null,
+      portId: null,
       clientX: 320,
       clientY: 250,
       worldX: 110,
@@ -2000,8 +2205,70 @@ describe('context menu state', () => {
     expect(state.ui.selectedPaneId).toBe('%2');
     expect(state.ui.contextMenu?.target).toBe('pane');
     expect(state.ui.contextMenu?.paneId).toBe('%2');
+    expect(state.ui.contextMenu?.tileId).toBe(tileForPane('%2'));
+    expect(state.ui.contextMenu?.portId).toBeNull();
     expect(buildContextMenuItems(state)).toEqual([
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('opens a port context menu with effective access and networking selections', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.network.portSettings = [
+      {
+        session_id: '$1',
+        tile_id: tileForPane('%2'),
+        port: 'right',
+        access_mode: 'read',
+        networking_mode: 'gateway',
+      },
+    ];
+
+    state = openPortContextMenuInState(state, tileForPane('%2'), 'right', 700, 340);
+
+    expect(state.ui.contextMenu).toMatchObject({
+      target: 'port',
+      tileId: tileForPane('%2'),
+      portId: 'right',
+      paneId: '%2',
+      clientX: 700,
+      clientY: 340,
+    });
+    expect(buildContextMenuItems(state)).toEqual([
+      { id: 'port-label', label: 'Port right', kind: 'label', disabled: true },
+      {
+        id: 'port-access',
+        label: 'Access',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-access:read', label: 'Read', kind: 'action', disabled: false, selected: true },
+          { id: 'port-access:read_write', label: 'Read/Write', kind: 'action', disabled: false, selected: false },
+        ],
+      },
+      {
+        id: 'port-networking',
+        label: 'Networking',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-networking:broadcast', label: 'Broadcast', kind: 'action', disabled: false, selected: false },
+          { id: 'port-networking:gateway', label: 'Gateway', kind: 'action', disabled: false, selected: true },
+        ],
+      },
+    ]);
+  });
+
+  it('maps port menu selections to network port setting effects', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = openPortContextMenuInState(state, tileForPane('%2'), 'right', 700, 340);
+
+    expect(reduceContextMenuSelection(state, 'port-access:read').effects).toEqual([
+      { type: 'set-network-port-settings', tileId: tileForPane('%2'), port: 'right', accessMode: 'read', networkingMode: null },
+    ]);
+
+    expect(reduceContextMenuSelection(state, 'port-networking:gateway').effects).toEqual([
+      { type: 'set-network-port-settings', tileId: tileForPane('%2'), port: 'right', accessMode: null, networkingMode: 'gateway' },
     ]);
   });
 

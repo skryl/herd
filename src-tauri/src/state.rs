@@ -8,7 +8,23 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::agent::{AgentChannelEvent, AgentDebugState, AgentInfo, AgentLogEntry, AgentRole, AgentStreamEnvelope, AgentType, ChannelInfo, ChatterEntry};
+use crate::agent::{
+    default_tile_signal_leds,
+    normalize_status_text,
+    AgentChannelEvent,
+    AgentDebugState,
+    AgentDisplayFrame,
+    AgentInfo,
+    AgentLogEntry,
+    AgentRole,
+    AgentStreamEnvelope,
+    AgentType,
+    ChannelInfo,
+    ChatterEntry,
+    TileSignalLed,
+    TileSignalState,
+    TILE_SIGNAL_LED_COUNT,
+};
 use crate::db::{self, PersistedChannelRecord};
 use crate::network;
 use crate::persist::{self, HerdState, TileState};
@@ -118,7 +134,11 @@ pub struct AppState {
     chatter_entries: Arc<Mutex<Vec<ChatterEntry>>>,
     agent_log_entries: Arc<Mutex<Vec<AgentLogEntry>>>,
     tile_message_log_entries: Arc<Mutex<Vec<TileMessageLogEntry>>>,
+    agent_display_frames: Arc<Mutex<HashMap<String, AgentDisplayFrame>>>,
+    tile_signal_states: Arc<Mutex<HashMap<String, TileSignalState>>>,
+    tile_signal_program_generations: Arc<Mutex<HashMap<String, u64>>>,
     agent_display_counter: Arc<AtomicU64>,
+    tile_signal_counter: Arc<AtomicU64>,
     agent_subscriber_counter: Arc<AtomicU64>,
     agent_ping_counter: Arc<AtomicU64>,
 }
@@ -171,7 +191,11 @@ impl AppState {
             chatter_entries: Arc::new(Mutex::new(chatter_entries)),
             agent_log_entries: Arc::new(Mutex::new(agent_log_entries)),
             tile_message_log_entries: Arc::new(Mutex::new(tile_message_log_entries)),
+            agent_display_frames: Arc::new(Mutex::new(HashMap::new())),
+            tile_signal_states: Arc::new(Mutex::new(HashMap::new())),
+            tile_signal_program_generations: Arc::new(Mutex::new(HashMap::new())),
             agent_display_counter: Arc::new(AtomicU64::new(agent_display_counter)),
+            tile_signal_counter: Arc::new(AtomicU64::new(0)),
             agent_subscriber_counter: Arc::new(AtomicU64::new(0)),
             agent_ping_counter: Arc::new(AtomicU64::new(0)),
         }
@@ -281,6 +305,28 @@ impl AppState {
     pub fn remove_browser_page_zoom(&self, pane_id: &str) {
         if let Ok(mut zooms) = self.browser_page_zoom_by_pane.lock() {
             zooms.remove(pane_id);
+        }
+    }
+
+    pub fn start_tile_signal_program(&self, tile_id: &str) -> u64 {
+        let generation = self.tile_signal_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Ok(mut generations) = self.tile_signal_program_generations.lock() {
+            generations.insert(tile_id.to_string(), generation);
+        }
+        generation
+    }
+
+    pub fn tile_signal_program_is_active(&self, tile_id: &str, generation: u64) -> bool {
+        self.tile_signal_program_generations
+            .lock()
+            .ok()
+            .and_then(|generations| generations.get(tile_id).copied())
+            == Some(generation)
+    }
+
+    pub fn cancel_tile_signal_program(&self, tile_id: &str) {
+        if let Ok(mut generations) = self.tile_signal_program_generations.lock() {
+            generations.remove(tile_id);
         }
     }
 
@@ -568,9 +614,14 @@ impl AppState {
     }
 
     pub fn replace_agents_snapshot(&self, agents: Vec<AgentInfo>) -> Result<(), String> {
+        let valid_agent_ids = agents.iter().map(|agent| agent.agent_id.clone()).collect::<BTreeSet<_>>();
         let mut records = self.agent_records.lock().map_err(|e| e.to_string())?;
         *records = build_agent_record_map(agents);
         drop(records);
+        self.agent_display_frames
+            .lock()
+            .map_err(|e| e.to_string())?
+            .retain(|agent_id, _| valid_agent_ids.contains(agent_id));
         self.persist_agent_and_channel_state()
     }
 
@@ -578,6 +629,10 @@ impl AppState {
         let mut agents = self.agent_records.lock().map_err(|e| e.to_string())?;
         let removed = agents.remove(agent_id).map(|record| record.to_info());
         drop(agents);
+        self.agent_display_frames
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(agent_id);
         self.persist_agent_and_channel_state()?;
         Ok(removed)
     }
@@ -669,7 +724,14 @@ impl AppState {
     pub fn replace_tile_records(&self, records: Vec<TileRecord>) -> Result<(), String> {
         let mut tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
         *tiles = build_tile_record_map(records);
+        let valid_tile_ids = tiles.keys().cloned().collect::<BTreeSet<_>>();
         drop(tiles);
+        if let Ok(mut signals) = self.tile_signal_states.lock() {
+            signals.retain(|tile_id, _| valid_tile_ids.contains(tile_id));
+        }
+        if let Ok(mut generations) = self.tile_signal_program_generations.lock() {
+            generations.retain(|tile_id, _| valid_tile_ids.contains(tile_id));
+        }
         self.persist_tile_registry_state()
     }
 
@@ -685,6 +747,9 @@ impl AppState {
         let mut tiles = self.tile_records.lock().map_err(|e| e.to_string())?;
         let removed = tiles.remove(tile_id);
         drop(tiles);
+        if removed.is_some() {
+            self.remove_tile_signal_state(tile_id);
+        }
         self.persist_tile_registry_state()?;
         Ok(removed)
     }
@@ -697,6 +762,155 @@ impl AppState {
             .map(AgentRecord::to_info)
             .collect::<Vec<_>>();
         list.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        Ok(list)
+    }
+
+    pub fn set_agent_display_frame(
+        &self,
+        agent_id: &str,
+        text: String,
+        columns: usize,
+        rows: usize,
+    ) -> Result<AgentDisplayFrame, String> {
+        if columns == 0 || rows == 0 {
+            return Err("self_display_draw requires columns and rows greater than zero".to_string());
+        }
+        if columns > 512 || rows > 512 {
+            return Err("self_display_draw frame size must be 512x512 or smaller".to_string());
+        }
+        if text.len() > 200_000 {
+            return Err("self_display_draw frame text is too large".to_string());
+        }
+
+        let agent = self
+            .agent_info(agent_id)?
+            .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
+        let frame = AgentDisplayFrame {
+            agent_id: agent.agent_id,
+            tile_id: agent.tile_id,
+            session_id: agent.session_id,
+            text,
+            columns,
+            rows,
+            updated_at: crate::agent::now_ms(),
+        };
+        self.agent_display_frames
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(agent_id.to_string(), frame.clone());
+        Ok(frame)
+    }
+
+    fn normalized_tile_signal_leds(&self, leds: Vec<TileSignalLed>) -> Result<Vec<TileSignalLed>, String> {
+        if leds.len() != TILE_SIGNAL_LED_COUNT {
+            return Err(format!("tile signal updates require exactly {TILE_SIGNAL_LED_COUNT} leds"));
+        }
+        let mut normalized = leds;
+        normalized.sort_by(|left, right| left.index.cmp(&right.index));
+        for (expected, led) in (1..=TILE_SIGNAL_LED_COUNT).zip(normalized.iter()) {
+            if led.index != expected {
+                return Err(format!("tile signal updates must include led indices 1 through {TILE_SIGNAL_LED_COUNT}"));
+            }
+            if led.on {
+                if led.color.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_none() {
+                    return Err("enabled tile signal leds require a non-empty color".to_string());
+                }
+            }
+        }
+        Ok(normalized)
+    }
+
+    fn upsert_tile_signal_state(&self, next_state: TileSignalState) -> Result<TileSignalState, String> {
+        self.tile_signal_states
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(next_state.tile_id.clone(), next_state.clone());
+        Ok(next_state)
+    }
+
+    pub fn set_tile_signal_leds(
+        &self,
+        session_id: &str,
+        tile_id: &str,
+        leds: Vec<TileSignalLed>,
+    ) -> Result<TileSignalState, String> {
+        let normalized_leds = self.normalized_tile_signal_leds(leds)?;
+        let previous = self
+            .tile_signal_states
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(tile_id)
+            .cloned();
+        let next_state = TileSignalState {
+            tile_id: tile_id.to_string(),
+            session_id: session_id.to_string(),
+            leds: normalized_leds,
+            status_text: previous.map(|state| state.status_text).unwrap_or_default(),
+            updated_at: crate::agent::now_ms(),
+        };
+        self.upsert_tile_signal_state(next_state)
+    }
+
+    pub fn set_tile_signal_status(
+        &self,
+        session_id: &str,
+        tile_id: &str,
+        text: String,
+    ) -> Result<TileSignalState, String> {
+        if text.len() > 8_000 {
+            return Err("self_display_status text is too large".to_string());
+        }
+        let previous = self
+            .tile_signal_states
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(tile_id)
+            .cloned();
+        let next_state = TileSignalState {
+            tile_id: tile_id.to_string(),
+            session_id: session_id.to_string(),
+            leds: previous
+                .as_ref()
+                .map(|state| state.leds.clone())
+                .unwrap_or_else(default_tile_signal_leds),
+            status_text: normalize_status_text(&text),
+            updated_at: crate::agent::now_ms(),
+        };
+        self.upsert_tile_signal_state(next_state)
+    }
+
+    pub fn list_tile_signal_states_in_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TileSignalState>, String> {
+        let signals = self.tile_signal_states.lock().map_err(|e| e.to_string())?;
+        let mut list = signals
+            .values()
+            .filter(|signal| signal.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| left.tile_id.cmp(&right.tile_id));
+        Ok(list)
+    }
+
+    pub fn remove_tile_signal_state(&self, tile_id: &str) {
+        if let Ok(mut signals) = self.tile_signal_states.lock() {
+            signals.remove(tile_id);
+        }
+        self.cancel_tile_signal_program(tile_id);
+    }
+
+    pub fn list_agent_display_frames_in_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AgentDisplayFrame>, String> {
+        let frames = self.agent_display_frames.lock().map_err(|e| e.to_string())?;
+        let mut list = frames
+            .values()
+            .filter(|frame| frame.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| left.tile_id.cmp(&right.tile_id));
         Ok(list)
     }
 
@@ -838,6 +1052,12 @@ impl AppState {
             agent_logs: self.agent_log_entries_in_session(session_id)?,
             tile_message_logs: self.tile_message_log_entries_in_session(session_id)?,
             connections: network::list_connections_at(std::path::Path::new(crate::runtime::database_path()), session_id)?,
+            agent_displays: self.list_agent_display_frames_in_session(session_id)?,
+            tile_signals: self.list_tile_signal_states_in_session(session_id)?,
+            port_settings: network::list_port_settings_at(
+                std::path::Path::new(crate::runtime::database_path()),
+                session_id,
+            )?,
         })
     }
 

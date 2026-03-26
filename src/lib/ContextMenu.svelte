@@ -86,11 +86,13 @@
                   {:else}
                     <button
                       class="context-action"
+                      class:selected={child.selected}
                       class:disabled={child.disabled}
                       disabled={child.disabled}
                       onclick={() => handleItemClick(child.id, child.disabled)}
                     >
-                      {child.label}
+                      <span class="context-check" aria-hidden="true">{child.selected ? '✓' : ''}</span>
+                      <span>{child.label}</span>
                     </button>
                   {/if}
                 {/each}
@@ -100,11 +102,13 @@
         {:else}
           <button
             class="context-action"
+            class:selected={item.selected}
             class:disabled={item.disabled}
             disabled={item.disabled}
             onclick={() => handleItemClick(item.id, item.disabled)}
           >
-            {item.label}
+            <span class="context-check" aria-hidden="true">{item.selected ? '✓' : ''}</span>
+            <span>{item.label}</span>
           </button>
         {/if}
       {/each}
@@ -144,6 +148,9 @@
   }
 
   .context-action {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     background: transparent;
     border: none;
     color: var(--silk-white);
@@ -177,10 +184,21 @@
     color: var(--phosphor-green);
   }
 
+  .context-action.selected:not(.disabled) {
+    color: var(--phosphor-green);
+  }
+
   .context-action.disabled,
   .context-action:disabled {
     color: var(--silk-dim);
     cursor: default;
+  }
+
+  .context-check {
+    width: 10px;
+    color: var(--phosphor-green);
+    text-align: center;
+    flex: 0 0 10px;
   }
 
   .context-label {

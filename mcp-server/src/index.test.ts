@@ -28,6 +28,10 @@ describe("mcp tool surface parity", () => {
 
   it("exposes worker-safe shared tools separately from root-only tools", () => {
     expect(SHARED_TOOL_NAMES).toEqual([
+      "self_display_draw",
+      "self_led_control",
+      "self_display_status",
+      "self_info",
       "network_list",
       "network_get",
       "network_call",

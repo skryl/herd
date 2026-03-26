@@ -2,7 +2,7 @@
 
 ![Herd screenshot](docs/screenshots/herd_chess.gif)
 
-Herd is an experiment platform for agent collaboration. It gives agents explicit message channels, LAN-style local service discovery over visible tile networks, and a per-session Root agent that can inspect and configure the shared canvas. Under the hood, Herd runs an isolated `tmux` server, projects terminal-backed tiles into a spatial workspace, and exposes a local socket, CLI, and MCP bridge so users and agents operate inside the same environment.
+Herd is an experiment platform for agent collaboration. It gives agents explicit message channels, LAN-style local service discovery over visible tile networks, a per-session Root agent that can inspect and configure the shared canvas, and browser tiles that can host local extension pages with discoverable APIs. Under the hood, Herd runs an isolated `tmux` server, projects terminal-backed tiles into a spatial workspace, and exposes a local socket, CLI, and MCP bridge so users and agents operate inside the same environment.
 
 ## Docs
 
@@ -16,6 +16,7 @@ Herd is an experiment platform for agent collaboration. It gives agents explicit
 - Model local collaboration as visible connected components, so service discovery and callable capabilities come from the agent’s current network rather than a global registry.
 - Separate coordination from orchestration: workers collaborate locally, while a Root agent can inspect and reconfigure the shared canvas and session state.
 - Keep the collaboration graph visible. Herd’s canvas makes agent placement, network topology, lineage, activity, and ownership legible instead of burying them in logs or background processes.
+- Treat browser pages as first-class local tools. Browser tiles can load project-local extension pages, expose discoverable methods to agents, and return screenshots as PNG or text-oriented formats.
 
 ## Mental Model
 
@@ -115,6 +116,29 @@ herd tile create work --title "Socket API follow-up"
 
 Agent, topic, chatter, network, and work commands are session-private. They only expose the current tmux tab/session's registry data.
 
+## Browser Tiles And Extensions
+
+Browser tiles can host normal web content, local files, or built-in extension pages under [`extensions/browser/`](extensions/browser/). The repo currently ships browser-playable pages including `checkers`, `draw-poker`, `pong`, `snake-arena`, `texas-holdem`, `game-boy`, and `jsnes`.
+
+Examples:
+
+```bash
+herd tile create browser --browser-path extensions/browser/game-boy/index.html
+herd browser load MnOpQr extensions/browser/texas-holdem/index.html
+```
+
+Project-local pages loaded from `extensions/browser/...` can publish a discoverable API by defining `globalThis.HerdBrowserExtension` with a manifest and synchronous `call(method, args, caller)` function. Herd surfaces that metadata through `tile_get` / `network_get` and adds `extension_call` to the browser tile RPC surface when the page is loaded.
+
+Browser screenshots support:
+
+- `image` PNG capture
+- `braille`
+- `ascii`
+- `ansi`
+- layout-preserving `text`
+
+The built-in Game Boy and JSNES emulator pages use the same screenshot contract and also expose extension methods for ROM loading and controller input.
+
 ## Runtime Files
 
 By default, Herd uses the runtime name `herd` and writes:
@@ -148,7 +172,7 @@ The checked-in [`.mcp.json`](.mcp.json) points at:
 
 Herd-managed agent launches pass the repo-root `.mcp.json` explicitly with `--mcp-config`, so they can run from the configured session spawn directory without carrying duplicate MCP config files in subdirectories.
 
-Workers and Root use the same checked-in `server:herd` entry, but they do not see the same interface. Workers get messaging plus local-network discovery and `network_call`; Root gets the broader session control surface. The MCP bridge also forwards inbound Herd events into the Claude channel when it runs inside a Herd-managed agent tile.
+Workers and Root use the same checked-in `server:herd` entry, but they do not see the same interface. Workers get messaging, `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, local-network discovery, and `network_call`; Root gets the broader session control surface. The MCP bridge also forwards inbound Herd events into the Claude channel when it runs inside a Herd-managed agent tile.
 
 The exact worker/root split, channel behavior, and browser/service-control details are documented in [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md).
 

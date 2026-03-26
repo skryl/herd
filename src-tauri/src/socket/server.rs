@@ -13,10 +13,25 @@ use tokio::net::UnixListener;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::agent::{
-    collect_mentions, format_channel_display, format_direct_display, format_network_display,
-    format_public_display, format_root_display, format_sign_off_display,
-    format_sign_on_display, now_ms, AgentChannelEvent,
-    AgentChannelEventKind, AgentRole, ChatterEntry, ChatterKind,
+    collect_mentions,
+    default_tile_signal_leds,
+    expand_led_pattern,
+    format_channel_display,
+    format_direct_display,
+    format_network_display,
+    format_public_display,
+    format_root_display,
+    format_sign_off_display,
+    format_sign_on_display,
+    normalize_led_control_commands,
+    now_ms,
+    AgentChannelEvent,
+    AgentChannelEventKind,
+    AgentRole,
+    ChatterEntry,
+    ChatterKind,
+    LedControlCommand,
+    TileSignalState,
 };
 use crate::persist::TileState;
 use crate::state::AppState;
@@ -125,6 +140,67 @@ fn emit_agent_state(app: &AppHandle, state: &AppState) {
     if let Ok(snapshot) = state.snapshot_agent_debug_state_for_session(&session_id) {
         let _ = app.emit("herd-agent-state", snapshot);
     }
+}
+
+fn emit_tile_signal_state(app: &AppHandle, state: &AppState, signal: &TileSignalState) {
+    if resolve_ui_session_id(state).ok().as_deref() == Some(signal.session_id.as_str()) {
+        let _ = app.emit("herd-tile-signal-state", signal);
+    }
+}
+
+fn apply_led_command_frame(leds: &mut [crate::agent::TileSignalLed], command: &LedControlCommand) {
+    match command {
+        LedControlCommand::On { led, color } => {
+            if let Some(target) = leds.get_mut(led.saturating_sub(1)) {
+                target.on = true;
+                target.color = Some(color.clone());
+            }
+        }
+        LedControlCommand::Off { led } => {
+            if let Some(target) = leds.get_mut(led.saturating_sub(1)) {
+                target.on = false;
+                target.color = None;
+            }
+        }
+        LedControlCommand::Sleep { .. } => {}
+    }
+}
+
+fn spawn_tile_signal_program(
+    app: AppHandle,
+    state: AppState,
+    session_id: String,
+    tile_id: String,
+    generation: u64,
+    commands: Vec<LedControlCommand>,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if !state.tile_signal_program_is_active(&tile_id, generation) {
+                return;
+            }
+            let mut leds = default_tile_signal_leds();
+            for command in &commands {
+                if !state.tile_signal_program_is_active(&tile_id, generation) {
+                    return;
+                }
+                match command {
+                    LedControlCommand::Sleep { ms } => {
+                        match state.set_tile_signal_leds(&session_id, &tile_id, leds.clone()) {
+                            Ok(signal) => emit_tile_signal_state(&app, &state, &signal),
+                            Err(error) => {
+                                log::warn!("Failed to update tile signal leds for {tile_id}: {error}");
+                                state.cancel_tile_signal_program(&tile_id);
+                                return;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(*ms)).await;
+                    }
+                    other => apply_led_command_frame(&mut leds, other),
+                }
+            }
+        }
+    });
 }
 
 fn emit_work_updated(app: &AppHandle, item: &work::WorkItem) {
@@ -2088,6 +2164,7 @@ fn network_access_for_tile(
         &tile.tile_id,
         tile.kind,
         &component.connections,
+        &component.port_settings,
     )
 }
 
@@ -2880,6 +2957,7 @@ impl HerdMessageReceiver {
             "canvas_fit_all",
             "canvas_reset",
             "tile_context_menu",
+            "port_context_menu",
             "context_menu_select",
             "context_menu_dismiss",
             "confirm_close_tab",
@@ -3125,15 +3203,18 @@ fn component_for_sender(
             sender_tile_id: sender.sender_tile_id.clone(),
             tiles: Vec::new(),
             connections: Vec::new(),
+            port_settings: Vec::new(),
         });
     };
     let session_tiles = session_network_tiles(app, state, &sender.session_id)?;
     let connections = network::list_connections_at(Path::new(runtime::database_path()), &sender.session_id)?;
-    Ok(network::component_for_tile(
+    let port_settings = network::list_port_settings_at(Path::new(runtime::database_path()), &sender.session_id)?;
+    Ok(network::sender_visible_component_for_tile(
         &sender.session_id,
         start_tile_id,
         &session_tiles,
         &connections,
+        &port_settings,
     ))
 }
 
@@ -3147,6 +3228,7 @@ fn session_component(
         sender_tile_id: None,
         tiles: session_network_tiles(app, state, session_id)?,
         connections: network::list_connections_at(Path::new(runtime::database_path()), session_id)?,
+        port_settings: network::list_port_settings_at(Path::new(runtime::database_path()), session_id)?,
     })
 }
 
@@ -3401,6 +3483,7 @@ fn test_driver_message_name(request: &TestDriverRequest) -> &'static str {
         TestDriverRequest::CanvasFitAll { .. } => "canvas_fit_all",
         TestDriverRequest::CanvasReset => "canvas_reset",
         TestDriverRequest::TileContextMenu { .. } => "tile_context_menu",
+        TestDriverRequest::PortContextMenu { .. } => "port_context_menu",
         TestDriverRequest::ContextMenuSelect { .. } => "context_menu_select",
         TestDriverRequest::ContextMenuDismiss => "context_menu_dismiss",
         TestDriverRequest::ConfirmCloseTab => "confirm_close_tab",
@@ -4073,6 +4156,113 @@ fn handle_command(
                     })))
                 },
             )
+        }
+
+        SocketCommand::SelfDisplayDraw { text, columns, rows, sender_agent_id, sender_tile_id } => {
+            let sender = match resolve_sender_context(state, sender_agent_id, sender_tile_id) {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(agent_id) = sender.sender_agent_id.clone() else {
+                return SocketResponse::error("self_display_draw requires an agent sender".to_string());
+            };
+            match state.set_agent_display_frame(&agent_id, text, columns, rows) {
+                Ok(frame) => {
+                    emit_agent_state(app, state);
+                    SocketResponse::success(Some(serde_json::json!(frame)))
+                }
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::SelfLedControl {
+            commands,
+            pattern_name,
+            pattern_args,
+            sender_agent_id,
+            sender_tile_id,
+        } => {
+            let sender = match resolve_sender_context(state, sender_agent_id, sender_tile_id) {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(tile_id) = sender.sender_tile_id.clone() else {
+                return SocketResponse::error("self_led_control requires a sender tile".to_string());
+            };
+
+            let resolved_commands = match (commands, pattern_name) {
+                (Some(commands), None) => normalize_led_control_commands(commands),
+                (None, Some(pattern_name)) => expand_led_pattern(&pattern_name, pattern_args.as_ref()),
+                (Some(_), Some(_)) => Err("self_led_control accepts either commands or pattern_name, not both".to_string()),
+                (None, None) => Err("self_led_control requires commands or pattern_name".to_string()),
+            };
+
+            match resolved_commands {
+                Ok(commands) => {
+                    let generation = state.start_tile_signal_program(&tile_id);
+                    spawn_tile_signal_program(
+                        app.clone(),
+                        state.clone(),
+                        sender.session_id.clone(),
+                        tile_id.clone(),
+                        generation,
+                        commands.clone(),
+                    );
+                    SocketResponse::success(Some(serde_json::json!({
+                        "tile_id": tile_id,
+                        "session_id": sender.session_id,
+                        "command_count": commands.len(),
+                        "generation": generation,
+                    })))
+                }
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::SelfDisplayStatus { text, sender_agent_id, sender_tile_id } => {
+            let sender = match resolve_sender_context(state, sender_agent_id, sender_tile_id) {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(tile_id) = sender.sender_tile_id.clone() else {
+                return SocketResponse::error("self_display_status requires a sender tile".to_string());
+            };
+            match state.set_tile_signal_status(&sender.session_id, &tile_id, text) {
+                Ok(signal) => {
+                    emit_tile_signal_state(app, state, &signal);
+                    SocketResponse::success(Some(serde_json::json!(signal)))
+                }
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::SelfInfo { sender_agent_id, sender_tile_id } => {
+            let sender = match resolve_sender_context(state, sender_agent_id, sender_tile_id) {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(tile_id) = sender.sender_tile_id.clone() else {
+                return SocketResponse::error("self_info requires a sender tile".to_string());
+            };
+            let receiver = match session_tile_receiver(app, state, &sender.session_id, &tile_id) {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    return dispatch_with_log(
+                        state,
+                        app,
+                        channel,
+                        sender.session_id.clone(),
+                        tile_id,
+                        "tile".to_string(),
+                        "self_info",
+                        "get",
+                        Some(&sender),
+                        serde_json::json!({}),
+                        || Err(error),
+                    )
+                }
+            };
+            dispatch_tile_message(state, app, channel, &receiver, "self_info", "get", Some(&sender), serde_json::json!({}))
         }
 
         SocketCommand::AgentRegister { agent_id, agent_type, agent_role, tile_id, agent_pid, title } => {

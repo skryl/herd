@@ -71,6 +71,8 @@ Herd currently renders these tile kinds:
 
 Terminal-backed tiles map to a tmux window and primary pane. Work tiles are registry-backed and do not map to tmux panes.
 
+Browser tiles can host either ordinary web content or project-local extension pages under `extensions/browser/`. Loaded extension pages can advertise a discoverable method surface back into Herd, which is how the built-in games and emulator pages expose seat/player controls, screenshots, and controller input.
+
 Important identity fields:
 
 - `tile_id`
@@ -128,12 +130,17 @@ Only manual port connections participate in the graph.
 
 ## Ports And Connections
 
-Every visible tile has 4 side ports:
+Every visible tile has 4 sides and a configurable total port count:
 
-- `left`
-- `top`
-- `right`
-- `bottom`
+- `4` total ports by default, which means 1 visible port per side
+- `8`, `12`, or `16` total ports when the `PORTS` setting adds more visible slots per side
+
+Port ids are side-based. The first slot on a side uses the bare side name, and additional slots use numbered suffixes:
+
+- `left`, `top`, `right`, `bottom`
+- `left-2`, `top-2`, `right-2`, `bottom-2`
+- `left-3`, `top-3`, `right-3`, `bottom-3`
+- `left-4`, `top-4`, `right-4`, `bottom-4`
 
 Each port has a mode:
 
@@ -143,10 +150,10 @@ Each port has a mode:
 Current port rules:
 
 - Agent, Root Agent, Shell
-  - all 4 ports are `read_write`
+  - all visible side slots are `read_write`
 - Work, Browser
-  - `left = read_write`
-  - `top/right/bottom = read`
+  - every `left*` slot is `read_write`
+  - every `top*` / `right*` / `bottom*` slot is `read`
 
 Connection validation rules:
 
@@ -158,6 +165,53 @@ Connection validation rules:
 - Work and Browser `left` ports only accept Agent or Root Agent tiles
 
 The graph is undirected for connectivity purposes, even though each stored connection has a normalized endpoint ordering.
+
+Ports may now override those defaults per tile and per port through the canvas port context menu:
+
+- `Access`
+  - `Read`
+  - `Read/Write`
+- `Networking`
+  - `Broadcast`
+  - `Gateway`
+
+The override store is sparse:
+
+- missing row means the tile-kind default access rule still applies
+- missing networking override means `broadcast`
+
+Port UI indicators reflect the effective setting, not just the persisted override:
+
+- red left light means the effective access mode is `read`
+- orange right light means the effective networking mode is `gateway`
+
+Gateway mode changes sender-visible network traversal rather than raw wire storage:
+
+- the sender tile may leave through any directly connected port, including its own gateway ports
+- if traversal reaches another tile through a gateway port, that tile is still visible/reachable
+- automatic traversal stops there and does not continue through that tile
+- a tile reached through a broadcast port may continue only through its other broadcast ports, never through a gateway port
+- the gateway tile itself can still see every segment directly attached to its own ports, so it can decide whether to forward explicitly
+
+## Browser Extension Pages
+
+A browser tile loaded from `extensions/browser/...` may expose `globalThis.HerdBrowserExtension` with:
+
+- `manifest`
+  - requires `extension_id`
+  - requires `label`
+  - may declare discoverable `methods`
+- `call(method, args, caller)`
+  - must return synchronously
+  - receives caller identity such as sender tile id and optional sender agent id/role
+
+When that contract is present, Herd:
+
+- records extension metadata on the browser tile
+- advertises the extension methods through `message_api`
+- enables `extension_call` on the tile for Root and any eligible directly connected worker
+
+This is the mechanism used by built-in browser games and emulator pages such as Texas Hold'em, Game Boy, and JSNES.
 
 ## Agents
 
@@ -209,7 +263,9 @@ Workers are normal session agents.
 Properties:
 
 - worker-safe local-network MCP surface
+- self-targeted MCP surface for `self_info`, `self_display_draw`, `self_led_control`, and `self_display_status`
 - browser tile automation through `network_call` with browser action `drive`
+- browser extension control through `network_call` using browser message `extension_call` when the loaded page advertises it
 - visible local-network tiles may be inspected through `network_list` / `network_get`
 - direct control is limited to worker-safe `shell` and `browser` actions
 - `agent` and `root_agent` tiles stay read-only on the network, even when directly connected
@@ -233,11 +289,18 @@ Workers get:
 
 - `message_direct`
 - `message_public`
+- `message_channel`
 - `message_network`
 - `message_root`
+- `self_display_draw`
+- `self_led_control`
+- `self_display_status`
+- `self_info`
 - `network_list`
 - `network_get`
 - `network_call`
+
+`self_info` resolves the sender tile and returns that tile receiver's native `get` payload. It does not go through sender-visible network filtering. `self_display_draw` updates only the calling agent tile's display drawer with a full ANSI frame plus explicit `columns` and `rows`. `self_led_control` and `self_display_status` update the calling tile's bottom-left chrome strip, so agent tiles and plain shell tiles can both drive their own LEDs/status line through the same sender-tile path.
 
 ### Root MCP surface
 
@@ -470,6 +533,8 @@ The main UI surfaces are:
   - hook-triggered lineage lines
 - sidebar
   - `SETTINGS`
+    - `SPAWN DIR`
+    - `PORTS`
   - `WORK`
   - `AGENTS`
   - `TMUX`

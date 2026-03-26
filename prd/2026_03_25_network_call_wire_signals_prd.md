@@ -1,7 +1,7 @@
 # Network Call Wire Signal Animation
 
 ## Status
-In Progress
+Complete
 
 ## Date
 2026-03-25
@@ -86,10 +86,10 @@ Implement route-aware signal derivation and canvas rendering.
 - The pulse appears on real `network_call` activity and the focused checks pass.
 
 ## Execution Checklist
-- [ ] Phase 0 complete
-- [ ] Phase 1 complete
-- [ ] Integration/regression checks complete
-- [ ] Documentation/status updated
+- [x] Phase 0 complete
+- [x] Phase 1 complete
+- [x] Integration/regression checks complete
+- [x] Documentation/status updated
 
 ## Command Log
 1. `sed -n '1,220p' /Users/skryl/.codex/skills/phased-prd-red-green/SKILL.md`
@@ -101,3 +101,15 @@ Implement route-aware signal derivation and canvas rendering.
 3. `rg -n "buildRenderedNetworkConnections|wire|network_call|tile_message_logs|wrapper_command" src src-tauri/src tests/integration -S`
    - result: pass
    - notes: traced the current wire rendering and network-call logging surfaces.
+4. `npm run test:unit -- --run src/lib/stores/appState.test.ts`
+   - result: fail, then pass
+   - notes: initially failed because `buildNetworkCallSignals` did not exist; passed after implementing route-aware signal derivation.
+5. `npm run test:integration -- tests/integration/worker-root-mcp.test.ts -t "animates network wires after a network_call"`
+   - result: fail, then pass
+   - notes: initially failed because the canvas rendered no signal overlay; passed after adding the signal SVG pulse and motion marker. One retry was needed because the integration runtime bootstrap refused the socket on the first attempt.
+6. `npm run check`
+   - result: pass
+   - notes: confirmed the new store exports and canvas effect path typecheck cleanly.
+7. `git diff --check -- src/lib/wireRouting.ts src/lib/stores/appState.ts src/lib/Canvas.svelte src/lib/stores/appState.test.ts tests/integration/worker-root-mcp.test.ts prd/2026_03_25_network_call_wire_signals_prd.md`
+   - result: pass
+   - notes: verified there are no whitespace or patch formatting issues in the changed files.

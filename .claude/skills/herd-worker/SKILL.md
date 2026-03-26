@@ -14,8 +14,15 @@ You only have the worker MCP interface:
 Messaging:
 - `message_direct`
 - `message_public`
+- `message_channel`
 - `message_network`
 - `message_root`
+
+Self tile status and display:
+- `self_info`
+- `self_display_draw`
+- `self_led_control`
+- `self_display_status`
 
 Local-network discovery and calls:
 - `network_list`
@@ -32,6 +39,9 @@ Local-network discovery and calls:
 - Browser automation goes through `network_call` with browser action `drive`.
 - Agent and `root_agent` tiles are read-only on the network.
 - If the action you need is not on your local-network surface, ask Root through `message_root`.
+- Use `self_display_status` for concise user-visible progress updates in your tile chrome.
+- Use `self_led_control` sparingly when you need to draw the user's attention to a state change, warning, or completion.
+- Reserve `self_display_draw` for richer frame-style output. Do not use it as a substitute for short status updates.
 
 ## Message Model
 

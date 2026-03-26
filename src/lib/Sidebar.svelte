@@ -3,6 +3,7 @@
     activeSessionWorkItems,
     appState,
     agentInfos,
+    networkCallSparksEnabled,
     selectedWorkId,
     selectAgentItem,
     selectWorkItem,
@@ -136,6 +137,22 @@
               {/each}
             </div>
             <div class="tile-port-count-help">available ports per tile</div>
+          </div>
+          <div class="wire-sparks-card settings-card">
+            <div class="wire-sparks-topline">
+              <span class="settings-card-label">WIRE SPARKS</span>
+              <span class="wire-sparks-current">{$networkCallSparksEnabled ? 'ON' : 'OFF'}</span>
+            </div>
+            <button
+              class="wire-sparks-toggle"
+              class:selected={$networkCallSparksEnabled}
+              type="button"
+              aria-pressed={$networkCallSparksEnabled}
+              onclick={() => networkCallSparksEnabled.set(!$networkCallSparksEnabled)}
+            >
+              {$networkCallSparksEnabled ? 'DISABLE' : 'ENABLE'}
+            </button>
+            <div class="tile-port-count-help">animate network calls over canvas wires</div>
           </div>
         {/if}
       </section>
@@ -463,6 +480,12 @@
     gap: 8px;
   }
 
+  .wire-sparks-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
   .tile-port-count-topline {
     display: flex;
     align-items: center;
@@ -507,6 +530,41 @@
     font-size: 10px;
     color: var(--silk-dim);
     line-height: 1.4;
+  }
+
+  .wire-sparks-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .wire-sparks-current {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--silk-white);
+  }
+
+  .wire-sparks-toggle {
+    border: 1px solid var(--component-border);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--silk-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 6px 8px;
+    cursor: pointer;
+    text-align: center;
+  }
+
+  .wire-sparks-toggle:hover {
+    border-color: var(--copper);
+    color: var(--copper);
+  }
+
+  .wire-sparks-toggle.selected {
+    border-color: var(--copper);
+    color: var(--silk-white);
+    background: rgba(242, 176, 90, 0.12);
   }
 
   .work-list {

@@ -15,6 +15,7 @@
     applyRemoteLayoutEntry,
     appendChatterEntry,
     applyAgentDebugState,
+    applyTileSignalState,
     applyPaneRole,
     applyPaneReadOnly,
     applyTmuxSnapshot,
@@ -30,12 +31,13 @@
   import { activeTabId } from './lib/stores/tabs';
   import { createWorkItem, setTestDriverState } from './lib/tauri';
   import { installTestDriver } from './lib/testDriver';
-  import type { AgentDebugState, ChatterEntry, HerdMode, PaneKind, PendingSpawnPlacement, TmuxSnapshot } from './lib/types';
+  import type { AgentDebugState, ChatterEntry, HerdMode, PaneKind, PendingSpawnPlacement, TileSignalState, TmuxSnapshot } from './lib/types';
 
   let unlistenTmuxState: UnlistenFn | null = null;
   let unlistenReadOnly: UnlistenFn | null = null;
   let unlistenRole: UnlistenFn | null = null;
   let unlistenAgentState: UnlistenFn | null = null;
+  let unlistenTileSignalState: UnlistenFn | null = null;
   let unlistenChatterEntry: UnlistenFn | null = null;
   let unlistenWorkUpdated: UnlistenFn | null = null;
   let unlistenLayoutEntry: UnlistenFn | null = null;
@@ -168,6 +170,9 @@
     unlistenAgentState = await listen<AgentDebugState>('herd-agent-state', (event) => {
       applyAgentDebugState(event.payload);
     });
+    unlistenTileSignalState = await listen<TileSignalState>('herd-tile-signal-state', (event) => {
+      applyTileSignalState(event.payload);
+    });
     unlistenChatterEntry = await listen<ChatterEntry>('herd-chatter-entry', (event) => {
       appendChatterEntry(event.payload);
     });
@@ -208,6 +213,7 @@
     if (unlistenReadOnly) unlistenReadOnly();
     if (unlistenRole) unlistenRole();
     if (unlistenAgentState) unlistenAgentState();
+    if (unlistenTileSignalState) unlistenTileSignalState();
     if (unlistenChatterEntry) unlistenChatterEntry();
     if (unlistenWorkUpdated) unlistenWorkUpdated();
     if (unlistenLayoutEntry) unlistenLayoutEntry();

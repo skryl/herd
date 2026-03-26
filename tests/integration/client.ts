@@ -8,6 +8,7 @@ import type {
   PaneKind,
   SessionTileInfo,
   TileGraph,
+  TilePort,
   TileTypeFilter,
   TestDriverKey,
   TestDriverProjection,
@@ -214,6 +215,10 @@ export class HerdTestClient {
 
   async driverTileContextMenu(tileId: string, clientX: number, clientY: number) {
     await this.testDriver({ type: 'tile_context_menu', tile_id: tileId, client_x: clientX, client_y: clientY });
+  }
+
+  async driverPortContextMenu(tileId: string, port: TilePort, clientX: number, clientY: number) {
+    await this.testDriver({ type: 'port_context_menu', tile_id: tileId, port, client_x: clientX, client_y: clientY });
   }
 
   async contextMenuSelect(itemId: string) {

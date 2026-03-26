@@ -3,11 +3,14 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { FitAddon } from '@xterm/addon-fit';
   import { Terminal } from '@xterm/xterm';
+  import TerminalDisplayDrawer from './TerminalDisplayDrawer.svelte';
+  import TileSignalStrip from './TileSignalStrip.svelte';
   import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import { readPaneOutput } from './tauri';
   import type { TerminalInfo, PtyOutputEvent } from './types';
   import {
+    agentDisplayByTileId,
     canvasState,
     clientDeltaToWorldDelta,
     mode,
@@ -18,6 +21,7 @@
     removeTerminal,
     selectTile,
     selectedTerminalId,
+    tileSignalByTileId,
     tileActivityById,
     togglePaneMinimized,
     updateTerminal,
@@ -44,15 +48,18 @@
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
   let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
+  let displayFrame = $derived($agentDisplayByTileId[info.tileId] ?? null);
+  let tileSignal = $derived($tileSignalByTileId[info.tileId] ?? null);
   let isRootAgentTile = $derived(info.kind === 'root_agent');
   let isAgentTile = $derived(isRootAgentTile || info.kind === 'claude');
   let isBrowserTile = $derived(info.kind === 'browser');
   let canClose = $derived(true);
   let closeLabel = $derived(isRootAgentTile ? 'Close Root Agent' : 'Close Shell');
   let minimizeLabel = $derived(isRootAgentTile ? 'Minimize Root Agent' : isAgentTile ? 'Minimize Agent' : 'Minimize Shell');
-  let componentTypeLabel = $derived(
-    isRootAgentTile ? 'ROOT' : info.readOnly ? 'VIEW' : info.kind === 'browser' ? 'WEB' : 'TTY',
-  );
+  let displayEmptyText = $derived(isAgentTile ? 'No display frame yet' : 'Display is only available for agent tiles');
+  let defaultStatusText = $derived(buildDefaultStatusText(displayTitle, info.tileId));
+  let shellViewOpen = $state(true);
+  let displayOpen = $state(false);
   let activityOpen = $state(false);
 
   let isDragging = false;
@@ -200,7 +207,7 @@
     syncHelperTextarea();
     if (!terminal || !helperTextarea) return;
 
-    if ($mode === 'input' && isSelected && !info.readOnly) {
+    if ($mode === 'input' && isSelected && !info.readOnly && shellViewOpen) {
       helperTextarea.focus();
       return;
     }
@@ -288,6 +295,17 @@
     const clientY = rect ? e.clientY - rect.top : e.clientY;
     openPaneContextMenu(info.id, clientX, clientY);
   }
+
+  function buildDefaultStatusText(title: string, tileId: string) {
+    return `\u001b[32m\u25cf ONLINE\u001b[0m \u001b[90m\u2502\u001b[0m \u001b[36m${title}\u001b[0m \u001b[90m\u2502\u001b[0m \u001b[33m\u26a1 ready\u001b[0m \u001b[90m\u2502\u001b[0m \u001b[35mtile ${tileId}\u001b[0m`;
+  }
+
+  $effect(() => {
+    shellViewOpen;
+    if (shellViewOpen && terminal) {
+      queueViewportSync();
+    }
+  });
 </script>
 
 <svelte:window onmousemove={handleWindowMouseMove} onmouseup={handleWindowMouseUp} />
@@ -325,10 +343,9 @@
           <span class="browser-badge" title="Browser tile" aria-label="Browser tile">WEB</span>
         {/if}
         <span class="designator">{displayTitle}</span>
-        <span class="component-type">{componentTypeLabel}</span>
+        <TileSignalStrip signal={tileSignal} showStatus={false} compactLeds={true} />
       </div>
       <div class="header-right">
-        <span class="coord-info">{Math.round(info.x)},{Math.round(info.y)}</span>
         <button
           class="header-control-btn minimize-btn"
           type="button"
@@ -354,7 +371,7 @@
       </div>
     </div>
 
-    <div class="screen-housing">
+    <div class="screen-housing" class:shell-view-hidden={!shellViewOpen}>
       <div class="screen-bezel">
         <div class="terminal-container" bind:this={termRef}></div>
       </div>
@@ -362,24 +379,55 @@
       <div class="input-shield" class:pass-through={$mode === 'input'}></div>
     </div>
 
+    {#if displayOpen}
+      <TerminalDisplayDrawer
+        text={displayFrame?.text ?? ''}
+        columns={displayFrame?.columns ?? 0}
+        rows={displayFrame?.rows ?? 0}
+        fillAvailableSpace={!shellViewOpen}
+        emptyText={displayEmptyText}
+      />
+    {/if}
+
     {#if activityOpen}
-      <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
+      <TileActivityDrawer
+        entries={activityEntries}
+        fillAvailableSpace={!shellViewOpen}
+        emptyText="No activity yet"
+      />
     {/if}
 
     <div class="info-strip">
       <div class="info-cluster info-cluster-left">
-        <span class="info-item">
-          <span class="status-dot active"></span>
-          <span class="info-label">PID:{info.paneId.slice(0, 8)}</span>
-        </span>
-        <span class="info-item">
-          <span class="info-label">TILE:{info.tileId}</span>
-        </span>
+        <TileSignalStrip signal={tileSignal} showLeds={false} defaultStatusText={defaultStatusText} />
       </div>
       <div class="info-cluster info-cluster-right">
-        <span class="info-item">
-          <span class="info-label">{info.width}×{info.height}</span>
-        </span>
+        <button
+          class="shell-view-toggle-btn"
+          class:active={shellViewOpen}
+          type="button"
+          title={shellViewOpen ? 'Hide shell view' : 'Show shell view'}
+          aria-label={shellViewOpen ? 'Hide shell view' : 'Show shell view'}
+          onclick={(event) => {
+            event.stopPropagation();
+            shellViewOpen = !shellViewOpen;
+          }}
+        >
+          SHELL
+        </button>
+        <button
+          class="display-toggle-btn"
+          class:active={displayOpen}
+          type="button"
+          title={displayOpen ? 'Hide display view' : 'Show display view'}
+          aria-label={displayOpen ? 'Hide display view' : 'Show display view'}
+          onclick={(event) => {
+            event.stopPropagation();
+            displayOpen = !displayOpen;
+          }}
+        >
+          DISPLAY
+        </button>
         <button
           class="activity-toggle-btn"
           class:active={activityOpen}
@@ -548,10 +596,24 @@
     gap: 6px;
   }
 
+  .header-left {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .header-right {
+    flex-shrink: 0;
+  }
+
   .designator {
     font-size: 11px;
     color: var(--silk-white);
     letter-spacing: 1px;
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .agent-badge {
@@ -597,17 +659,6 @@
     line-height: 1;
     text-transform: uppercase;
     box-shadow: inset 0 0 8px rgba(102, 225, 255, 0.05);
-  }
-
-  .component-type {
-    font-size: 9px;
-    color: var(--silk-dim);
-    letter-spacing: 0.5px;
-  }
-
-  .coord-info {
-    font-size: 8px;
-    color: var(--copper-dim);
   }
 
   .header-control-btn {
@@ -659,6 +710,10 @@
     background: linear-gradient(180deg, #0b1408 0%, #060d04 100%);
   }
 
+  .screen-housing.shell-view-hidden {
+    display: none;
+  }
+
   .screen-bezel {
     position: absolute;
     inset: 8px;
@@ -700,6 +755,7 @@
     justify-content: space-between;
     gap: 8px;
     flex-shrink: 0;
+    margin-top: auto;
     background: rgba(0, 0, 0, 0.2);
   }
 
@@ -711,7 +767,8 @@
   }
 
   .info-cluster-left {
-    flex: 1;
+    flex: 1 1 auto;
+    overflow: hidden;
   }
 
   .info-cluster-right {
@@ -719,13 +776,8 @@
     flex-shrink: 0;
   }
 
-  .info-item {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    min-width: 0;
-  }
-
+  .shell-view-toggle-btn,
+  .display-toggle-btn,
   .activity-toggle-btn {
     height: 16px;
     padding: 0 6px;
@@ -738,28 +790,14 @@
     cursor: pointer;
   }
 
+  .shell-view-toggle-btn.active,
+  .display-toggle-btn.active,
   .activity-toggle-btn.active,
+  .shell-view-toggle-btn:hover,
+  .display-toggle-btn:hover,
   .activity-toggle-btn:hover {
     border-color: var(--activity-accent);
     background: color-mix(in srgb, var(--activity-accent) 10%, rgba(0, 0, 0, 0.18));
-  }
-
-  .info-label {
-    font-size: 8px;
-    color: var(--silk-dim);
-    letter-spacing: 0.5px;
-  }
-
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--component-border);
-  }
-
-  .status-dot.active {
-    background: var(--phosphor-green);
-    box-shadow: 0 0 6px rgba(51, 255, 51, 0.3);
   }
 
   .resize-handle {

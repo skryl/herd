@@ -303,6 +303,154 @@ describe.sequential('in-app test driver', () => {
     expect(resizedActivityHeight).toBeGreaterThan(drawerResize.before);
   });
 
+  it('shows shell, display, and activity toggles on terminal tiles', async () => {
+    const paneId = await spawnShellInActiveTab(client);
+    expect(paneId).toBeTruthy();
+
+    const initialChrome = await client.testDomQuery<{
+      buttonOrder: string[];
+      shellActive: boolean;
+      displayActive: boolean;
+      activityActive: boolean;
+      shellVisible: boolean;
+      displayVisible: boolean;
+      activityVisible: boolean;
+    }>(`
+      const tile = document.querySelector('[data-tile-id="${paneId!}"]');
+      return {
+        buttonOrder: Array.from(tile?.querySelectorAll('.info-cluster-right button') ?? [])
+          .map((button) => button.textContent?.trim() ?? ''),
+        shellActive: tile?.querySelector('.shell-view-toggle-btn')?.classList.contains('active') ?? false,
+        displayActive: tile?.querySelector('.display-toggle-btn')?.classList.contains('active') ?? false,
+        activityActive: tile?.querySelector('.activity-toggle-btn')?.classList.contains('active') ?? false,
+        shellVisible: !(tile?.querySelector('.screen-housing')?.classList.contains('shell-view-hidden') ?? true),
+        displayVisible: Boolean(tile?.querySelector('.terminal-display')),
+        activityVisible: Boolean(tile?.querySelector('.tile-activity')),
+      };
+    `);
+
+    expect(initialChrome.buttonOrder[0]).toBe('SHELL');
+    expect(initialChrome.buttonOrder[1]).toBe('DISPLAY');
+    expect(initialChrome.buttonOrder[2]?.startsWith('ACT')).toBe(true);
+    expect(initialChrome.shellActive).toBe(true);
+    expect(initialChrome.displayActive).toBe(false);
+    expect(initialChrome.activityActive).toBe(false);
+    expect(initialChrome.shellVisible).toBe(true);
+    expect(initialChrome.displayVisible).toBe(false);
+    expect(initialChrome.activityVisible).toBe(false);
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${paneId!}"] .display-toggle-btn')?.click();
+      return true;
+    `);
+
+    const displayOpen = await waitFor(
+      'terminal display drawer visible',
+      () => client.testDomQuery<{ active: boolean; open: boolean; grip: boolean }>(`
+        const tile = document.querySelector('[data-tile-id="${paneId!}"]');
+        const display = tile?.querySelector('.terminal-display');
+        return {
+          active: tile?.querySelector('.display-toggle-btn')?.classList.contains('active') ?? false,
+          open: Boolean(display),
+          grip: Boolean(display?.querySelector('.drawer-resize-grip')),
+        };
+      `),
+      (state) => state.active && state.open && state.grip,
+      30_000,
+      150,
+    );
+    expect(displayOpen.active).toBe(true);
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${paneId!}"] .shell-view-toggle-btn')?.click();
+      return true;
+    `);
+
+    const shellHidden = await waitFor(
+      'terminal shell view hidden while display stays open',
+      () => client.testDomQuery<{
+        shellActive: boolean;
+        shellVisible: boolean;
+        displayVisible: boolean;
+        bottomGap: number;
+        displayTopGap: number;
+        displayBottomGap: number;
+      }>(`
+        const tile = document.querySelector('[data-tile-id="${paneId!}"]');
+        const tileRect = tile?.getBoundingClientRect();
+        const headerRect = tile?.querySelector('.header-bar')?.getBoundingClientRect();
+        const displayRect = tile?.querySelector('.terminal-display')?.getBoundingClientRect();
+        const infoStripRect = tile?.querySelector('.info-strip')?.getBoundingClientRect();
+        return {
+          shellActive: tile?.querySelector('.shell-view-toggle-btn')?.classList.contains('active') ?? false,
+          shellVisible: !(tile?.querySelector('.screen-housing')?.classList.contains('shell-view-hidden') ?? true),
+          displayVisible: Boolean(tile?.querySelector('.terminal-display')),
+          bottomGap: tileRect && infoStripRect ? Math.abs(tileRect.bottom - infoStripRect.bottom) : -1,
+          displayTopGap: headerRect && displayRect ? Math.abs(displayRect.top - headerRect.bottom) : -1,
+          displayBottomGap: displayRect && infoStripRect ? Math.abs((displayRect.bottom + 6) - infoStripRect.top) : -1,
+        };
+      `),
+      (state) =>
+        !state.shellActive
+        && !state.shellVisible
+        && state.displayVisible
+        && state.bottomGap >= 0
+        && state.bottomGap < 3
+        && state.displayTopGap >= 0
+        && state.displayTopGap < 3
+        && state.displayBottomGap >= 0
+        && state.displayBottomGap < 3,
+      30_000,
+      150,
+    );
+    expect(shellHidden.shellVisible).toBe(false);
+    expect(shellHidden.bottomGap).toBeLessThan(3);
+    expect(shellHidden.displayTopGap).toBeLessThan(3);
+    expect(shellHidden.displayBottomGap).toBeLessThan(3);
+
+    await client.testDomQuery(`
+      document.querySelector('[data-tile-id="${paneId!}"] .activity-toggle-btn')?.click();
+      return true;
+    `);
+
+    const activityOpen = await waitFor(
+      'terminal activity drawer visible alongside display drawer',
+      () => client.testDomQuery<{
+        activityActive: boolean;
+        displayVisible: boolean;
+        activityVisible: boolean;
+        displayTopGap: number;
+        activityBottomGap: number;
+      }>(`
+        const tile = document.querySelector('[data-tile-id="${paneId!}"]');
+        const headerRect = tile?.querySelector('.header-bar')?.getBoundingClientRect();
+        const displayRect = tile?.querySelector('.terminal-display')?.getBoundingClientRect();
+        const activityRect = tile?.querySelector('.tile-activity')?.getBoundingClientRect();
+        const infoStripRect = tile?.querySelector('.info-strip')?.getBoundingClientRect();
+        return {
+          activityActive: tile?.querySelector('.activity-toggle-btn')?.classList.contains('active') ?? false,
+          displayVisible: Boolean(tile?.querySelector('.terminal-display')),
+          activityVisible: Boolean(tile?.querySelector('.tile-activity')),
+          displayTopGap: headerRect && displayRect ? Math.abs(displayRect.top - headerRect.bottom) : -1,
+          activityBottomGap: activityRect && infoStripRect ? Math.abs((activityRect.bottom + 6) - infoStripRect.top) : -1,
+        };
+      `),
+      (state) =>
+        state.activityActive
+        && state.displayVisible
+        && state.activityVisible
+        && state.displayTopGap >= 0
+        && state.displayTopGap < 3
+        && state.activityBottomGap >= 0
+        && state.activityBottomGap < 3,
+      30_000,
+      150,
+    );
+    expect(activityOpen.activityVisible).toBe(true);
+    expect(activityOpen.displayTopGap).toBeLessThan(3);
+    expect(activityOpen.activityBottomGap).toBeLessThan(3);
+  });
+
   it('injects HERD_TILE_ID into spawned shell tiles', async () => {
     const tileId = await spawnShellInActiveTab(client);
 
@@ -426,7 +574,206 @@ describe.sequential('in-app test driver', () => {
     projection = await client.getProjection();
     expect(projection.context_menu?.target).toBe('tile');
     expect(projection.context_menu?.tile_id).toBe(selectedTileId);
-    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close Shell']);
+    expect(projection.context_menu?.items.map((item) => item.label)).toContain('Close Shell');
+
+    await client.driverPortContextMenu(selectedTileId!, 'left', 520, 280);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.target).toBe('port');
+    expect(projection.context_menu?.tile_id).toBe(selectedTileId);
+    expect(projection.context_menu?.port_id).toBe('left');
+    expect(projection.context_menu?.items).toEqual([
+      { id: 'port-label', label: 'Port left', kind: 'label', disabled: true },
+      {
+        id: 'port-access',
+        label: 'Access',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-access:read', label: 'Read', kind: 'action', disabled: false, selected: false },
+          { id: 'port-access:read_write', label: 'Read/Write', kind: 'action', disabled: false, selected: true },
+        ],
+      },
+      {
+        id: 'port-networking',
+        label: 'Networking',
+        kind: 'submenu',
+        disabled: false,
+        children: [
+          { id: 'port-networking:broadcast', label: 'Broadcast', kind: 'action', disabled: false, selected: true },
+          { id: 'port-networking:gateway', label: 'Gateway', kind: 'action', disabled: false, selected: false },
+        ],
+      },
+    ]);
+  });
+
+  it('updates port settings from the port context menu, lights the indicators, and disconnects invalidated edges', async () => {
+    await createIsolatedTab(client, 'port-context-menu');
+    const shellTileId = await spawnShellInActiveTab(client);
+    const work = await client.toolbarSpawnWork('Gateway Test');
+
+    await waitFor(
+      'shell tile and work card for port menu test',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_terminals.some((terminal) => terminal.id === shellTileId)
+        && nextProjection.active_tab_work_cards.some((card) => card.workId === work.work_id),
+      30_000,
+      150,
+    );
+
+    await client.networkConnect(shellTileId, 'top', work.tile_id, 'top');
+
+    await waitFor(
+      'shell-work connection appears before access downgrade',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_network_connections.some(
+          (connection) =>
+            ((connection.from_tile_id === shellTileId && connection.from_port === 'top')
+              || (connection.to_tile_id === shellTileId && connection.to_port === 'top'))
+            && ((connection.from_tile_id === work.tile_id && connection.from_port === 'top')
+              || (connection.to_tile_id === work.tile_id && connection.to_port === 'top')),
+        ),
+      30_000,
+      150,
+    );
+
+    await client.driverPortContextMenu(shellTileId, 'top', 560, 300);
+    let projection = await client.getProjection();
+    expect(projection.context_menu?.target).toBe('port');
+    expect(projection.context_menu?.port_id).toBe('top');
+
+    await client.contextMenuSelect('port-access:read');
+
+    projection = await waitFor(
+      'access downgrade disconnects read-read edge',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.context_menu === null
+        && nextProjection.active_tab_network_connections.every(
+          (connection) =>
+            !(
+              ((connection.from_tile_id === shellTileId && connection.from_port === 'top')
+                || (connection.to_tile_id === shellTileId && connection.to_port === 'top'))
+              && ((connection.from_tile_id === work.tile_id && connection.from_port === 'top')
+                || (connection.to_tile_id === work.tile_id && connection.to_port === 'top'))
+            ),
+        ),
+      30_000,
+      150,
+    );
+    expect(projection.active_tab_network_connections.some((connection) => connection.from_tile_id === shellTileId && connection.from_port === 'top')).toBe(false);
+
+    let domState = await client.testDomQuery<{
+      access: string;
+      networking: string;
+      readLight: boolean;
+      gatewayLight: boolean;
+    }>(`
+      const port = document.querySelector('[data-port-tile="${shellTileId}"][data-port="top"]');
+      return {
+        access: port?.getAttribute('data-port-access') ?? '',
+        networking: port?.getAttribute('data-port-networking') ?? '',
+        readLight: port?.querySelector('.port-light-left')?.classList.contains('light-active-read') ?? false,
+        gatewayLight: port?.querySelector('.port-light-right')?.classList.contains('light-active-gateway') ?? false,
+      };
+    `);
+    expect(domState).toEqual({
+      access: 'read',
+      networking: 'broadcast',
+      readLight: true,
+      gatewayLight: false,
+    });
+
+    await client.driverPortContextMenu(shellTileId, 'top', 560, 300);
+    await client.contextMenuSelect('port-networking:gateway');
+
+    domState = await waitFor(
+      'gateway indicator updates after networking selection',
+      () => client.testDomQuery<{
+        access: string;
+        networking: string;
+        readLight: boolean;
+        gatewayLight: boolean;
+      }>(`
+        const port = document.querySelector('[data-port-tile="${shellTileId}"][data-port="top"]');
+        return {
+          access: port?.getAttribute('data-port-access') ?? '',
+          networking: port?.getAttribute('data-port-networking') ?? '',
+          readLight: port?.querySelector('.port-light-left')?.classList.contains('light-active-read') ?? false,
+          gatewayLight: port?.querySelector('.port-light-right')?.classList.contains('light-active-gateway') ?? false,
+        };
+      `),
+      (nextState) => nextState.networking === 'gateway' && nextState.gatewayLight,
+      30_000,
+      150,
+    );
+    expect(domState).toEqual({
+      access: 'read',
+      networking: 'gateway',
+      readLight: true,
+      gatewayLight: true,
+    });
+  });
+
+  it('applies gateway traversal rules to sender-visible network_list and network_call', async () => {
+    await createIsolatedTab(client, 'gateway-routing');
+    const senderTileId = await spawnShellInActiveTab(client);
+    const gatewayTileId = await spawnShellInActiveTab(client);
+    const targetTileId = await spawnShellInActiveTab(client);
+
+    await waitFor(
+      'three shell tiles are visible for gateway routing',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_terminals.some((terminal) => terminal.id === senderTileId)
+        && nextProjection.active_tab_terminals.some((terminal) => terminal.id === gatewayTileId)
+        && nextProjection.active_tab_terminals.some((terminal) => terminal.id === targetTileId),
+      30_000,
+      150,
+    );
+
+    await client.networkConnect(senderTileId, 'right', gatewayTileId, 'left');
+    await client.networkConnect(gatewayTileId, 'right', targetTileId, 'left');
+
+    let senderNetwork = await client.listNetwork(senderTileId);
+    expect(senderNetwork.tiles.map((tile) => tile.tile_id)).toEqual(expect.arrayContaining([
+      senderTileId,
+      gatewayTileId,
+      targetTileId,
+    ]));
+
+    await client.driverPortContextMenu(gatewayTileId, 'left', 560, 320);
+    await client.contextMenuSelect('port-networking:gateway');
+
+    await waitFor(
+      'gateway mode is reflected on the ingress port',
+      () => client.testDomQuery<{ networking: string; gatewayLight: boolean }>(`
+        const port = document.querySelector('[data-port-tile="${gatewayTileId}"][data-port="left"]');
+        return {
+          networking: port?.getAttribute('data-port-networking') ?? '',
+          gatewayLight: port?.querySelector('.port-light-right')?.classList.contains('light-active-gateway') ?? false,
+        };
+      `),
+      (nextState) => nextState.networking === 'gateway' && nextState.gatewayLight,
+      30_000,
+      150,
+    );
+
+    senderNetwork = await client.listNetwork(senderTileId);
+    expect(senderNetwork.tiles.map((tile) => tile.tile_id).sort()).toEqual([gatewayTileId, senderTileId].sort());
+
+    await expect(
+      client.networkCall(targetTileId, 'output_read', {}, senderTileId),
+    ).rejects.toThrow(/sender network/i);
+
+    const gatewayNetwork = await client.listNetwork(gatewayTileId);
+    expect(gatewayNetwork.tiles.map((tile) => tile.tile_id).sort()).toEqual([gatewayTileId, senderTileId, targetTileId].sort());
+
+    const gatewayRead = await client.networkCall<{ output: string }>(targetTileId, 'output_read', {}, gatewayTileId);
+    expect(gatewayRead.tile_id).toBe(targetTileId);
+    expect(gatewayRead.action).toBe('output_read');
+    expect(typeof gatewayRead.result.output).toBe('string');
   });
 
   it('shows browser Load submenu entries and suppresses browser webviews while context menus and motion are active', async () => {
@@ -1712,6 +2059,60 @@ return document.querySelector('#score').textContent;
     expect(projection.active_tab_network_connections).toHaveLength(0);
   });
 
+  it('orients side-port lights vertically while keeping top-port lights horizontal', async () => {
+    await createIsolatedTab(client, 'port-light-orientation');
+    const paneId = await spawnShellInActiveTab(client);
+    await client.agentRegister('agent-port-light-owner', paneId, 'Port Light Owner');
+
+    const portOrientation = await waitFor(
+      'left and top shell ports for orientation check',
+      () => client.testDomQuery<{
+        leftHorizontalDelta: number;
+        leftVerticalDelta: number;
+        topHorizontalDelta: number;
+        topVerticalDelta: number;
+      }>(`
+        const leftPort = document.querySelector('[data-port-tile="${paneId}"][data-port="left"]');
+        const topPort = document.querySelector('[data-port-tile="${paneId}"][data-port="top"]');
+        const center = (rect) => ({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        });
+        const axisDelta = (port) => {
+          const first = port?.querySelector('.port-light-left');
+          const second = port?.querySelector('.port-light-right');
+          if (!(first instanceof HTMLElement) || !(second instanceof HTMLElement)) {
+            return { horizontal: -1, vertical: -1 };
+          }
+          const firstCenter = center(first.getBoundingClientRect());
+          const secondCenter = center(second.getBoundingClientRect());
+          return {
+            horizontal: Math.abs(firstCenter.x - secondCenter.x),
+            vertical: Math.abs(firstCenter.y - secondCenter.y),
+          };
+        };
+        const leftAxes = axisDelta(leftPort);
+        const topAxes = axisDelta(topPort);
+        return {
+          leftHorizontalDelta: leftAxes.horizontal,
+          leftVerticalDelta: leftAxes.vertical,
+          topHorizontalDelta: topAxes.horizontal,
+          topVerticalDelta: topAxes.vertical,
+        };
+      `),
+      (state) =>
+        state.leftHorizontalDelta >= 0
+        && state.leftVerticalDelta > state.leftHorizontalDelta
+        && state.topHorizontalDelta >= 0
+        && state.topHorizontalDelta > state.topVerticalDelta,
+      30_000,
+      150,
+    );
+
+    expect(portOrientation.leftVerticalDelta).toBeGreaterThan(portOrientation.leftHorizontalDelta);
+    expect(portOrientation.topHorizontalDelta).toBeGreaterThan(portOrientation.topVerticalDelta);
+  });
+
   it('uses Shift+J/K to focus sidebar sections and j/k to select work and agent items on the canvas', async () => {
     let projection = await createIsolatedTab(client, 'sidebar-focus');
     const paneId = projection.selected_tile_id!;
@@ -1783,7 +2184,7 @@ return document.querySelector('#score').textContent;
     );
   });
 
-  it('shows a Ports setting below spawn dir and updates the selected tile port count', async () => {
+  it('shows canvas settings in the sidebar and lets you toggle wire sparks', async () => {
     const projection = await createIsolatedTab(client, 'ports-setting');
     const selectedTileId = projection.selected_tile_id;
     await client.sidebarOpen();
@@ -1792,19 +2193,22 @@ return document.querySelector('#score').textContent;
       labels: string[];
       selected: string;
       selectedTilePortCount: number;
+      sparksEnabled: boolean;
     }>(`
       const tileId = ${JSON.stringify(selectedTileId)};
       return {
         labels: Array.from(document.querySelectorAll('.sidebar .settings-card-label')).map((element) => element.textContent?.trim() ?? ''),
         selected: document.querySelector('.tile-port-count-toggle.selected')?.textContent?.trim() ?? '',
+        sparksEnabled: document.querySelector('.wire-sparks-toggle')?.getAttribute('aria-pressed') === 'true',
         selectedTilePortCount: tileId
           ? document.querySelectorAll(\`[data-tile-id="\${tileId}"] [data-port]\`).length
           : 0,
       };
     `);
 
-    expect(initialSettings.labels).toEqual(['SPAWN DIR', 'PORTS']);
+    expect(initialSettings.labels).toEqual(['SPAWN DIR', 'PORTS', 'WIRE SPARKS']);
     expect(initialSettings.selected).toBe('4');
+    expect(initialSettings.sparksEnabled).toBe(true);
     expect(initialSettings.selectedTilePortCount).toBe(4);
 
     await client.testDomQuery(`
@@ -1837,6 +2241,29 @@ return document.querySelector('#score').textContent;
 
     expect(updatedSettings.selected).toBe('12');
     expect(updatedSettings.selectedTilePortCount).toBe(12);
+
+    await client.testDomQuery(`
+      document.querySelector('.wire-sparks-toggle')?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      return true;
+    `);
+
+    const updatedSparkSetting = await waitFor(
+      'wire sparks setting toggles off',
+      () =>
+        client.testDomQuery<{ sparksEnabled: boolean }>(`
+          return {
+            sparksEnabled: document.querySelector('.wire-sparks-toggle')?.getAttribute('aria-pressed') === 'true',
+          };
+        `),
+      (nextState) => nextState.sparksEnabled === false,
+      30_000,
+      150,
+    );
+
+    expect(updatedSparkSetting.sparksEnabled).toBe(false);
   });
 
   it('covers shell create, tile selection/close, sidebar rename, and canvas actions through the typed driver', async () => {

@@ -42,4 +42,33 @@ describe('parseAnsiPreview', () => {
       },
     ]);
   });
+
+  it('renders standard ansi palette colors from html-escaped escape sequences', () => {
+    const lines = parseAnsiPreview('&#x1b;[31m█&#x1b;[0m');
+
+    expect(lines[0]).toEqual([
+      {
+        text: '█',
+        foreground: 'rgb(255, 51, 51)',
+        background: null,
+      },
+    ]);
+  });
+
+  it('renders 256-color ansi sequences from literal backslash escapes', () => {
+    const lines = parseAnsiPreview('\\u001b[38;5;214mX\\u001b[48;5;17mY\\u001b[0m');
+
+    expect(lines[0]).toEqual([
+      {
+        text: 'X',
+        foreground: 'rgb(255, 175, 0)',
+        background: null,
+      },
+      {
+        text: 'Y',
+        foreground: 'rgb(255, 175, 0)',
+        background: 'rgb(0, 0, 95)',
+      },
+    ]);
+  });
 });

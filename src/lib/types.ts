@@ -35,6 +35,7 @@ export type TilePortSlot = 1 | 2 | 3 | 4;
 export type TilePortCount = 4 | 8 | 12 | 16;
 export type TilePort = TilePortSide | `${TilePortSide}-${Exclude<TilePortSlot, 1>}`;
 export type PortMode = 'read' | 'read_write';
+export type PortNetworkingMode = 'broadcast' | 'gateway';
 export type NetworkTileKind = 'agent' | 'root_agent' | 'shell' | 'work' | 'browser';
 export type WindowParentSource = 'hook' | 'manual';
 
@@ -130,6 +131,14 @@ export interface NetworkConnection {
   from_port: TilePort;
   to_tile_id: string;
   to_port: TilePort;
+}
+
+export interface TilePortSetting {
+  session_id: string;
+  tile_id: string;
+  port: TilePort;
+  access_mode: PortMode;
+  networking_mode: PortNetworkingMode;
 }
 
 export type TileTypeFilter = 'agent' | 'shell' | 'browser' | 'work';
@@ -267,11 +276,12 @@ export interface ProjectionCloseTileConfirmation {
   confirmLabel: string;
 }
 
-export type ProjectionContextMenuTarget = 'canvas' | 'tile';
+export type ProjectionContextMenuTarget = 'canvas' | 'tile' | 'port';
 
 export interface ProjectionContextMenu {
   target: ProjectionContextMenuTarget;
   tile_id: string | null;
+  port_id: TilePort | null;
   client_x: number;
   client_y: number;
   world_x: number | null;
@@ -333,6 +343,41 @@ export interface WorkCanvasCard {
   minimized?: boolean;
 }
 
+export interface AgentDisplayFrame {
+  agent_id: string;
+  tile_id: string;
+  session_id: string;
+  text: string;
+  columns: number;
+  rows: number;
+  updated_at: number;
+}
+
+export interface TileSignalLed {
+  index: number;
+  on: boolean;
+  color: string | null;
+}
+
+export interface LedPatternArgs {
+  primary_color?: string | null;
+  secondary_color?: string | null;
+  delay_ms?: number | null;
+}
+
+export type LedControlCommand =
+  | { op: 'on'; led: number; color: string }
+  | { op: 'off'; led: number }
+  | { op: 'sleep'; ms: number };
+
+export interface TileSignalState {
+  tile_id: string;
+  session_id: string;
+  leds: TileSignalLed[];
+  status_text: string;
+  updated_at: number;
+}
+
 export interface AgentDebugState {
   agents: AgentInfo[];
   channels: ChannelInfo[];
@@ -340,9 +385,12 @@ export interface AgentDebugState {
   agent_logs: AgentLogEntry[];
   tile_message_logs: TileMessageLogEntry[];
   connections: NetworkConnection[];
+  agent_displays: AgentDisplayFrame[];
+  tile_signals: TileSignalState[];
+  port_settings: TilePortSetting[];
 }
 
-export type ContextMenuTarget = 'canvas' | 'pane';
+export type ContextMenuTarget = 'canvas' | 'pane' | 'port';
 
 export interface ClaudeCommandDescriptor {
   name: string;
@@ -360,6 +408,7 @@ export interface ContextMenuItem {
   label: string;
   kind: 'action' | 'separator' | 'label' | 'status' | 'submenu';
   disabled: boolean;
+  selected?: boolean;
   children?: ContextMenuItem[];
 }
 
@@ -367,6 +416,8 @@ export interface ContextMenuState {
   open: boolean;
   target: ContextMenuTarget;
   paneId: string | null;
+  tileId: string | null;
+  portId: TilePort | null;
   clientX: number;
   clientY: number;
   worldX: number | null;
@@ -498,6 +549,7 @@ export interface UiState {
   sidebarSection: SidebarSection;
   sidebarSelectedIdx: number;
   tilePortCount: TilePortCount;
+  networkCallSparksEnabled: boolean;
   debugPaneOpen: boolean;
   debugPaneHeight: number;
   debugTab: DebugTab;
@@ -537,6 +589,8 @@ export interface AppStateTree {
   tmux: TmuxStateSlice;
   layout: LayoutStateSlice;
   agents: Record<string, AgentInfo>;
+  agentDisplays: Record<string, AgentDisplayFrame>;
+  tileSignals: Record<string, TileSignalState>;
   channels: Record<string, ChannelInfo>;
   browserExtensionPages: BrowserExtensionPage[];
   chatter: ChatterEntry[];
@@ -544,6 +598,7 @@ export interface AppStateTree {
   tileMessageLogs: TileMessageLogEntry[];
   network: {
     connections: NetworkConnection[];
+    portSettings: TilePortSetting[];
   };
   work: {
     items: Record<string, WorkItem>;
@@ -604,6 +659,7 @@ export type TestDriverRequest =
   | { type: 'canvas_fit_all'; viewport_width?: number; viewport_height?: number }
   | { type: 'canvas_reset' }
   | { type: 'tile_context_menu'; tile_id: string; client_x: number; client_y: number }
+  | { type: 'port_context_menu'; tile_id: string; port: TilePort; client_x: number; client_y: number }
   | { type: 'context_menu_select'; item_id: string }
   | { type: 'context_menu_dismiss' }
   | { type: 'confirm_close_tab' }

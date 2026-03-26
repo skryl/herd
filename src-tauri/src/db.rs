@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS network_connection (
   to_port TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tile_port_setting (
+  session_id TEXT NOT NULL,
+  tile_id TEXT NOT NULL,
+  port TEXT NOT NULL,
+  access_mode TEXT NOT NULL,
+  networking_mode TEXT NOT NULL,
+  PRIMARY KEY (session_id, tile_id, port)
+);
+
 CREATE TABLE IF NOT EXISTS work_item (
   work_id TEXT PRIMARY KEY,
   tile_id TEXT,
@@ -486,6 +495,7 @@ mod tests {
         assert!(names.contains(&"agent".to_string()));
         assert!(names.contains(&"topic".to_string()));
         assert!(names.contains(&"network_connection".to_string()));
+        assert!(names.contains(&"tile_port_setting".to_string()));
         assert!(names.contains(&"work_item".to_string()));
         assert!(names.contains(&"work_stage".to_string()));
         assert!(names.contains(&"work_review".to_string()));

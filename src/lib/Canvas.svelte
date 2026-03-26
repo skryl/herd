@@ -15,6 +15,7 @@
     activeTabTerminals,
     activeTabVisibleTerminals,
     activeTabVisibleWorkCards,
+    activeNetworkCallPortActivity,
     buildNetworkCallSignals,
     canvasState,
     clearNetworkReleaseAnimation,
@@ -23,6 +24,7 @@
     debugPaneOpen,
     dismissContextMenu,
     mode,
+    networkCallSparksEnabled,
     networkReleaseAnimation,
     openCanvasContextMenu,
     panCanvasBy,
@@ -34,6 +36,32 @@
     wheelCanvas,
   } from './stores/appState';
 
+  interface ActiveNetworkCallSignal extends NetworkCallSignal {
+    startedAtMs: number;
+  }
+
+  interface VisibleNetworkCallSignalSegment {
+    id: string;
+    fromTileId: string;
+    toTileId: string;
+    senderTileId: string;
+    senderPort: TilePort;
+    receiverTileId: string;
+    receiverPort: TilePort;
+    connectionKey: string;
+    wireMode: 'read_only' | 'full_duplex';
+    path: string;
+    reverse: boolean;
+    opacity: number;
+    glowOpacity: number;
+    coreOpacity: number;
+    dotX: number;
+    dotY: number;
+    trailX: number;
+    trailY: number;
+    trailOpacity: number;
+  }
+
   let isPanning = false;
   let lastX = 0;
   let lastY = 0;
@@ -42,7 +70,8 @@
   let cursorWorldY = $state(0);
   let workCardLayouts = $derived(new Map($activeTabVisibleWorkCards.map((card) => [card.workId, card])));
   let releaseAnimationProgress = $state(1);
-  let networkCallSignals = $state<NetworkCallSignal[]>([]);
+  let networkCallSignals = $state<ActiveNetworkCallSignal[]>([]);
+  let networkSignalNowMs = $state(0);
   let effectiveSidebarWidth = $derived($sidebarOpen ? 240 : 0);
   let effectiveDebugHeight = $derived(
     $debugPaneOpen && Number.isFinite($debugPaneHeight) && $debugPaneHeight > 0 ? $debugPaneHeight : 0,
@@ -50,8 +79,9 @@
 
   const NETWORK_RELEASE_DURATION_MS = 180;
   const NETWORK_SIGNAL_REMOVE_BUFFER_MS = 120;
+  const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const seenNetworkCallLogKeysBySession = new Map<string, Set<string>>();
-  const networkSignalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const networkSignalPathGeometries = new Map<string, { element: SVGPathElement; length: number }>();
   let networkSignalSessionId: string | null = null;
 
   function draftTargetPort() {
@@ -70,16 +100,11 @@
     return 1 - (1 - progress) ** 3;
   }
 
-  function clearNetworkSignalTimers() {
-    for (const timer of networkSignalTimers.values()) {
-      clearTimeout(timer);
-    }
-    networkSignalTimers.clear();
-  }
-
   function clearActiveNetworkCallSignals() {
-    clearNetworkSignalTimers();
     networkCallSignals = [];
+    networkSignalNowMs = 0;
+    networkSignalPathGeometries.clear();
+    activeNetworkCallPortActivity.set([]);
   }
 
   function networkCallLogKey(entry: TileMessageLogEntry, index: number) {
@@ -93,6 +118,96 @@
       entry.channel,
       index,
     ].join(':');
+  }
+
+  function networkSignalPathGeometry(path: string) {
+    const cached = networkSignalPathGeometries.get(path);
+    if (cached) {
+      return cached;
+    }
+    if (typeof document === 'undefined') {
+      return null;
+    }
+
+    const element = document.createElementNS(SVG_NAMESPACE, 'path');
+    element.setAttribute('d', path);
+    const geometry = {
+      element,
+      length: Math.max(0, element.getTotalLength()),
+    };
+    networkSignalPathGeometries.set(path, geometry);
+    return geometry;
+  }
+
+  function pointAlongSignalPath(path: string, progress: number, reverse: boolean) {
+    const geometry = networkSignalPathGeometry(path);
+    if (!geometry || geometry.length <= 0) {
+      return { x: 0, y: 0 };
+    }
+
+    const clampedProgress = Math.max(0, Math.min(1, progress));
+    const distance = geometry.length * (reverse ? 1 - clampedProgress : clampedProgress);
+    const point = geometry.element.getPointAtLength(Math.max(0, Math.min(geometry.length, distance)));
+    return { x: point.x, y: point.y };
+  }
+
+  function signalOpacity(progress: number) {
+    if (progress <= 0) {
+      return 0;
+    }
+    if (progress < 0.12) {
+      return progress / 0.12;
+    }
+    if (progress > 0.88) {
+      return Math.max(0, (1 - progress) / 0.12);
+    }
+    return 1;
+  }
+
+  function trailProgress(progress: number) {
+    return Math.max(0, progress - 0.08);
+  }
+
+  function visibleNetworkCallSignalSegments(): VisibleNetworkCallSignalSegment[] {
+    if (!$networkCallSparksEnabled) {
+      return [];
+    }
+    const nowMs = networkSignalNowMs;
+    return networkCallSignals.flatMap((signal) =>
+      signal.segments.flatMap<VisibleNetworkCallSignalSegment>((segment) => {
+        const elapsedMs = nowMs - signal.startedAtMs - segment.delayMs;
+        if (elapsedMs < 0 || elapsedMs > segment.durationMs) {
+          return [];
+        }
+        const progress = segment.durationMs <= 0
+          ? 1
+          : Math.max(0, Math.min(1, elapsedMs / segment.durationMs));
+        const dot = pointAlongSignalPath(segment.path, progress, segment.reverse);
+        const trail = pointAlongSignalPath(segment.path, trailProgress(progress), segment.reverse);
+        const opacity = signalOpacity(progress);
+        return [{
+          id: segment.id,
+          fromTileId: signal.fromTileId,
+          toTileId: signal.toTileId,
+          senderTileId: segment.senderTileId,
+          senderPort: segment.senderPort,
+          receiverTileId: segment.receiverTileId,
+          receiverPort: segment.receiverPort,
+          connectionKey: segment.connectionKey,
+          wireMode: segment.wireMode,
+          path: segment.path,
+          reverse: segment.reverse,
+          opacity,
+          glowOpacity: opacity * 0.38,
+          coreOpacity: opacity * 0.92,
+          dotX: dot.x,
+          dotY: dot.y,
+          trailX: trail.x,
+          trailY: trail.y,
+          trailOpacity: opacity * 0.28,
+        }];
+      }),
+    );
   }
 
   $effect(() => {
@@ -125,6 +240,7 @@
   $effect(() => {
     const state = $appState;
     const activeSessionId = state.tmux.activeSessionId;
+    const sparksEnabled = $networkCallSparksEnabled;
 
     if (!activeSessionId) {
       networkSignalSessionId = null;
@@ -158,6 +274,15 @@
       seenNetworkCallLogKeysBySession.set(activeSessionId, seenLogKeys);
     }
 
+    if (!sparksEnabled) {
+      seenNetworkCallLogKeysBySession.set(
+        activeSessionId,
+        new Set(currentLogs.map((entry, index) => networkCallLogKey(entry, index))),
+      );
+      clearActiveNetworkCallSignals();
+      return;
+    }
+
     const unseenEntries: TileMessageLogEntry[] = [];
     for (const [index, entry] of currentLogs.entries()) {
       const key = networkCallLogKey(entry, index);
@@ -177,20 +302,64 @@
       return;
     }
 
-    networkCallSignals = [...networkCallSignals, ...nextSignals];
-    for (const signal of nextSignals) {
-      const timer = setTimeout(() => {
-        networkSignalTimers.delete(signal.id);
-        networkCallSignals = networkCallSignals.filter((candidate) => candidate.id !== signal.id);
-      }, signal.totalDurationMs + NETWORK_SIGNAL_REMOVE_BUFFER_MS);
-      networkSignalTimers.set(signal.id, timer);
-    }
+    const startedAtMs = performance.now();
+    networkSignalNowMs = startedAtMs;
+    networkCallSignals = [
+      ...networkCallSignals,
+      ...nextSignals.map((signal) => ({ ...signal, startedAtMs })),
+    ];
   });
 
   $effect(() => {
-    return () => {
-      clearNetworkSignalTimers();
+    if (networkCallSignals.length === 0) {
+      networkSignalNowMs = 0;
+      return;
+    }
+
+    let frame = 0;
+    const tick = (now: number) => {
+      networkSignalNowMs = now;
+      const activeSignals = networkCallSignals.filter(
+        (signal) => now - signal.startedAtMs <= signal.totalDurationMs + NETWORK_SIGNAL_REMOVE_BUFFER_MS,
+      );
+      if (activeSignals.length !== networkCallSignals.length) {
+        networkCallSignals = activeSignals;
+      }
+      if (activeSignals.length === 0) {
+        return;
+      }
+      frame = requestAnimationFrame(tick);
     };
+
+    frame = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  });
+
+  $effect(() => {
+    const activePortKeys = new Set<string>();
+    const nextActivity = visibleNetworkCallSignalSegments().flatMap((segment) => {
+      const sendKey = `${segment.senderTileId}:${segment.senderPort}:send`;
+      const receiveKey = `${segment.receiverTileId}:${segment.receiverPort}:receive`;
+      return [
+        activePortKeys.has(sendKey)
+          ? null
+          : (activePortKeys.add(sendKey), {
+              tileId: segment.senderTileId,
+              port: segment.senderPort,
+              direction: 'send' as const,
+            }),
+        activePortKeys.has(receiveKey)
+          ? null
+          : (activePortKeys.add(receiveKey), {
+              tileId: segment.receiverTileId,
+              port: segment.receiverPort,
+              direction: 'receive' as const,
+            }),
+      ];
+    }).filter((activity) => activity !== null);
+    activeNetworkCallPortActivity.set(nextActivity);
   });
 
   function handleWheel(e: WheelEvent) {
@@ -330,37 +499,59 @@
             class:network-dot-full-duplex={conn.wireMode === 'full_duplex'}
           />
         {/each}
-        {#each networkCallSignals as signal (signal.id)}
-          {#each signal.segments as segment (segment.id)}
+        {#each visibleNetworkCallSignalSegments() as segment (segment.id)}
+            <path
+              d={segment.path}
+              class="network-signal-glow"
+              class:network-signal-glow-read-only={segment.wireMode === 'read_only'}
+              class:network-signal-glow-full-duplex={segment.wireMode === 'full_duplex'}
+              data-from-tile-id={segment.fromTileId}
+              data-to-tile-id={segment.toTileId}
+              data-connection-key={segment.connectionKey}
+              style={`opacity: ${segment.glowOpacity};`}
+            />
             <path
               d={segment.path}
               class="network-signal-line"
               class:network-signal-line-read-only={segment.wireMode === 'read_only'}
               class:network-signal-line-full-duplex={segment.wireMode === 'full_duplex'}
-              data-from-tile-id={signal.fromTileId}
-              data-to-tile-id={signal.toTileId}
+              data-from-tile-id={segment.fromTileId}
+              data-to-tile-id={segment.toTileId}
               data-connection-key={segment.connectionKey}
-              style={`animation-delay: ${segment.delayMs}ms; animation-duration: ${segment.durationMs}ms;`}
+              style={`opacity: ${segment.coreOpacity};`}
             />
             <circle
+              cx={segment.trailX}
+              cy={segment.trailY}
+              r="7.5"
+              class="network-signal-trail"
+              class:network-signal-trail-read-only={segment.wireMode === 'read_only'}
+              class:network-signal-trail-full-duplex={segment.wireMode === 'full_duplex'}
+              data-connection-key={segment.connectionKey}
+              style={`opacity: ${segment.trailOpacity};`}
+            />
+            <circle
+              cx={segment.dotX}
+              cy={segment.dotY}
+              r="10"
+              class="network-signal-spark-halo"
+              class:network-signal-spark-halo-read-only={segment.wireMode === 'read_only'}
+              class:network-signal-spark-halo-full-duplex={segment.wireMode === 'full_duplex'}
+              data-connection-key={segment.connectionKey}
+              style={`opacity: ${segment.glowOpacity};`}
+            />
+            <circle
+              cx={segment.dotX}
+              cy={segment.dotY}
               r="4.5"
               class="network-signal-dot"
               class:network-signal-dot-read-only={segment.wireMode === 'read_only'}
               class:network-signal-dot-full-duplex={segment.wireMode === 'full_duplex'}
-              data-from-tile-id={signal.fromTileId}
-              data-to-tile-id={signal.toTileId}
+              data-from-tile-id={segment.fromTileId}
+              data-to-tile-id={segment.toTileId}
               data-connection-key={segment.connectionKey}
-              style={`animation-delay: ${segment.delayMs}ms; animation-duration: ${segment.durationMs}ms;`}
-            >
-              <animateMotion
-                begin={`${segment.delayMs}ms`}
-                dur={`${segment.durationMs}ms`}
-                path={segment.motionPath}
-                fill="freeze"
-                rotate="auto"
-              />
-            </circle>
-          {/each}
+              style={`opacity: ${segment.opacity};`}
+            />
         {/each}
       </svg>
     {/if}
@@ -568,41 +759,75 @@
 
   .network-signal-line {
     fill: none;
-    stroke-width: 5;
+    stroke-width: 4.25;
     stroke-linecap: round;
-    opacity: 0;
-    animation-name: network-signal-line-pulse;
-    animation-timing-function: ease-out;
-    animation-fill-mode: both;
     pointer-events: none;
   }
 
   .network-signal-line-read-only {
-    stroke: rgba(140, 236, 255, 0.96);
-    filter: drop-shadow(0 0 10px rgba(92, 200, 255, 0.6));
+    stroke: rgba(212, 251, 255, 0.98);
+    filter: drop-shadow(0 0 8px rgba(92, 200, 255, 0.58));
   }
 
   .network-signal-line-full-duplex {
-    stroke: rgba(255, 221, 130, 0.96);
-    filter: drop-shadow(0 0 10px rgba(240, 184, 92, 0.55));
+    stroke: rgba(255, 244, 196, 0.98);
+    filter: drop-shadow(0 0 8px rgba(240, 184, 92, 0.52));
+  }
+
+  .network-signal-glow {
+    fill: none;
+    stroke-width: 12;
+    stroke-linecap: round;
+    pointer-events: none;
+  }
+
+  .network-signal-glow-read-only {
+    stroke: rgba(116, 226, 255, 0.92);
+    filter: drop-shadow(0 0 16px rgba(92, 200, 255, 0.8));
+  }
+
+  .network-signal-glow-full-duplex {
+    stroke: rgba(255, 201, 102, 0.92);
+    filter: drop-shadow(0 0 16px rgba(240, 184, 92, 0.75));
   }
 
   .network-signal-dot {
-    opacity: 0;
     pointer-events: none;
-    animation-name: network-signal-dot-visibility;
-    animation-timing-function: linear;
-    animation-fill-mode: both;
   }
 
   .network-signal-dot-read-only {
-    fill: rgba(166, 244, 255, 1);
-    filter: drop-shadow(0 0 12px rgba(92, 200, 255, 0.78));
+    fill: rgba(240, 253, 255, 1);
+    filter: drop-shadow(0 0 10px rgba(92, 200, 255, 0.95));
   }
 
   .network-signal-dot-full-duplex {
-    fill: rgba(255, 235, 171, 1);
-    filter: drop-shadow(0 0 12px rgba(240, 184, 92, 0.78));
+    fill: rgba(255, 248, 221, 1);
+    filter: drop-shadow(0 0 10px rgba(240, 184, 92, 0.92));
+  }
+
+  .network-signal-spark-halo,
+  .network-signal-trail {
+    pointer-events: none;
+  }
+
+  .network-signal-spark-halo-read-only {
+    fill: rgba(141, 236, 255, 0.94);
+    filter: drop-shadow(0 0 18px rgba(92, 200, 255, 0.88));
+  }
+
+  .network-signal-spark-halo-full-duplex {
+    fill: rgba(255, 210, 121, 0.94);
+    filter: drop-shadow(0 0 18px rgba(240, 184, 92, 0.84));
+  }
+
+  .network-signal-trail-read-only {
+    fill: rgba(141, 236, 255, 0.72);
+    filter: drop-shadow(0 0 10px rgba(92, 200, 255, 0.52));
+  }
+
+  .network-signal-trail-full-duplex {
+    fill: rgba(255, 210, 121, 0.72);
+    filter: drop-shadow(0 0 10px rgba(240, 184, 92, 0.5));
   }
 
   .network-draft-line {
@@ -677,43 +902,4 @@
     color: var(--copper);
   }
 
-  @keyframes network-signal-line-pulse {
-    0% {
-      opacity: 0;
-      stroke-width: 2.5;
-    }
-
-    18% {
-      opacity: 1;
-      stroke-width: 5.5;
-    }
-
-    72% {
-      opacity: 0.9;
-      stroke-width: 4.25;
-    }
-
-    100% {
-      opacity: 0;
-      stroke-width: 3;
-    }
-  }
-
-  @keyframes network-signal-dot-visibility {
-    0% {
-      opacity: 0;
-    }
-
-    12% {
-      opacity: 1;
-    }
-
-    88% {
-      opacity: 1;
-    }
-
-    100% {
-      opacity: 0;
-    }
-  }
 </style>

@@ -90,8 +90,10 @@ Browser operations:
 herd tile create browser --parent-tile-id AbCdEf
 herd tile create browser --browser-incognito true --parent-tile-id AbCdEf
 herd tile create browser --browser-path extensions/browser/checkers/index.html --parent-tile-id AbCdEf
+herd tile create browser --browser-path extensions/browser/game-boy/index.html --parent-tile-id AbCdEf
 herd browser navigate MnOpQr https://example.com
 herd browser load MnOpQr ./index.html
+herd browser load MnOpQr extensions/browser/texas-holdem/index.html
 herd tile destroy MnOpQr
 ```
 
@@ -111,9 +113,10 @@ herd --agent-pid "$PPID" network connect AbCdEf left work:work-s4-001 left
 herd --agent-pid "$PPID" network disconnect AbCdEf left
 herd --agent-pid "$PPID" work stage start work-s4-001
 herd --agent-pid "$PPID" work stage complete work-s4-001
+herd self info
 ```
 
-Worker MCP exposes the message tools plus `network_list`, `network_get`, and `network_call`. The local CLI/socket surface also exposes broader session-scoped network and work commands for Root, the app, and local automation.
+Worker MCP exposes the message tools plus `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, `network_list`, `network_get`, and `network_call`. The local CLI/socket surface also exposes broader session-scoped network and work commands for Root, the app, and local automation.
 
 ## Socket API
 
@@ -122,6 +125,21 @@ Herd exposes a newline-delimited JSON protocol on `/tmp/herd.sock` by default. I
 Socket commands follow `category_command` naming.
 
 Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain internal backing metadata and are not part of the public control API.
+
+### Self-targeted commands
+
+- `self_info`
+- `self_display_draw`
+- `self_led_control`
+- `self_display_status`
+
+`self_info` requires sender context and returns the sender tile's native `get` payload. It does not apply sender-visible network filtering.
+
+`self_display_draw` requires an agent sender and updates only that calling agent tile's display drawer. It accepts `text`, `columns`, and `rows`.
+
+`self_led_control` requires sender tile context and updates only that calling tile's 8-LED chrome strip. It accepts either `commands` or `pattern_name`, and the resulting sequence loops until replaced.
+
+`self_display_status` requires sender tile context and updates only that calling tile's single-line ANSI status strip. Long text scrolls automatically in the tile chrome.
 
 ### Session-level tile commands
 
@@ -139,15 +157,15 @@ Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain 
 
 `tile_create` accepts `tile_type = shell | agent | browser | work`, plus optional `title`, `x`, `y`, `width`, `height`, `parent_session_id`, and `parent_tile_id`. Browser creation also accepts optional `browser_incognito` / CLI `--browser-incognito true` to start the browser tile in incognito mode instead of the shared default profile, plus optional `browser_path` / CLI `--browser-path <path>` to immediately load a local page such as an existing browser extension.
 
-`tile_list` returns every tile in the current session. `network_list` returns the sender tile's connected component. Both accept optional `tile_type` filter `shell | agent | browser | work`.
+`tile_list` returns every tile in the current session. `network_list` returns the sender tile's sender-visible local network. Both accept optional `tile_type` filter `shell | agent | browser | work`.
 
 `tile_destroy` is the generic session-scoped destroy path for any tile type.
 
 `tile_rename` is root-only and accepts `tile_id` and `title`. It works for shell, browser, agent, and work tiles and returns the updated tile object.
 
-`network_get` is a worker-safe lookup by `tile_id` inside the sender's current connected component. It returns the same tile object shape used by `network_list.tiles`, including `message_api` for the network-visible interface. On browser tiles, that `message_api` advertises the `drive > screenshot` formats for PNG image plus Braille, ASCII, ANSI, and layout-preserving text output.
+`network_get` is a worker-safe lookup by `tile_id` inside the sender's sender-visible local network. It returns the same tile object shape used by `network_list.tiles`, including `message_api` for the network-visible interface. On browser tiles, that `message_api` advertises the `drive > screenshot` formats for PNG image plus Braille, ASCII, ANSI, and layout-preserving text output. If the loaded page is a browser extension, the payload also includes `details.extension`, and `message_api` may expose `extension_call` with the extension's declared methods.
 
-`tile_get` is a root-only lookup by `tile_id` in the current session. It returns the full tile object, including `details` for that tile type and the full `message_api`. On browser tiles, that interface also advertises the full `drive > screenshot` format set.
+`tile_get` is a root-only lookup by `tile_id` in the current session. It returns the full tile object, including `details` for that tile type and the full `message_api`. On browser tiles, that interface also advertises the full `drive > screenshot` format set and any currently loaded browser-extension methods.
 
 `tile_move` is root-only and accepts `tile_id`, `x`, and `y`. It updates the canvas position for the tile and returns the updated tile object.
 
@@ -200,8 +218,29 @@ Supported `action` values:
   - returns `{ "format": "ascii", "text": "<ascii>", "columns": 80, "rows": 24 }` when `args.format` is `ascii`
   - returns `{ "format": "ansi", "text": "<ansi escape text>", "columns": 80, "rows": 24 }` when `args.format` is `ansi`
   - returns `{ "format": "text", "text": "<layout-preserving text grid>", "columns": 80, "rows": 24 }` when `args.format` is `text`
+  - on the MCP surface, screenshot-shaped results are emitted as actual image/text content instead of raw base64 JSON blobs
 
 `browser_drive` targets the child browser webview directly. It does not use `test_dom_query` or `test_dom_keys`, which only operate on the main Herd UI webview.
+
+### Browser extension pages
+
+Browser tiles loaded from `extensions/browser/...` may expose a discoverable extension API through:
+
+- `globalThis.HerdBrowserExtension.manifest`
+  - requires `extension_id`
+  - requires `label`
+  - may declare `methods`
+- `globalThis.HerdBrowserExtension.call(method, args, caller)`
+  - must return synchronously
+  - receives caller context including `sender_tile_id`, optional `sender_agent_id`, optional `sender_agent_role`, `target_tile_id`, and `target_pane_id`
+
+When a page exposes that contract:
+
+- `tile_get` / `network_get` include `details.extension`
+- the browser tile `responds_to` list includes `extension_call`
+- `message_api` exposes the extension methods as discoverable subcommands
+
+Built-in extension-backed pages currently include local games and emulators such as Texas Hold'em, Game Boy, and JSNES.
 
 ### Agents and messaging
 
@@ -229,12 +268,16 @@ Use `tile_list` with `tile_type = agent` for session-scoped agent discovery and 
 Permission boundary:
 
 - Worker MCP tools expose the message surface plus:
+  - `self_info`
+  - `self_display_draw`
+  - `self_led_control`
+  - `self_display_status`
   - `network_list`
   - `network_get`
   - `network_call`
 - `tile_get`, `tile_rename`, `tile_move`, and `tile_resize` are root-only.
 - Root MCP also exposes `browser_drive`.
-- Worker `network_call` is limited to visible local-network tiles and only to the worker-safe message subset for each tile kind. `shell` and directly controlled `browser` tiles expose write actions; `agent` and `root_agent` tiles stay read-only even when directly connected.
+- Worker `network_call` is limited to visible local-network tiles and only to the worker-safe message subset for each tile kind. `shell` and directly controlled `browser` tiles expose write actions, including `extension_call` when a loaded browser page advertises it; `agent` and `root_agent` tiles stay read-only even when directly connected.
 - The raw socket is also used by the app, tests, and local CLI automation for session-scoped network/work actions.
 - Direct work stage mutation is still gated by the derived owner connection.
 
@@ -291,6 +334,8 @@ Each tile entry includes common fields:
 - direct connection to the target tile's read/write port returns the full tile RPC surface in `responds_to`, except `agent` and `root_agent` tiles, which always stay read-only on the network
 - direct connection to a read-only target port returns only the read interface for that tile kind
 - indirect visibility through the same connected component also returns only the read interface
+- if traversal reaches another tile through that tile's gateway port, the tile is still visible but automatic traversal stops there
+- the gateway tile itself can still see every segment directly attached to its own ports when it is the sender
 
 `message_api` is filtered by the same access rules as `responds_to`.
 
@@ -301,9 +346,9 @@ Today the read interface is:
 - `browser`: `get`, `call`
 - `work`: `get`, `call`
 
-`network_get` is a worker-safe lookup by `tile_id` inside the sender's current connected component. It returns the same tile object shape used by `network_list.tiles`. For actionable calls, inspect `message_api` for required args and browser `drive` subcommands instead of guessing nested payload shapes.
+`network_get` is a worker-safe lookup by `tile_id` inside the sender's sender-visible local network. It returns the same tile object shape used by `network_list.tiles`. For actionable calls, inspect `message_api` for required args and browser `drive` subcommands instead of guessing nested payload shapes.
 
-`network_call` is a worker-safe generic tile call by `tile_id` inside the sender's current connected component. It accepts:
+`network_call` is a worker-safe generic tile call by `tile_id` inside the sender's sender-visible local network. It accepts:
 
 - `tile_id`
 - `action`
@@ -312,6 +357,15 @@ Today the read interface is:
 `network_call` enforces the same port-aware access model used by `network_list` / `network_get`. A worker can only invoke message names exposed in that target tile's network-visible `responds_to` list for its current sender tile.
 
 Agents should use `message_direct`, `message_network`, `message_public`, or `message_root` to coordinate with other agents. The network tile interface for `agent` and `root_agent` tiles is intentionally observational only.
+
+`self_info` is the self-targeted path for getting the sender tile's own full `get` payload when `network_get` would otherwise return the network-visible projection.
+
+Per-port settings are UI-driven in this pass:
+
+- right-click a visible port to open `Access > Read | Read/Write` and `Networking > Broadcast | Gateway`
+- red left indicator means the effective access mode is `read`
+- orange right indicator means the effective networking mode is `gateway`
+- changing access disconnects any live edge that would otherwise become `read -> read`
 
 `tile_get` is a root-only lookup by `tile_id` in the current session. It returns the full tile object, including `details` for that tile type.
 
@@ -336,6 +390,7 @@ Current worker-safe messages are:
   - `navigate`
   - `load`
   - `drive`
+  - `extension_call` when the loaded page advertises `HerdBrowserExtension`
 
 For shell tiles, `exec` submits `<command>` plus Enter to the existing pane. It does not respawn or replace the target shell process.
 
@@ -343,6 +398,13 @@ For generic `network_call` / `tile_call`, browser `drive` expects:
 
 - `action`: `click` | `select` | `type` | `dom_query` | `eval` | `screenshot`
 - optional nested `args` object for that browser-drive action
+
+For extension-backed browser tiles, `extension_call` expects:
+
+- `method`: string
+- optional `args`: object
+
+The available methods are declared by the loaded page and surfaced in `details.extension.methods` and `message_api`.
 
 Browser tile `message_api` now spells this out directly:
 
@@ -374,6 +436,12 @@ Browser tile `message_api` now spells this out directly:
     - returns `{ "format": "ascii", "text": "<ascii>", "columns": 80, "rows": 24 }` when `format` is `ascii`
     - returns `{ "format": "ansi", "text": "<ansi escape text>", "columns": 80, "rows": 24 }` when `format` is `ansi`
     - returns `{ "format": "text", "text": "<layout-preserving text grid>", "columns": 80, "rows": 24 }` when `format` is `text`
+- `extension_call`
+  - `method: string`
+  - optional `args: object`
+  - the declared methods appear as `subcommands` in `message_api`
+  - extension method results are method-specific
+  - extension `screenshot` methods use the same `image` / `braille` / `ascii` / `ansi` / `text` payload shapes as `drive > screenshot`
 
 Generic tile messages reject:
 
@@ -462,7 +530,7 @@ The current request surface includes:
 - State snapshots: `get_state_tree`, `get_projection`
 - Keyboard and command bar control: `press_keys`, `command_bar_open`, `command_bar_set_text`, `command_bar_submit`, `command_bar_cancel`
 - Toolbar and sidebar control: `toolbar_select_tab`, `toolbar_add_tab`, `toolbar_spawn_shell`, `toolbar_spawn_agent`, `toolbar_spawn_work`, `sidebar_open`, `sidebar_close`, `sidebar_select_item`, `sidebar_move_selection`, `sidebar_begin_rename`
-- Tile and canvas control: `tile_select`, `tile_close`, `tile_drag`, `tile_resize`, `tile_title_double_click`, `canvas_pan`, `canvas_context_menu`, `canvas_zoom_at`, `canvas_wheel`, `canvas_fit_all`, `canvas_reset`, `tile_context_menu`, `context_menu_select`, `context_menu_dismiss`
+- Tile and canvas control: `tile_select`, `tile_close`, `tile_drag`, `tile_resize`, `tile_title_double_click`, `canvas_pan`, `canvas_context_menu`, `canvas_zoom_at`, `canvas_wheel`, `canvas_fit_all`, `canvas_reset`, `tile_context_menu`, `port_context_menu`, `context_menu_select`, `context_menu_dismiss`
   These tile-oriented requests now take Herd `tile_id`, not tmux pane ids.
 - Close-confirm flow: `confirm_close_tab`, `cancel_close_tab`
 

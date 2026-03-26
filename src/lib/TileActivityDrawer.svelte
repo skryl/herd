@@ -6,10 +6,11 @@
 
   interface Props {
     entries: TileActivityEntry[];
+    fillAvailableSpace?: boolean;
     emptyText?: string;
   }
 
-  let { entries, emptyText = 'No activity yet' }: Props = $props();
+  let { entries, fillAvailableSpace = false, emptyText = 'No activity yet' }: Props = $props();
   let drawerRef = $state<HTMLDivElement>();
   let bodyRef = $state<HTMLDivElement>();
   let drawerHeight = $state(DEFAULT_ACTIVITY_HEIGHT);
@@ -64,7 +65,13 @@
 
 <svelte:window onmousemove={handleWindowMouseMove} onmouseup={handleWindowMouseUp} />
 
-<div bind:this={drawerRef} class="tile-activity" style={`height: ${drawerHeight}px; flex-basis: ${drawerHeight}px;`}>
+<div
+  bind:this={drawerRef}
+  class="tile-activity"
+  style={fillAvailableSpace
+    ? `min-height: ${MIN_ACTIVITY_HEIGHT}px; flex: 1 1 ${drawerHeight}px;`
+    : `height: ${drawerHeight}px; flex-basis: ${drawerHeight}px;`}
+>
   <div class="activity-header">
     <span class="activity-title">Activity</span>
     <!-- svelte-ignore a11y_no_static_element_interactions -->

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent::{LedControlCommand, LedPatternArgs};
 use crate::network::TileTypeFilter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +123,12 @@ pub enum TestDriverRequest {
         client_x: f64,
         client_y: f64,
     },
+    PortContextMenu {
+        tile_id: String,
+        port: crate::network::TilePort,
+        client_x: f64,
+        client_y: f64,
+    },
     ContextMenuSelect {
         item_id: String,
     },
@@ -192,6 +199,44 @@ pub enum SocketCommand {
         action: String,
         #[serde(default)]
         args: Option<serde_json::Value>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "self_display_draw")]
+    SelfDisplayDraw {
+        text: String,
+        columns: usize,
+        rows: usize,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "self_led_control")]
+    SelfLedControl {
+        #[serde(default)]
+        commands: Option<Vec<LedControlCommand>>,
+        #[serde(default)]
+        pattern_name: Option<String>,
+        #[serde(default)]
+        pattern_args: Option<LedPatternArgs>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "self_display_status")]
+    SelfDisplayStatus {
+        text: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "self_info")]
+    SelfInfo {
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]

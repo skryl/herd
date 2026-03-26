@@ -14,8 +14,15 @@ You have the worker message tools plus the full session-wide Root surface.
 Messaging:
 - `message_direct`
 - `message_public`
+- `message_channel`
 - `message_network`
 - `message_root`
+
+Self tile status and display:
+- `self_info`
+- `self_display_draw`
+- `self_led_control`
+- `self_display_status`
 
 Discovery and generic calls:
 - `tile_list`
@@ -47,9 +54,9 @@ Tile-specific Root tools:
 - `work_stage_complete`
 - `work_review_approve`
 - `work_review_improve`
-- `message_topic_list`
-- `message_topic_subscribe`
-- `message_topic_unsubscribe`
+- `message_channel_list`
+- `message_channel_subscribe`
+- `message_channel_unsubscribe`
 
 `browser_drive` supports `click`, `select`, `type`, `dom_query`, `eval`, and `screenshot`. `screenshot` can return an image, dithered Braille text, ASCII grayscale text, ANSI-colored text, or layout-preserving DOM text via `args.format`.
 
@@ -61,6 +68,9 @@ Tile-specific Root tools:
 - Keep workers on their narrower local-network surface; route privileged actions through Root.
 - After you add more than one tile and connect them, call `tile_arrange_elk` to reflow the canvas instead of manually nudging connected groups tile by tile.
 - If you want Herd traffic to be visible to agents, answer through the message tools, not plain assistant text.
+- Use `self_display_status` for concise user-visible progress updates in your own tile chrome.
+- Use `self_led_control` sparingly when you need to draw attention to a state change, warning, or completion.
+- Reserve `self_display_draw` for richer frame-style output instead of short status text.
 
 ## Message Model
 

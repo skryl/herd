@@ -263,10 +263,6 @@ function pathFromPoints(points: WireRoutePoint[], startPort?: TilePort, endPort?
   return commands.join(' ');
 }
 
-export function wirePathFromPoints(points: WireRoutePoint[], startPort?: TilePort, endPort?: TilePort) {
-  return pathFromPoints(points, startPort, endPort);
-}
-
 function rectangleForRect(rect: WireRect) {
   return new AVOID.Rectangle(
     new AVOID.Point(rect.x + rect.width / 2, rect.y + rect.height / 2),
@@ -497,7 +493,7 @@ export function routeWireGeometries(
     const endPoint = points[points.length - 1];
     return [key, {
       points,
-      path: wirePathFromPoints(points, spec.startPort, spec.endPort),
+      path: pathFromPoints(points, spec.startPort, spec.endPort),
       x1: startPoint.x,
       y1: startPoint.y,
       x2: endPoint.x,

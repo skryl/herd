@@ -408,6 +408,35 @@ fn touched_work_ids_from_connections(connections: &[NetworkConnection]) -> Vec<S
     ids.into_iter().collect()
 }
 
+fn invalidated_connection_for_port(
+    state: &AppState,
+    snapshot: &tmux_state::TmuxSnapshot,
+    session_id: &str,
+    descriptor: &NetworkTileDescriptor,
+    port: network::TilePort,
+    connections: &[NetworkConnection],
+    port_settings: &[network::TilePortSetting],
+) -> Result<Option<NetworkConnection>, String> {
+    let Some(connection) = network::connection_for_port(connections, &descriptor.tile_id, port) else {
+        return Ok(None);
+    };
+    let Some((other_tile_id, _other_port)) = network::other_connection_endpoint(&connection, &descriptor.tile_id, port) else {
+        return Ok(None);
+    };
+    let other = resolve_ui_network_tile_descriptor(state, snapshot, session_id, &other_tile_id)?;
+    let (from_kind, to_kind) = if connection.from_tile_id == descriptor.tile_id {
+        (descriptor.kind, other.kind)
+    } else {
+        (other.kind, descriptor.kind)
+    };
+
+    if network::connection_is_valid_for_tile_kinds(&connection, from_kind, to_kind, port_settings) {
+        Ok(None)
+    } else {
+        Ok(Some(connection))
+    }
+}
+
 fn emit_agent_debug_state(app: &tauri::AppHandle, state: &AppState) {
     let Ok(session_id) = active_or_last_session_id(state) else {
         return;
@@ -1356,6 +1385,72 @@ pub fn disconnect_network_port(
         }
     }
     Ok(removed)
+}
+
+#[tauri::command]
+pub fn set_network_port_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    tile_id: String,
+    port: String,
+    access_mode: Option<String>,
+    networking_mode: Option<String>,
+) -> Result<network::TilePortSetting, String> {
+    let snapshot = tmux_state::snapshot(&state)?;
+    let session_id = active_session_id(&snapshot)?;
+    let descriptor = resolve_ui_network_tile_descriptor(state.inner(), &snapshot, &session_id, &tile_id)?;
+    let port = network::parse_port(&port).map_err(|_| "invalid port".to_string())?;
+    let access_mode = access_mode
+        .as_deref()
+        .map(network::parse_port_mode)
+        .transpose()
+        .map_err(|_| "invalid access_mode".to_string())?;
+    let networking_mode = networking_mode
+        .as_deref()
+        .map(network::parse_port_networking_mode)
+        .transpose()
+        .map_err(|_| "invalid networking_mode".to_string())?;
+
+    let updated = network::set_port_settings_at(
+        Path::new(runtime::database_path()),
+        &descriptor.session_id,
+        &descriptor.tile_id,
+        descriptor.kind,
+        port,
+        access_mode,
+        networking_mode,
+    )?;
+
+    let connections = network::list_connections_at(Path::new(runtime::database_path()), &descriptor.session_id)?;
+    let port_settings = network::list_port_settings_at(Path::new(runtime::database_path()), &descriptor.session_id)?;
+    if invalidated_connection_for_port(
+        state.inner(),
+        &snapshot,
+        &descriptor.session_id,
+        &descriptor,
+        port,
+        &connections,
+        &port_settings,
+    )?
+    .is_some()
+    {
+        if let Some(connection) = network::disconnect_at(
+            Path::new(runtime::database_path()),
+            &descriptor.session_id,
+            &descriptor.tile_id,
+            port,
+        )? {
+            notify_agents_about_connection_change(state.inner(), &connection, false);
+            for work_id in touched_work_ids_from_connections(std::slice::from_ref(&connection)) {
+                if let Ok(item) = work::get_work_item_at(Path::new(runtime::database_path()), &work_id) {
+                    emit_work_updated(&app, &item);
+                }
+            }
+        }
+    }
+
+    emit_agent_debug_state(&app, &state);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -2431,8 +2526,16 @@ mod tests {
         assert!(root_skill.contains("tile_create"));
         assert!(root_skill.contains("browser_drive"));
         assert!(root_skill.contains("network_connect"));
+        assert!(root_skill.contains("self_led_control"));
+        assert!(root_skill.contains("self_display_status"));
+        assert!(root_skill.contains("user-visible progress updates"));
+        assert!(root_skill.contains("message_channel_subscribe"));
         assert!(worker_skill.contains("network_call"));
         assert!(worker_skill.contains("message_root"));
+        assert!(worker_skill.contains("message_channel"));
+        assert!(worker_skill.contains("self_led_control"));
+        assert!(worker_skill.contains("self_display_status"));
+        assert!(worker_skill.contains("user-visible progress updates"));
         assert!(worker_skill.contains("Do not use `tile_call`"));
         assert!(worker_skill.contains("Do not use `browser_drive`"));
     }

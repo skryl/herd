@@ -140,6 +140,7 @@ fn run_gui() {
             commands::read_work_stage_preview,
             commands::connect_network_tiles,
             commands::disconnect_network_port,
+            commands::set_network_port_settings,
             commands::get_claude_menu_data_for_pane,
             commands::save_layout_state,
             commands::new_session,

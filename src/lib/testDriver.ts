@@ -19,6 +19,7 @@ import {
   panCanvasBy,
   openCanvasContextMenu,
   openPaneContextMenu,
+  openPortContextMenu,
   paneIdForTileId,
   refreshWorkItems,
   removeTerminal,
@@ -198,6 +199,9 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
       return null;
     case 'tile_context_menu':
       openPaneContextMenu(resolvePaneId(request.tile_id), request.client_x, request.client_y);
+      return null;
+    case 'port_context_menu':
+      openPortContextMenu(request.tile_id, request.port, request.client_x, request.client_y);
       return null;
     case 'context_menu_select':
       await selectContextMenuItem(request.item_id);

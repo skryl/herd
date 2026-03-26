@@ -51,6 +51,10 @@ const MESSAGE_TOOLS = {
 } as const;
 
 const SHARED_TOOLS = {
+  selfDisplayDraw: "self_display_draw",
+  selfLedControl: "self_led_control",
+  selfDisplayStatus: "self_display_status",
+  selfInfo: "self_info",
   networkList: "network_list",
   networkGet: "network_get",
   networkCall: "network_call",
@@ -158,6 +162,26 @@ const SOCKET_PATH = resolveSocketPath();
 const INITIAL_PARENT_PID = process.ppid;
 let exitWatchInstalled = false;
 let exitingForParentLoss = false;
+const LED_COMMAND_SCHEMA = z.discriminatedUnion("op", [
+  z.object({
+    op: z.literal("on"),
+    led: z.number().int().min(1).max(8),
+    color: z.string(),
+  }),
+  z.object({
+    op: z.literal("off"),
+    led: z.number().int().min(1).max(8),
+  }),
+  z.object({
+    op: z.literal("sleep"),
+    ms: z.number().int().positive(),
+  }),
+]);
+const LED_PATTERN_ARGS_SCHEMA = z.object({
+  primary_color: z.string().optional(),
+  secondary_color: z.string().optional(),
+  delay_ms: z.number().int().positive().optional(),
+}).optional();
 
 function exitWhenParentDisappears(reason: string) {
   if (exitingForParentLoss) {
@@ -411,8 +435,8 @@ const server = new McpServer(
     },
     instructions:
       (IS_ROOT_MODE
-        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, select, type, dom_query, eval, or screenshot on browser tiles in the current session.'
-        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
+        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, select, type, dom_query, eval, or screenshot on browser tiles in the current session.'
+        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
   },
 );
 
@@ -569,6 +593,118 @@ function registerMessageTools() {
 }
 
 function registerSharedTools() {
+  registerTool(
+    SHARED_TOOLS.selfDisplayDraw,
+    "Draw a full ANSI frame into your own Herd display drawer. This only updates the calling agent's tile and requires explicit frame dimensions on every call.",
+    {
+      text: z.string(),
+      columns: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    },
+    async ({ text, columns, rows }) => {
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.selfDisplayDraw,
+          { text, columns, rows },
+          {
+            command: "self_display_draw",
+            text,
+            columns,
+            rows,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: "Display frame updated" }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    SHARED_TOOLS.selfLedControl,
+    "Control your own tile's 8-LED chrome strip for user-visible status signals with a looping command sequence or a named pattern.",
+    {
+      commands: z.array(LED_COMMAND_SCHEMA).optional(),
+      pattern_name: z.string().optional(),
+      pattern_args: LED_PATTERN_ARGS_SCHEMA,
+    },
+    async ({ commands, pattern_name, pattern_args }) => {
+      if ((commands ? 1 : 0) + (pattern_name ? 1 : 0) !== 1) {
+        return errorResult("Provide exactly one of commands or pattern_name");
+      }
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.selfLedControl,
+          {
+            ...(commands ? { commands } : {}),
+            ...(pattern_name ? { pattern_name } : {}),
+            ...(pattern_args ? { pattern_args } : {}),
+          },
+          {
+            command: "self_led_control",
+            commands,
+            pattern_name,
+            pattern_args,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: "LED strip updated" }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    SHARED_TOOLS.selfDisplayStatus,
+    "Update your own tile's single-line ANSI status strip for concise user-visible progress. Long text scrolls automatically in the tile chrome.",
+    {
+      text: z.string(),
+    },
+    async ({ text }) => {
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.selfDisplayStatus,
+          { text },
+          {
+            command: "self_display_status",
+            text,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: "Status strip updated" }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    SHARED_TOOLS.selfInfo,
+    "Return the calling tile's own tile payload using its native get path.",
+    {},
+    async () => {
+      try {
+        const resp = await sendToolCommand(
+          SHARED_TOOLS.selfInfo,
+          {},
+          {
+            command: "self_info",
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
   registerTool(
     SHARED_TOOLS.networkList,
     "List tiles on the sender's current session network component.",
