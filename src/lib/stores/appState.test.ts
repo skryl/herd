@@ -20,6 +20,7 @@ const tauriMocks = vi.hoisted(() => ({
   killPane: vi.fn(),
   killSession: vi.fn(),
   killWindow: vi.fn(),
+  listSavedSessionConfigurations: vi.fn(),
   loadBrowserWebview: vi.fn(),
   newSession: vi.fn(),
   newWindow: vi.fn(),
@@ -59,6 +60,7 @@ import {
   applyWorkItemsToState,
   autoArrange,
   autoArrangeWithElk,
+  alignSessionToGrid,
   beginNetworkPortDrag,
   beginSidebarRename,
   bootstrapAppState,
@@ -77,6 +79,8 @@ import {
   clearCurrentNetworkDragPortSnap,
   completeNetworkPortDrag,
   dismissContextMenuInState,
+  dragTileBy,
+  dragWorkCardBy,
   fitCanvasToActiveTab,
   initialAppState,
   networkReleaseAnimation,
@@ -84,6 +88,8 @@ import {
   openPaneContextMenuInState,
   openPortContextMenuInState,
   openPaneContextMenu,
+  selectTile,
+  selectWorkItem,
   parseCommandBarCommand,
   portCanAcceptCurrentDrag,
   reduceContextMenuSelection,
@@ -96,6 +102,8 @@ import {
   channelInfos,
   togglePaneMinimized,
   toggleWorkCardMinimized,
+  updateTerminal,
+  updateWorkCardLayout,
   updateNetworkPortDrag,
   zoomCanvasAtPoint,
 } from './appState';
@@ -220,8 +228,24 @@ function baseSnapshot(): TmuxSnapshot {
     active_window_id: '@1',
     active_pane_id: '%1',
     sessions: [
-      { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2'], active_window_id: '@1', root_cwd: '/Users/skryl/Dev/herd' },
-      { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3', root_cwd: '/Users/skryl/Dev/herd/src-tauri' },
+      {
+        id: '$1',
+        name: 'Main',
+        active: true,
+        window_ids: ['@1', '@2'],
+        active_window_id: '@1',
+        root_cwd: '/Users/skryl/Dev/herd',
+        browser_backend: 'live_webview',
+      },
+      {
+        id: '$2',
+        name: 'Build',
+        active: false,
+        window_ids: ['@3'],
+        active_window_id: '@3',
+        root_cwd: '/Users/skryl/Dev/herd/src-tauri',
+        browser_backend: 'live_webview',
+      },
     ],
     windows: [
       { id: '@1', tile_id: tileForWindow('@1'), session_id: '$1', session_name: 'Main', index: 0, name: 'shell', active: true, cols: 80, rows: 24, pane_ids: ['%1'] },
@@ -336,6 +360,7 @@ beforeEach(() => {
     port_settings: [],
   });
   tauriMocks.getBrowserExtensionPages.mockResolvedValue([]);
+  tauriMocks.listSavedSessionConfigurations.mockResolvedValue([]);
   tauriMocks.getWorkItems.mockResolvedValue([]);
   tauriMocks.loadBrowserWebview.mockResolvedValue(undefined);
   tauriMocks.resizeWindow.mockResolvedValue(undefined);
@@ -406,7 +431,7 @@ describe('applyTmuxSnapshotToState', () => {
       ...baseSnapshot(),
       version: 2,
       sessions: [
-        { id: '$1', name: 'Main', active: true, window_ids: ['@1'], active_window_id: '@1' },
+        { id: '$1', name: 'Main', active: true, window_ids: ['@1'], active_window_id: '@1', browser_backend: 'live_webview' },
       ],
       windows: [
         { ...baseSnapshot().windows[0], active: true },
@@ -435,8 +460,8 @@ describe('applyTmuxSnapshotToState', () => {
       active_window_id: '@3',
       active_pane_id: '%3',
       sessions: [
-        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1' },
-        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3' },
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
       ],
       windows: [
         { ...baseSnapshot().windows[0], active: true },
@@ -461,8 +486,8 @@ describe('applyTmuxSnapshotToState', () => {
       ...baseSnapshot(),
       version: 2,
       sessions: [
-        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1' },
-        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3' },
+        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
       ],
       windows: [
         { ...baseSnapshot().windows[0] },
@@ -509,6 +534,11 @@ describe('applyTmuxSnapshotToState', () => {
 describe('network connectors', () => {
   it('defaults tile port count to four total ports', () => {
     expect(initialAppState.ui.tilePortCount).toBe(4);
+  });
+
+  it('enables canvas grid snapping by default', () => {
+    expect(initialAppState.ui.gridSnapEnabled).toBe(true);
+    expect(initialAppState.ui.gridSnapSize).toBe(20);
   });
 
   it('enables network call sparks by default', () => {
@@ -1006,8 +1036,8 @@ describe('work state', () => {
       active_window_id: '@3',
       active_pane_id: '%3',
       sessions: [
-        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', root_cwd: '/Users/skryl/Dev/herd' },
-        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', root_cwd: '/Users/skryl/Dev/herd/src-tauri' },
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', root_cwd: '/Users/skryl/Dev/herd', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', root_cwd: '/Users/skryl/Dev/herd/src-tauri', browser_backend: 'live_webview' },
       ],
     });
     appState.set(switched);
@@ -1470,8 +1500,8 @@ describe('reduceIntent', () => {
       active_window_id: '@3',
       active_pane_id: '%3',
       sessions: [
-        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1' },
-        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3' },
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
       ],
     });
 
@@ -1503,8 +1533,8 @@ describe('reduceIntent', () => {
       active_window_id: '@3',
       active_pane_id: '%3',
       sessions: [
-        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1' },
-        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3' },
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
       ],
     });
 
@@ -1536,15 +1566,80 @@ describe('reduceIntent', () => {
     ]);
   });
 
+  it('does not move a locked selected tile with keyboard movement', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400, locked: true } as AppStateTree['layout']['entries'][string];
+    state.ui.selectedPaneId = '%1';
+
+    const result = reduceIntent(state, { type: 'move-selected-pane', dx: 40, dy: 60 });
+    expect(result.effects).toEqual([]);
+    expect(result.state.layout.entries[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400, locked: true });
+  });
+
+  it('restores canvas pan and zoom per session when the active tab changes', () => {
+    const sessionOneCanvas = { panX: 33, panY: 44, zoom: 0.75 };
+    const sessionTwoCanvas = { panX: -120, panY: 90, zoom: 1.4 };
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.canvas = sessionOneCanvas;
+    state.ui.canvasBySession = {
+      '$1': sessionOneCanvas,
+      '$2': sessionTwoCanvas,
+    };
+
+    let switched = applyTmuxSnapshotToState(state, {
+      ...baseSnapshot(),
+      version: 2,
+      active_session_id: '$2',
+      active_window_id: '@3',
+      active_pane_id: '%3',
+      sessions: [
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
+      ],
+      windows: [
+        { ...baseSnapshot().windows[0], active: false },
+        { ...baseSnapshot().windows[1], active: false },
+        { ...baseSnapshot().windows[2], active: true },
+      ],
+      panes: [
+        { ...baseSnapshot().panes[0], active: false },
+        { ...baseSnapshot().panes[1], active: false },
+        { ...baseSnapshot().panes[2], active: true },
+      ],
+    });
+
+    expect(switched.ui.canvas).toEqual(sessionTwoCanvas);
+    expect(switched.ui.canvasBySession).toEqual({
+      '$1': sessionOneCanvas,
+      '$2': sessionTwoCanvas,
+    });
+
+    const updatedSessionTwoCanvas = { panX: 18, panY: -72, zoom: 1.1 };
+    switched.ui.canvas = updatedSessionTwoCanvas;
+    switched.ui.canvasBySession = {
+      ...switched.ui.canvasBySession,
+      '$2': updatedSessionTwoCanvas,
+    };
+
+    const returned = applyTmuxSnapshotToState(switched, baseSnapshot());
+    expect(returned.ui.canvas).toEqual(sessionOneCanvas);
+    expect(returned.ui.canvasBySession).toEqual({
+      '$1': sessionOneCanvas,
+      '$2': updatedSessionTwoCanvas,
+    });
+  });
+
   it('updates local ui state for overlays and mode changes', () => {
     let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
     state = reduceIntent(state, { type: 'toggle-sidebar' }).state;
+    state = reduceIntent(state, { type: 'toggle-settings-sidebar' }).state;
     state = reduceIntent(state, { type: 'toggle-debug' }).state;
     state = reduceIntent(state, { type: 'open-command-bar' }).state;
     state = reduceIntent(state, { type: 'open-help' }).state;
     state = reduceIntent(state, { type: 'enter-input-mode' }).state;
 
-    expect(state.ui.sidebarOpen).toBe(true);
+    expect(state.ui.sidebarOpen).toBe(false);
+    expect(state.ui.settingsSidebarOpen).toBe(true);
     expect(state.ui.debugPaneOpen).toBe(true);
     expect(state.ui.commandBarOpen).toBe(true);
     expect(state.ui.helpOpen).toBe(true);
@@ -1633,6 +1728,51 @@ describe('reduceIntent', () => {
     expect(state.ui.zoomBookmark).toBeNull();
   });
 
+  it('restores the per-session zoom bookmark and canvas when returning to a tab', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.canvas = { panX: 12, panY: 24, zoom: 0.9 };
+    state.ui.canvasBySession = { '$1': { panX: 12, panY: 24, zoom: 0.9 } };
+
+    state = reduceIntent(state, {
+      type: 'toggle-selected-zoom',
+      viewportWidth: 1000,
+      viewportHeight: 600,
+    }).state;
+
+    const sessionOneZoomedCanvas = state.ui.canvas;
+    const sessionOneBookmark = state.ui.zoomBookmark;
+    expect(sessionOneBookmark).toBeTruthy();
+
+    const switched = applyTmuxSnapshotToState(state, {
+      ...baseSnapshot(),
+      version: 2,
+      active_session_id: '$2',
+      active_window_id: '@3',
+      active_pane_id: '%3',
+      sessions: [
+        { id: '$1', name: 'Main', active: false, window_ids: ['@1', '@2'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: true, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
+      ],
+      windows: [
+        { ...baseSnapshot().windows[0], active: false },
+        { ...baseSnapshot().windows[1], active: false },
+        { ...baseSnapshot().windows[2], active: true },
+      ],
+      panes: [
+        { ...baseSnapshot().panes[0], active: false },
+        { ...baseSnapshot().panes[1], active: false },
+        { ...baseSnapshot().panes[2], active: true },
+      ],
+    });
+
+    expect(switched.ui.zoomBookmark).toBeNull();
+    expect(switched.ui.zoomBookmarkBySession['$1']).toEqual(sessionOneBookmark);
+
+    const returned = applyTmuxSnapshotToState(switched, baseSnapshot());
+    expect(returned.ui.canvas).toEqual(sessionOneZoomedCanvas);
+    expect(returned.ui.zoomBookmark).toEqual(sessionOneBookmark);
+  });
+
   it('maps rename controls to session and window naming effects', () => {
     const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
     expect(reduceIntent(state, { type: 'rename-selected-pane', name: 'server' }).effects).toEqual([
@@ -1704,11 +1844,11 @@ describe('reduceIntent', () => {
     expect(state.ui.selectedWorkId).toBe('work-s1-002');
 
     state = reduceIntent(state, { type: 'move-sidebar-section', delta: -1 }).state;
-    expect(state.ui.sidebarSection).toBe('settings');
+    expect(state.ui.sidebarSection).toBe('work');
 
     state = reduceIntent(state, { type: 'move-sidebar-section', delta: 1 }).state;
-    expect(state.ui.sidebarSection).toBe('work');
-    expect(state.ui.selectedWorkId).toBe('work-s1-002');
+    expect(state.ui.sidebarSection).toBe('agents');
+    expect(state.ui.selectedPaneId).toBe('%2');
   });
 
   it('shows the same agent context menu for root and worker agents', () => {
@@ -1727,6 +1867,7 @@ describe('reduceIntent', () => {
       },
       { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
       { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
       { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
       { id: 'claude-loading', label: 'Loading…', kind: 'status', disabled: true },
@@ -2183,7 +2324,9 @@ describe('context menu state', () => {
       target: 'canvas',
       paneId: null,
       tileId: null,
+      workId: null,
       portId: null,
+      selectionTileIds: [],
       clientX: 320,
       clientY: 250,
       worldX: 110,
@@ -2203,12 +2346,30 @@ describe('context menu state', () => {
     state = openPaneContextMenuInState(state, '%2', 640, 360);
 
     expect(state.ui.selectedPaneId).toBe('%2');
-    expect(state.ui.contextMenu?.target).toBe('pane');
+    expect(state.ui.contextMenu?.target).toBe('tile');
     expect(state.ui.contextMenu?.paneId).toBe('%2');
     expect(state.ui.contextMenu?.tileId).toBe(tileForPane('%2'));
     expect(state.ui.contextMenu?.portId).toBeNull();
     expect(buildContextMenuItems(state)).toEqual([
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
+    ]);
+  });
+
+  it('collapses tile context menus to close and lock actions when multiple tiles are selected', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = {
+      ...state,
+      ui: {
+        ...state.ui,
+        selectedTileIds: [tileForPane('%1'), tileForPane('%2')],
+      },
+    } as AppStateTree;
+    state = openPaneContextMenuInState(state, '%2', 640, 360);
+
+    expect(buildContextMenuItems(state)).toEqual([
+      { id: 'close-tiles', label: 'Close', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
     ]);
   });
 
@@ -2294,6 +2455,7 @@ describe('context menu state', () => {
       },
       { id: 'separator-browser-load', label: '', kind: 'separator', disabled: true },
       { id: 'close-shell', label: 'Close Browser', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
     ]);
   });
 
@@ -2366,8 +2528,8 @@ describe('context menu state', () => {
       ...baseSnapshot(),
       version: 2,
       sessions: [
-        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1' },
-        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3' },
+        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
       ],
       windows: [
         ...baseSnapshot().windows,
@@ -2429,6 +2591,7 @@ describe('context menu state', () => {
       { id: 'claude-skills', label: 'Skills', kind: 'submenu', disabled: false, children: [{ id: 'skills-loading', label: 'Loading…', kind: 'status', disabled: true }] },
       { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
       { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
       { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
       { id: 'claude-loading', label: 'Loading…', kind: 'status', disabled: true },
@@ -2463,6 +2626,7 @@ describe('context menu state', () => {
       },
       { id: 'separator-skills', label: '', kind: 'separator', disabled: true },
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
       { id: 'separator-claude', label: '', kind: 'separator', disabled: true },
       { id: 'claude-label', label: 'Claude Commands', kind: 'label', disabled: true },
       { id: 'claude-command:clear', label: '/clear', kind: 'action', disabled: false },
@@ -2472,6 +2636,7 @@ describe('context menu state', () => {
     state = applyPaneRoleToState(state, '%1', 'output');
     expect(buildContextMenuItems(state)).toEqual([
       { id: 'close-shell', label: 'Close Shell', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: 'Lock', kind: 'action', disabled: false },
     ]);
   });
 
@@ -2534,6 +2699,169 @@ describe('context menu state', () => {
       claudeCommands: [{ name: 'model', execution: 'insert', source: 'builtin' }],
       claudeSkills: [{ name: 'herd-root', execution: 'execute', source: 'skill' }],
     });
+  });
+});
+
+describe('tile selection', () => {
+  it('replaces tile selection on click and extends it on shift-click', () => {
+    appState.set(applyTmuxSnapshotToState(freshState(), baseSnapshot()));
+
+    selectTile('%1');
+    expect(get(appState).ui.selectedTileIds).toEqual([tileForPane('%1')]);
+
+    selectTile('%2', true);
+    expect(get(appState).ui.selectedTileIds).toEqual([tileForPane('%2'), tileForPane('%1')]);
+    expect(get(appState).ui.selectedPaneId).toBe('%2');
+  });
+
+  it('allows shift-clicking work tiles into the selection', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    appState.set(state);
+
+    selectTile('%1');
+    selectWorkItem('work-s1-001', true);
+
+    expect(get(appState).ui.selectedTileIds).toEqual([tileForWork('work-s1-001'), tileForPane('%1')]);
+    expect(get(appState).ui.selectedWorkId).toBe('work-s1-001');
+  });
+});
+
+describe('canvas grid snapping', () => {
+  it('snaps live terminal drag position updates to the configured grid size when enabled', () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.ui.gridSnapEnabled = true;
+    state.ui.gridSnapSize = 40;
+    appState.set(state);
+
+    updateTerminal('%1', { x: 113, y: 119 });
+
+    expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 120, y: 120, width: 640, height: 400 });
+  });
+
+  it('snaps live work card drag position updates to the configured grid size when enabled', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 200, y: 220, width: 300, height: 240 };
+    state.ui.gridSnapEnabled = true;
+    state.ui.gridSnapSize = 40;
+    appState.set(state);
+
+    updateWorkCardLayout('work-s1-001', { x: 217, y: 231 });
+
+    expect(get(appState).layout.entries[tileForWork('work-s1-001')]).toEqual({ x: 200, y: 240, width: 300, height: 240 });
+  });
+
+  it('snaps tile drags to the configured grid size when enabled', async () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.ui.gridSnapEnabled = true;
+    state.ui.gridSnapSize = 40;
+    appState.set(state);
+
+    await dragTileBy('%1', 13, 19, false);
+
+    expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 120, y: 120, width: 640, height: 400 });
+  });
+
+  it('allows free-floating tile drags when snapping is disabled', async () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.ui.gridSnapEnabled = false;
+    appState.set(state);
+
+    await dragTileBy('%1', 13, 19, false);
+
+    expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 113, y: 119, width: 640, height: 400 });
+  });
+
+  it('allows free-floating work card drags when snapping is disabled', async () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 200, y: 220, width: 300, height: 240 };
+    state.ui.gridSnapEnabled = false;
+    appState.set(state);
+
+    await dragWorkCardBy('work-s1-001', 17, 11, false);
+
+    expect(get(appState).layout.entries[tileForWork('work-s1-001')]).toEqual({ x: 217, y: 231, width: 300, height: 240 });
+  });
+
+  it('uses free-floating placement for new tiles when snapping is disabled', () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.ui.gridSnapEnabled = false;
+    state.ui.canvas = { panX: 0, panY: 0, zoom: 1 };
+    state = openCanvasContextMenuInState(state, 113, 97);
+    state = reduceContextMenuSelection(state, 'new-shell').state;
+
+    const next = applyTmuxSnapshotToState(state, {
+      ...baseSnapshot(),
+      version: 2,
+      sessions: [
+        { id: '$1', name: 'Main', active: true, window_ids: ['@1', '@2', '@4'], active_window_id: '@1', browser_backend: 'live_webview' },
+        { id: '$2', name: 'Build', active: false, window_ids: ['@3'], active_window_id: '@3', browser_backend: 'live_webview' },
+      ],
+      windows: [
+        ...baseSnapshot().windows,
+        {
+          id: '@4',
+          tile_id: tileForWindow('@4'),
+          session_id: '$1',
+          session_name: 'Main',
+          index: 2,
+          name: 'shell-3',
+          active: false,
+          cols: 80,
+          rows: 24,
+          pane_ids: ['%4'],
+        },
+      ],
+      panes: [
+        ...baseSnapshot().panes,
+        {
+          id: '%4',
+          tile_id: tileForPane('%4'),
+          session_id: '$1',
+          window_id: '@4',
+          window_index: 2,
+          pane_index: 0,
+          cols: 80,
+          rows: 24,
+          title: 'shell-3',
+          command: 'zsh',
+          active: false,
+          dead: false,
+        },
+      ],
+    });
+
+    expect(next.layout.entries[tileForWindow('@4')]).toMatchObject({
+      x: 113,
+      y: 97,
+    });
+  });
+});
+
+describe('alignSessionToGrid', () => {
+  it('snaps the active session tile positions to the nearest configured grid points and persists them', async () => {
+    let state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 113, y: 97, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 278, y: 161, width: 640, height: 400 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 201, y: 259, width: 300, height: 240 };
+    state.ui.gridSnapSize = 40;
+    appState.set(state);
+
+    await alignSessionToGrid('$1');
+
+    const next = get(appState);
+    expect(next.layout.entries[tileForWindow('@1')]).toEqual({ x: 120, y: 80, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@2')]).toEqual({ x: 280, y: 160, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWork('work-s1-001')]).toEqual({ x: 200, y: 240, width: 300, height: 240 });
+    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWindow('@1'), 120, 80, 640, 400, false);
+    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWindow('@2'), 280, 160, 640, 400, false);
+    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWork('work-s1-001'), 200, 240, 300, 240, false);
   });
 });
 
@@ -2615,8 +2943,22 @@ describe('autoArrange', () => {
     expect(next.ui.arrangementModeBySession['$1']).toBe('circle');
     expect(next.ui.arrangementCycleBySession['$1']).toBe(1);
     expect(tauriMocks.saveLayoutState).toHaveBeenCalledTimes(2);
-    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(1, tileForWindow('@1'), 100, 100, 640, 400);
-    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(2, tileForWindow('@2'), 100, -700, 640, 400);
+    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(1, tileForWindow('@1'), 100, 100, 640, 400, false);
+    expect(tauriMocks.saveLayoutState).toHaveBeenNthCalledWith(2, tileForWindow('@2'), 100, -700, 640, 400, false);
+  });
+
+  it('does not move locked tiles during regular auto-arrange', async () => {
+    const state = applyTmuxSnapshotToState(freshState(), baseSnapshot());
+    state.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 640, height: 400 };
+    state.layout.entries[tileForWindow('@2')] = { x: 880, y: 60, width: 640, height: 400, locked: true } as any;
+    state.ui.selectedPaneId = '%1';
+    appState.set(state);
+
+    await autoArrange('$1');
+
+    const next = get(appState);
+    expect(next.layout.entries[tileForWindow('@1')]).toEqual({ x: 100, y: 100, width: 640, height: 400 });
+    expect(next.layout.entries[tileForWindow('@2')]).toEqual({ x: 880, y: 60, width: 640, height: 400, locked: true });
   });
 
   it('advances through the remaining arrangement cycle on repeated calls', async () => {
@@ -2802,6 +3144,51 @@ describe('autoArrange', () => {
     ]));
   });
 
+  it('does not move locked tiles during elk auto-arrange', async () => {
+    let state = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
+    state = applyWorkItemsToState(state, [sampleWorkItem()]);
+    state.layout.entries[tileForWindow('@1')] = { x: 120, y: 120, width: 320, height: 200 };
+    state.layout.entries[tileForWindow('@2')] = { x: 900, y: 80, width: 420, height: 260 };
+    state.layout.entries[tileForWindow('@4')] = { x: 520, y: 700, width: 360, height: 220 };
+    state.layout.entries[tileForWork('work-s1-001')] = { x: 1440, y: 440, width: 300, height: 240, locked: true } as any;
+    state.ui.selectedPaneId = '%2';
+    state.network.connections = [
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@1'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@2'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@2'),
+        from_port: 'right',
+        to_tile_id: tileForWindow('@4'),
+        to_port: 'left',
+      },
+      {
+        session_id: '$1',
+        from_tile_id: tileForWindow('@2'),
+        from_port: 'bottom',
+        to_tile_id: tileForWork('work-s1-001'),
+        to_port: 'top',
+      },
+    ];
+    appState.set(state);
+
+    await autoArrangeWithElk('$1');
+
+    const next = get(appState);
+    expect(next.layout.entries[tileForWork('work-s1-001')]).toEqual({
+      x: 1440,
+      y: 440,
+      width: 300,
+      height: 240,
+      locked: true,
+    });
+  });
+
   it('preserves elk mode across session growth without falling back to the lowercase cycle', () => {
     const initial = applyTmuxSnapshotToState(freshState(), snapshotWithMainWindowCount(4));
     initial.layout.entries[tileForWindow('@1')] = { x: 100, y: 100, width: 320, height: 220 };
@@ -2930,7 +3317,7 @@ describe('window sizing helpers', () => {
     });
 
     expect(get(appState).layout.entries[tileForWindow('@1')]).toEqual({ x: 0, y: 0, width: 790, height: 464 });
-    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWindow('@1'), 0, 0, 790, 464);
+    expect(tauriMocks.saveLayoutState).toHaveBeenCalledWith(tileForWindow('@1'), 0, 0, 790, 464, false);
   });
 
   it('does not snap unrelated tiles when another tile in the session is resized', async () => {

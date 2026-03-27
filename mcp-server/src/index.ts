@@ -60,12 +60,21 @@ const SHARED_TOOLS = {
   networkCall: "network_call",
 } as const;
 
+const WORKER_ONLY_TOOLS = {
+  networkSubscribe: "network_subscribe",
+  networkUnsubscribe: "network_unsubscribe",
+  networkSubscriptionList: "network_subscription_list",
+} as const;
+
 const ROOT_TOOLS = {
   tileCreate: "tile_create",
   tileDestroy: "tile_destroy",
   tileList: "tile_list",
   tileRename: "tile_rename",
   tileCall: "tile_call",
+  tileSubscribe: "tile_subscribe",
+  tileUnsubscribe: "tile_unsubscribe",
+  tileSubscriptionList: "tile_subscription_list",
   shellInputSend: "shell_input_send",
   shellExec: "shell_exec",
   shellOutputRead: "shell_output_read",
@@ -90,9 +99,10 @@ const ROOT_TOOLS = {
 
 export const MESSAGE_TOOL_NAMES = Object.freeze([...Object.values(MESSAGE_TOOLS)]);
 export const SHARED_TOOL_NAMES = Object.freeze([...Object.values(SHARED_TOOLS)]);
-export const WORKER_TOOL_NAMES = Object.freeze([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES]);
+export const WORKER_ONLY_TOOL_NAMES = Object.freeze([...Object.values(WORKER_ONLY_TOOLS)]);
+export const WORKER_TOOL_NAMES = Object.freeze([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES, ...WORKER_ONLY_TOOL_NAMES]);
 export const ROOT_ONLY_TOOL_NAMES = Object.freeze([...Object.values(ROOT_TOOLS)]);
-export const ROOT_TOOL_NAMES = Object.freeze([...WORKER_TOOL_NAMES, ...ROOT_ONLY_TOOL_NAMES]);
+export const ROOT_TOOL_NAMES = Object.freeze([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES, ...ROOT_ONLY_TOOL_NAMES]);
 
 type SocketResponse = { ok: boolean; data?: unknown; error?: string };
 type HerdToolSchema = Record<string, z.ZodTypeAny>;
@@ -110,7 +120,7 @@ type BrowserTextScreenshotPayload = {
 type AgentStreamEnvelope = {
   type: "event";
   event: {
-    kind: "direct" | "public" | "channel" | "network" | "root" | "system" | "ping";
+    kind: "direct" | "public" | "channel" | "network" | "root" | "tile_event" | "system" | "ping";
     from_agent_id?: string | null;
     from_display_name: string;
     to_agent_id?: string | null;
@@ -120,6 +130,20 @@ type AgentStreamEnvelope = {
     mentions?: string[];
     replay?: boolean;
     ping_id?: string | null;
+    delivery_reason?: "subscription" | "implicit_self_target" | null;
+    subscription_scope?: "tile" | "network" | null;
+    subscription_direction?: "in" | "out" | "both" | null;
+    action?: string | null;
+    subject_tile_id?: string | null;
+    peer_tile_id?: string | null;
+    caller_tile_id?: string | null;
+    caller_agent_id?: string | null;
+    target_tile_id?: string | null;
+    target_agent_id?: string | null;
+    rpc_channel?: string | null;
+    outcome?: string | null;
+    args_json?: unknown;
+    result_json?: unknown;
     timestamp_ms: number;
   };
 };
@@ -336,6 +360,13 @@ function errorResult(msg: string) {
 function safeMetaValue(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
   if (Array.isArray(value)) return value.join(",");
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined;
+    }
+  }
   return String(value);
 }
 
@@ -349,6 +380,20 @@ function buildChannelMeta(event: AgentStreamEnvelope["event"]) {
     channels: event.channels?.join(","),
     mentions: event.mentions?.join(","),
     replay: event.replay ? "true" : "false",
+    delivery_reason: event.delivery_reason,
+    subscription_scope: event.subscription_scope,
+    subscription_direction: event.subscription_direction,
+    action: event.action,
+    subject_tile_id: event.subject_tile_id,
+    peer_tile_id: event.peer_tile_id,
+    caller_tile_id: event.caller_tile_id,
+    caller_agent_id: event.caller_agent_id,
+    target_tile_id: event.target_tile_id,
+    target_agent_id: event.target_agent_id,
+    rpc_channel: event.rpc_channel,
+    outcome: event.outcome,
+    args_json: event.args_json,
+    result_json: event.result_json,
     timestamp_ms: String(event.timestamp_ms),
   };
   return Object.fromEntries(
@@ -435,8 +480,8 @@ const server = new McpServer(
     },
     instructions:
       (IS_ROOT_MODE
-        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Root may also use browser_drive for click, select, type, dom_query, eval, or screenshot on browser tiles in the current session.'
-        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, and timestamp_ms. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands.'),
+        ? 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, timestamp_ms, and for tile_event also delivery_reason, subscription_scope, subscription_direction, action, subject_tile_id, peer_tile_id, caller_tile_id, caller_agent_id, target_tile_id, target_agent_id, rpc_channel, outcome, args_json, and result_json. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="tile_event" is a live tile-call event notification. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect local tiles with network_list or network_get, use network_call or tile_call with the tile-specific message names exposed in responds_to, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Use tile_subscribe, tile_unsubscribe, and tile_subscription_list to manage session-wide tile event subscriptions for agents. Root may also use browser_drive for click, select, type, dom_query, eval, or screenshot on browser tiles in the current session.'
+        : 'Messages arrive as <channel source="herd" kind="..."> with metadata including from_agent_id, from_display_name, to_agent_id, to_display_name, channels, mentions, replay, timestamp_ms, and for tile_event also delivery_reason, subscription_scope, subscription_direction, action, subject_tile_id, peer_tile_id, caller_tile_id, caller_agent_id, target_tile_id, target_agent_id, rpc_channel, outcome, args_json, and result_json. kind="direct" is private coordination. kind="public" is session-wide chatter. kind="channel" is subscription-gated channel chatter. kind="network" is local network coordination. kind="root" is traffic for the session root agent. kind="tile_event" is a live tile-call event notification. kind="system" is Herd lifecycle information. Treat replay="true" as historical context rather than a fresh request, and treat replay="false" as live traffic. If you want Herd or other agents to see your reply, respond through the Herd messaging tools such as message_direct, message_public, message_channel, message_network, or message_root. Plain assistant text in the local session does not publish a reply back onto the Herd channels. Use self_info to inspect your own tile, self_display_draw for the drawer, self_led_control for the chrome LED strip, and self_display_status for the chrome status line. Use the LED strip and status line for concise user-visible status updates, and reserve self_display_draw for richer frame output. For local tool interaction, inspect your connected component with network_list or network_get, use network_call with the tile-specific message names exposed in responds_to for local-network tiles, and inspect message_api on the returned tile payload for the required args and browser drive subcommands. Use network_subscribe, network_unsubscribe, and network_subscription_list with selectors like in:exec, out:get, or both:extension_call to watch local-network tile activity.'),
   },
 );
 
@@ -793,6 +838,87 @@ function registerSharedTools() {
 
 }
 
+function registerWorkerOnlyTools() {
+  registerTool(
+    WORKER_ONLY_TOOLS.networkSubscribe,
+    "Subscribe your agent to live tile_event notifications for a network-visible tile using a selector like in:exec, out:get, both:extension_call, or *:navigate.",
+    {
+      tile_id: z.string(),
+      event: z.string(),
+    },
+    async ({ tile_id, event }) => {
+      try {
+        const resp = await sendToolCommand(
+          WORKER_ONLY_TOOLS.networkSubscribe,
+          { tile_id, event },
+          {
+            command: "network_subscribe",
+            tile_id,
+            event,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    WORKER_ONLY_TOOLS.networkUnsubscribe,
+    "Remove one of your agent's network tile-event subscriptions using the same selector syntax passed to network_subscribe.",
+    {
+      tile_id: z.string(),
+      event: z.string(),
+    },
+    async ({ tile_id, event }) => {
+      try {
+        const resp = await sendToolCommand(
+          WORKER_ONLY_TOOLS.networkUnsubscribe,
+          { tile_id, event },
+          {
+            command: "network_unsubscribe",
+            tile_id,
+            event,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    WORKER_ONLY_TOOLS.networkSubscriptionList,
+    "List your current network tile-event subscriptions, optionally filtered to one subject tile.",
+    {
+      tile_id: z.string().optional(),
+    },
+    async ({ tile_id }) => {
+      try {
+        const resp = await sendToolCommand(
+          WORKER_ONLY_TOOLS.networkSubscriptionList,
+          tile_id ? { tile_id } : {},
+          {
+            command: "network_subscription_list",
+            tile_id,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+}
+
 function registerRootTools() {
   registerTool(
     ROOT_TOOLS.browserDrive,
@@ -857,6 +983,94 @@ function registerRootTools() {
         if (screenshotResult) {
           return screenshotResult;
         }
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    ROOT_TOOLS.tileSubscribe,
+    "Subscribe an agent to live tile_event notifications for any same-session tile using a selector like in:exec, out:get, both:extension_call, or *:navigate.",
+    {
+      tile_id: z.string(),
+      event: z.string(),
+      agent_id: z.string(),
+    },
+    async ({ tile_id, event, agent_id }) => {
+      try {
+        const resp = await sendToolCommand(
+          ROOT_TOOLS.tileSubscribe,
+          { tile_id, event, agent_id },
+          {
+            command: "tile_subscribe",
+            tile_id,
+            event,
+            agent_id,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    ROOT_TOOLS.tileUnsubscribe,
+    "Remove one tile_event subscription from an agent using the same selector previously used with tile_subscribe.",
+    {
+      tile_id: z.string(),
+      event: z.string(),
+      agent_id: z.string(),
+    },
+    async ({ tile_id, event, agent_id }) => {
+      try {
+        const resp = await sendToolCommand(
+          ROOT_TOOLS.tileUnsubscribe,
+          { tile_id, event, agent_id },
+          {
+            command: "tile_unsubscribe",
+            tile_id,
+            event,
+            agent_id,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
+        return { content: [{ type: "text", text: jsonText(resp.data) }] };
+      } catch (err) {
+        return errorResult(String(err));
+      }
+    },
+  );
+
+  registerTool(
+    ROOT_TOOLS.tileSubscriptionList,
+    "List the current root-managed tile_event subscriptions in the session, optionally filtered by subject tile or subscriber agent.",
+    {
+      tile_id: z.string().optional(),
+      agent_id: z.string().optional(),
+    },
+    async ({ tile_id, agent_id }) => {
+      try {
+        const resp = await sendToolCommand(
+          ROOT_TOOLS.tileSubscriptionList,
+          {
+            ...(tile_id ? { tile_id } : {}),
+            ...(agent_id ? { agent_id } : {}),
+          },
+          {
+            command: "tile_subscription_list",
+            tile_id,
+            agent_id,
+            ...senderContext(),
+          },
+        );
+        if (!resp.ok) return errorResult(resp.error || "Unknown error");
         return { content: [{ type: "text", text: jsonText(resp.data) }] };
       } catch (err) {
         return errorResult(String(err));
@@ -1377,6 +1591,8 @@ registerMessageTools();
 registerSharedTools();
 if (IS_ROOT_MODE) {
   registerRootTools();
+} else {
+  registerWorkerOnlyTools();
 }
 
 export async function main() {

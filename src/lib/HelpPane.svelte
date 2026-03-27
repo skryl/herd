@@ -20,6 +20,7 @@
         { key: 'i', desc: 'enter input mode for the selected shell' },
         { key: 'Shift+Esc', desc: 'leave input mode and return to command mode' },
         { key: 'b', desc: 'toggle the tmux tree sidebar' },
+        { key: ',', desc: 'toggle the settings sidebar' },
         { key: 'd', desc: 'toggle the debug pane' },
       ],
     },
@@ -48,8 +49,8 @@
         { key: 'Shift+=', desc: 'zoom the canvas in' },
         { key: 'f', desc: 'fit all shells in view' },
         { key: '0', desc: 'reset canvas zoom and pan' },
-        { key: 'a', desc: 'cycle anchored shell arrangements starting with circle and snowflake, then fit view' },
-        { key: 'Shift+A', desc: 'arrange the current session with ELK using tile connections and port sides' },
+        { key: 'a', desc: 'align the current session to the nearest grid points using the current grid size' },
+        { key: 'Shift+A', desc: 'arrange the current session with ELK first, then cycle circle, snowflake, stack-down, stack-right, and spiral' },
       ],
     },
     {
@@ -68,7 +69,7 @@
       ],
     },
     {
-      title: 'SIDEBAR',
+      title: 'TREE SIDEBAR',
       rows: [
         { key: 'Shift+j / Shift+k', desc: 'focus the next / previous sidebar section' },
         { key: 'j / k', desc: 'move within the focused sidebar section' },
@@ -76,7 +77,14 @@
         { key: 'r', desc: 'prefill a rename command for the selected item' },
         { key: 'z', desc: 'zoom to the selected shell' },
         { key: 'Z', desc: 'fullscreen zoom the selected shell' },
-        { key: 'Esc / b', desc: 'close the sidebar' },
+        { key: 'Esc / b', desc: 'close the tree sidebar' },
+      ],
+    },
+    {
+      title: 'SETTINGS SIDEBAR',
+      rows: [
+        { key: ',', desc: 'toggle the settings sidebar' },
+        { key: 'Esc / ,', desc: 'close the settings sidebar' },
       ],
     },
     {

@@ -152,6 +152,14 @@ export class HerdTestClient {
     await this.testDriver({ type: 'sidebar_close' });
   }
 
+  async settingsSidebarOpen() {
+    await this.testDriver({ type: 'settings_sidebar_open' });
+  }
+
+  async settingsSidebarClose() {
+    await this.testDriver({ type: 'settings_sidebar_close' });
+  }
+
   async sidebarSelectItem(index: number) {
     await this.testDriver({ type: 'sidebar_select_item', index });
   }
@@ -164,8 +172,8 @@ export class HerdTestClient {
     await this.testDriver({ type: 'sidebar_begin_rename' });
   }
 
-  async driverTileSelect(tileId: string) {
-    await this.testDriver({ type: 'tile_select', tile_id: tileId });
+  async driverTileSelect(tileId: string, shiftKey = false) {
+    await this.testDriver({ type: 'tile_select', tile_id: tileId, shift_key: shiftKey });
   }
 
   async driverTileClose(tileId: string) {
@@ -390,6 +398,49 @@ export class HerdTestClient {
     });
   }
 
+  async networkSubscribe(
+    tileId: string,
+    event: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<unknown> {
+    return this.sendCommand({
+      command: 'network_subscribe',
+      tile_id: tileId,
+      event,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async networkUnsubscribe(
+    tileId: string,
+    event: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<{ removed: boolean }> {
+    return this.sendCommand({
+      command: 'network_unsubscribe',
+      tile_id: tileId,
+      event,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async networkSubscriptionList(
+    tileId?: string | null,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<unknown[]> {
+    return this.sendCommand({
+      command: 'network_subscription_list',
+      tile_id: tileId ?? null,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
   async browserDrive<T = unknown>(
     tileId: string,
     action: 'click' | 'select' | 'type' | 'dom_query' | 'eval' | 'screenshot',
@@ -568,6 +619,55 @@ export class HerdTestClient {
       tile_id: tileId,
       action,
       args: args ?? {},
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async tileSubscribe(
+    tileId: string,
+    event: string,
+    agentId: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<unknown> {
+    return this.sendCommand({
+      command: 'tile_subscribe',
+      tile_id: tileId,
+      event,
+      agent_id: agentId,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async tileUnsubscribe(
+    tileId: string,
+    event: string,
+    agentId: string,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<{ removed: boolean }> {
+    return this.sendCommand({
+      command: 'tile_unsubscribe',
+      tile_id: tileId,
+      event,
+      agent_id: agentId,
+      sender_tile_id: senderTileId ?? null,
+      sender_agent_id: senderAgentId ?? null,
+    });
+  }
+
+  async tileSubscriptionList(
+    tileId?: string | null,
+    agentId?: string | null,
+    senderTileId?: string | null,
+    senderAgentId?: string | null,
+  ): Promise<unknown[]> {
+    return this.sendCommand({
+      command: 'tile_subscription_list',
+      tile_id: tileId ?? null,
+      agent_id: agentId ?? null,
       sender_tile_id: senderTileId ?? null,
       sender_agent_id: senderAgentId ?? null,
     });

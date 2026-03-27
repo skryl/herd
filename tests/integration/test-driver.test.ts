@@ -1,7 +1,9 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { HerdTestClient } from './client';
-import { createIsolatedTab, terminalById, waitFor } from './helpers';
+import { createIsolatedTab, rootDir, terminalById, waitFor } from './helpers';
 import { startIntegrationRuntime, type HerdIntegrationRuntime } from './runtime';
 
 const VIEWPORT_WIDTH = 1400;
@@ -9,6 +11,14 @@ const VIEWPORT_HEIGHT = 846;
 
 function rootAgentForProjection(projection: Awaited<ReturnType<HerdTestClient['getProjection']>>) {
   return projection.agents.find((agent) => agent.agent_role === 'root' && agent.alive);
+}
+
+function sanitizeSessionConfigName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }
 
 async function spawnShellInActiveTab(client: HerdTestClient): Promise<string> {
@@ -606,6 +616,108 @@ describe.sequential('in-app test driver', () => {
     ]);
   });
 
+  it('supports shift multi-select and lock/unlock through the tile context menu', async () => {
+    await createIsolatedTab(client, 'tile-locking');
+    const firstTileId = await spawnShellInActiveTab(client);
+    const secondTileId = await spawnShellInActiveTab(client);
+
+    await waitFor(
+      'two spawned shell tiles are visible for locking',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_terminals.some((terminal) => terminal.id === firstTileId)
+        && nextProjection.active_tab_terminals.some((terminal) => terminal.id === secondTileId),
+      30_000,
+      150,
+    );
+
+    await client.driverTileSelect(firstTileId);
+    await client.driverTileSelect(secondTileId, true);
+
+    let projection = await client.getProjection();
+    expect(projection.selected_tile_id).toBe(secondTileId);
+    expect(projection.selected_tile_ids).toEqual([secondTileId, firstTileId]);
+
+    await client.driverTileContextMenu(secondTileId, 520, 280);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.target).toBe('tile');
+    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close', 'Lock']);
+
+    const initialPositions = Object.fromEntries(
+      projection.active_tab_terminals
+        .filter((terminal) => terminal.id === firstTileId || terminal.id === secondTileId)
+        .map((terminal) => [terminal.id, { x: terminal.x, y: terminal.y }]),
+    );
+
+    await client.contextMenuSelect('toggle-lock-tiles');
+
+    projection = await waitFor(
+      'multi-selected tiles lock',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_terminals
+          .filter((terminal) => terminal.id === firstTileId || terminal.id === secondTileId)
+          .every((terminal) => terminal.locked === true),
+      30_000,
+      150,
+    );
+
+    expect(
+      await client.testDomQuery<boolean>(`
+        return ${JSON.stringify([firstTileId, secondTileId])}.every((tileId) =>
+          document.querySelector('.pcb-component[data-tile-id="' + tileId + '"] .tile-lock-indicator') !== null
+        );
+      `),
+    ).toBe(true);
+
+    await client.driverTileDrag(firstTileId, 120, 40);
+    await client.waitForIdle();
+    projection = await client.getProjection();
+    expect(
+      projection.active_tab_terminals.find((terminal) => terminal.id === firstTileId),
+    ).toMatchObject(initialPositions[firstTileId]!);
+
+    await client.driverTileContextMenu(secondTileId, 520, 280);
+    projection = await client.getProjection();
+    expect(projection.context_menu?.items.map((item) => item.label)).toEqual(['Close', 'Unlock']);
+
+    await client.contextMenuSelect('toggle-lock-tiles');
+
+    projection = await waitFor(
+      'multi-selected tiles unlock',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_terminals
+          .filter((terminal) => terminal.id === firstTileId || terminal.id === secondTileId)
+          .every((terminal) => terminal.locked !== true),
+      30_000,
+      150,
+    );
+
+    await client.driverTileDrag(firstTileId, 120, 40);
+    projection = await waitFor(
+      'unlocked tile moves after drag',
+      () => client.getProjection(),
+      (nextProjection) => {
+        const terminal = nextProjection.active_tab_terminals.find((item) => item.id === firstTileId);
+        return Boolean(
+          terminal
+          && terminal.x === initialPositions[firstTileId]!.x + 120
+          && terminal.y === initialPositions[firstTileId]!.y + 40,
+        );
+      },
+      30_000,
+      150,
+    );
+
+    expect(
+      projection.active_tab_terminals.find((terminal) => terminal.id === firstTileId),
+    ).toMatchObject({
+      x: initialPositions[firstTileId]!.x + 120,
+      y: initialPositions[firstTileId]!.y + 40,
+    });
+  });
+
   it('updates port settings from the port context menu, lights the indicators, and disconnects invalidated edges', async () => {
     await createIsolatedTab(client, 'port-context-menu');
     const shellTileId = await spawnShellInActiveTab(client);
@@ -1070,6 +1182,14 @@ describe.sequential('in-app test driver', () => {
     await client.pressKeys([{ key: 'Escape' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     projection = await client.getProjection();
     expect(projection.sidebar.open).toBe(false);
+
+    await client.pressKeys([{ key: ',' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    projection = await client.getProjection();
+    expect(projection.settings_sidebar_open).toBe(true);
+
+    await client.pressKeys([{ key: 'Escape' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    projection = await client.getProjection();
+    expect(projection.settings_sidebar_open).toBe(false);
 
     await client.pressKeys([{ key: 'i' }], VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     projection = await client.getProjection();
@@ -2184,30 +2304,44 @@ return document.querySelector('#score').textContent;
     );
   });
 
-  it('shows canvas settings in the sidebar and lets you toggle wire sparks', async () => {
+  it('shows canvas settings in the settings sidebar and lets you adjust snapping, ports, and wire sparks', async () => {
     const projection = await createIsolatedTab(client, 'ports-setting');
     const selectedTileId = projection.selected_tile_id;
-    await client.sidebarOpen();
+    await client.settingsSidebarOpen();
 
     const initialSettings = await client.testDomQuery<{
       labels: string[];
-      selected: string;
+      selectedPortCount: string;
+      snapEnabled: boolean;
+      selectedGridSize: string;
       selectedTilePortCount: number;
       sparksEnabled: boolean;
     }>(`
       const tileId = ${JSON.stringify(selectedTileId)};
       return {
         labels: Array.from(document.querySelectorAll('.sidebar .settings-card-label')).map((element) => element.textContent?.trim() ?? ''),
-        selected: document.querySelector('.tile-port-count-toggle.selected')?.textContent?.trim() ?? '',
-        sparksEnabled: document.querySelector('.wire-sparks-toggle')?.getAttribute('aria-pressed') === 'true',
+        selectedPortCount: document.querySelector('.tile-port-count-toggle[data-port-count].selected')?.textContent?.trim() ?? '',
+        snapEnabled: document.querySelector('.wire-sparks-toggle[aria-label="Toggle snap to grid"]')?.getAttribute('aria-pressed') === 'true',
+        selectedGridSize: document.querySelector('.tile-port-count-toggle[data-grid-snap-size].selected')?.textContent?.trim() ?? '',
+        sparksEnabled: document.querySelector('.wire-sparks-toggle[aria-label="Toggle wire sparks"]')?.getAttribute('aria-pressed') === 'true',
         selectedTilePortCount: tileId
           ? document.querySelectorAll(\`[data-tile-id="\${tileId}"] [data-port]\`).length
           : 0,
       };
     `);
 
-    expect(initialSettings.labels).toEqual(['SPAWN DIR', 'PORTS', 'WIRE SPARKS']);
-    expect(initialSettings.selected).toBe('4');
+    expect(initialSettings.labels).toEqual([
+      'SPAWN DIR',
+      'SESSION NAME',
+      'BROWSER BACKEND',
+      'PORTS',
+      'SNAP TO GRID',
+      'GRID SIZE',
+      'WIRE SPARKS',
+    ]);
+    expect(initialSettings.selectedPortCount).toBe('4');
+    expect(initialSettings.snapEnabled).toBe(true);
+    expect(initialSettings.selectedGridSize).toBe('20');
     expect(initialSettings.sparksEnabled).toBe(true);
     expect(initialSettings.selectedTilePortCount).toBe(4);
 
@@ -2223,27 +2357,73 @@ return document.querySelector('#score').textContent;
       'ports setting changes selected tile port count',
       () =>
         client.testDomQuery<{
-          selected: string;
+          selectedPortCount: string;
           selectedTilePortCount: number;
         }>(`
           const tileId = ${JSON.stringify(selectedTileId)};
           return {
-            selected: document.querySelector('.tile-port-count-toggle.selected')?.textContent?.trim() ?? '',
+            selectedPortCount: document.querySelector('.tile-port-count-toggle[data-port-count].selected')?.textContent?.trim() ?? '',
             selectedTilePortCount: tileId
               ? document.querySelectorAll(\`[data-tile-id="\${tileId}"] [data-port]\`).length
               : 0,
           };
         `),
-      (nextState) => nextState.selected === '12' && nextState.selectedTilePortCount === 12,
+      (nextState) => nextState.selectedPortCount === '12' && nextState.selectedTilePortCount === 12,
       30_000,
       150,
     );
 
-    expect(updatedSettings.selected).toBe('12');
+    expect(updatedSettings.selectedPortCount).toBe('12');
     expect(updatedSettings.selectedTilePortCount).toBe(12);
 
     await client.testDomQuery(`
-      document.querySelector('.wire-sparks-toggle')?.dispatchEvent(new MouseEvent('click', {
+      document.querySelector('.wire-sparks-toggle[aria-label="Toggle snap to grid"]')?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      return true;
+    `);
+
+    const updatedSnapSetting = await waitFor(
+      'snap to grid toggles off',
+      () =>
+        client.testDomQuery<{ snapEnabled: boolean }>(`
+          return {
+            snapEnabled: document.querySelector('.wire-sparks-toggle[aria-label="Toggle snap to grid"]')?.getAttribute('aria-pressed') === 'true',
+          };
+        `),
+      (nextState) => nextState.snapEnabled === false,
+      30_000,
+      150,
+    );
+
+    expect(updatedSnapSetting.snapEnabled).toBe(false);
+
+    await client.testDomQuery(`
+      document.querySelector('.tile-port-count-toggle[data-grid-snap-size="40"]')?.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      return true;
+    `);
+
+    const updatedGridSize = await waitFor(
+      'grid snap size changes to 40',
+      () =>
+        client.testDomQuery<{ selectedGridSize: string }>(`
+          return {
+            selectedGridSize: document.querySelector('.tile-port-count-toggle[data-grid-snap-size].selected')?.textContent?.trim() ?? '',
+          };
+        `),
+      (nextState) => nextState.selectedGridSize === '40',
+      30_000,
+      150,
+    );
+
+    expect(updatedGridSize.selectedGridSize).toBe('40');
+
+    await client.testDomQuery(`
+      document.querySelector('.wire-sparks-toggle[aria-label="Toggle wire sparks"]')?.dispatchEvent(new MouseEvent('click', {
         bubbles: true,
         cancelable: true,
       }));
@@ -2255,7 +2435,7 @@ return document.querySelector('#score').textContent;
       () =>
         client.testDomQuery<{ sparksEnabled: boolean }>(`
           return {
-            sparksEnabled: document.querySelector('.wire-sparks-toggle')?.getAttribute('aria-pressed') === 'true',
+            sparksEnabled: document.querySelector('.wire-sparks-toggle[aria-label="Toggle wire sparks"]')?.getAttribute('aria-pressed') === 'true',
           };
         `),
       (nextState) => nextState.sparksEnabled === false,
@@ -2264,6 +2444,703 @@ return document.querySelector('#score').textContent;
     );
 
     expect(updatedSparkSetting.sparksEnabled).toBe(false);
+  });
+
+  it('restores the canvas pan and zoom for each tab when switching away and back', async () => {
+    let firstProjection = await createIsolatedTab(client, `canvas-a-${Date.now()}`);
+    const firstSessionId = firstProjection.active_tab_id!;
+
+    await client.canvasPan(180, 95);
+    await client.canvasZoomAt(720, 420, 1.18);
+
+    firstProjection = await waitFor(
+      'first tab canvas changed',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_id === firstSessionId
+        && Math.abs(nextProjection.canvas.panX) > 0.001
+        && Math.abs(nextProjection.canvas.panY) > 0.001
+        && Math.abs(nextProjection.canvas.zoom - 1) > 0.001,
+      30_000,
+      150,
+    );
+    const firstCanvas = firstProjection.canvas;
+
+    let secondProjection = await createIsolatedTab(client, `canvas-b-${Date.now()}`);
+    const secondSessionId = secondProjection.active_tab_id!;
+
+    await client.canvasPan(-140, 70);
+    await client.canvasZoomAt(640, 360, 0.88);
+
+    secondProjection = await waitFor(
+      'second tab canvas changed',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_id === secondSessionId
+        && Math.abs(nextProjection.canvas.panX - firstCanvas.panX) > 0.001
+        && Math.abs(nextProjection.canvas.panY - firstCanvas.panY) > 0.001
+        && Math.abs(nextProjection.canvas.zoom - firstCanvas.zoom) > 0.001,
+      30_000,
+      150,
+    );
+    const secondCanvas = secondProjection.canvas;
+
+    await client.toolbarSelectTab(firstSessionId);
+    const restoredFirstProjection = await waitFor(
+      'first tab canvas restored after switching back',
+      () => client.getProjection(),
+      (nextProjection) =>
+        nextProjection.active_tab_id === firstSessionId
+        && Math.abs(nextProjection.canvas.panX - firstCanvas.panX) < 0.001
+        && Math.abs(nextProjection.canvas.panY - firstCanvas.panY) < 0.001
+        && Math.abs(nextProjection.canvas.zoom - firstCanvas.zoom) < 0.001,
+      30_000,
+      150,
+    );
+    expect(restoredFirstProjection.canvas.panX).toBeCloseTo(firstCanvas.panX, 4);
+    expect(restoredFirstProjection.canvas.panY).toBeCloseTo(firstCanvas.panY, 4);
+    expect(restoredFirstProjection.canvas.zoom).toBeCloseTo(firstCanvas.zoom, 4);
+  });
+
+  it('saves and loads session configurations from settings and opens them from the toolbar dropdown', async () => {
+    const sessionName = `saved-session-${Date.now()}`;
+    const configName = sanitizeSessionConfigName(sessionName);
+    const configPath = path.join(rootDir(), 'sessions', `${configName}_session.json`);
+
+    try {
+      let projection = await createIsolatedTab(client, sessionName);
+      const sourceSessionId = projection.active_tab_id!;
+
+      const shellPaneId = await spawnShellInActiveTab(client);
+      const browserPaneId = await spawnBrowserInActiveTab(client, {
+        browserPath: 'extensions/browser/texas-holdem/index.html',
+      });
+      const work = await client.toolbarSpawnWork('Saved Session Work');
+
+      projection = await waitFor(
+        'saved-session initial tiles',
+        () => client.getProjection(),
+        (nextProjection) =>
+          nextProjection.active_tab_id === sourceSessionId
+          && nextProjection.active_tab_terminals.length === 3
+          && nextProjection.active_tab_work_cards.some((card) => card.workId === work.work_id),
+        30_000,
+        150,
+      );
+
+      const rootAgent = rootAgentForProjection(projection);
+      expect(rootAgent).toBeTruthy();
+      const originalRoot = projection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+      const originalShell = projection.active_tab_terminals.find((terminal) => terminal.id === shellPaneId);
+      const originalBrowser = projection.active_tab_terminals.find((terminal) => terminal.id === browserPaneId);
+      const originalWorkCard = projection.active_tab_work_cards.find((card) => card.workId === work.work_id);
+      expect(originalRoot).toBeTruthy();
+      expect(originalShell).toBeTruthy();
+      expect(originalBrowser).toBeTruthy();
+      expect(originalWorkCard).toBeTruthy();
+
+      await client.driverTileDrag(rootAgent!.tile_id, 140, 100);
+      await client.driverTileDrag(shellPaneId, -120, 80);
+      await client.driverTileDrag(browserPaneId, 180, 120);
+      await client.testDomQuery(`
+        const header = document.querySelector('[data-work-id="${work.work_id}"] .work-card-titlebar');
+        if (!(header instanceof HTMLElement)) {
+          throw new Error('missing work-card titlebar');
+        }
+        const rect = header.getBoundingClientRect();
+        header.dispatchEvent(new MouseEvent('mousedown', {
+          button: 0,
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + 20,
+          clientY: rect.top + 10,
+        }));
+        window.dispatchEvent(new MouseEvent('mousemove', {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + 160,
+          clientY: rect.top + 110,
+        }));
+        window.dispatchEvent(new MouseEvent('mouseup', {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + 160,
+          clientY: rect.top + 110,
+        }));
+        return true;
+      `);
+
+      projection = await waitFor(
+        'saved-session custom tile positions',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextRoot = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+          const nextShell = nextProjection.active_tab_terminals.find((terminal) => terminal.id === shellPaneId);
+          const nextBrowser = nextProjection.active_tab_terminals.find((terminal) => terminal.id === browserPaneId);
+          const nextWorkCard = nextProjection.active_tab_work_cards.find((card) => card.workId === work.work_id);
+          return Boolean(nextRoot)
+            && Boolean(nextShell)
+            && Boolean(nextBrowser)
+            && Boolean(nextWorkCard)
+            && (nextRoot!.x !== originalRoot!.x || nextRoot!.y !== originalRoot!.y)
+            && (nextShell!.x !== originalShell!.x || nextShell!.y !== originalShell!.y)
+            && (nextBrowser!.x !== originalBrowser!.x || nextBrowser!.y !== originalBrowser!.y)
+            && (nextWorkCard!.x !== originalWorkCard!.x || nextWorkCard!.y !== originalWorkCard!.y);
+        },
+        30_000,
+        150,
+      );
+
+      const savedShellPosition = projection.active_tab_terminals.find((terminal) => terminal.id === shellPaneId)!;
+
+      await client.networkConnect(rootAgent!.tile_id, 'right', browserPaneId, 'left');
+      await client.waitForIdle(30_000, 250);
+      await client.testDomQuery(`
+        const button = document.querySelector('[data-tile-id="${shellPaneId}"] .minimize-btn');
+        if (button instanceof HTMLButtonElement) {
+          button.click();
+          return true;
+        }
+        return false;
+      `);
+
+      projection = await waitFor(
+        'saved-session shell minimized',
+        () => client.getProjection(),
+        (nextProjection) =>
+          nextProjection.active_tab_id === sourceSessionId
+          && nextProjection.active_tab_terminals.some((terminal) => terminal.id === shellPaneId && terminal.kind === 'regular')
+          && nextProjection.active_tab_network_connections.length === 1,
+        30_000,
+        150,
+      );
+
+      const savedRootPosition = projection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent')!;
+      const savedBrowserPosition = projection.active_tab_terminals.find((terminal) => terminal.id === browserPaneId)!;
+      const savedWorkPosition = projection.active_tab_work_cards.find((card) => card.workId === work.work_id)!;
+
+      await client.settingsSidebarOpen();
+      await client.testDomQuery(`
+        const saveButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('SAVE')
+        );
+        if (saveButton instanceof HTMLButtonElement) {
+          saveButton.click();
+          return true;
+        }
+        return false;
+      `);
+
+      await waitFor(
+        'saved session configuration file exists',
+        async () => {
+          try {
+            await fs.access(configPath);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        (exists) => exists,
+        30_000,
+        150,
+      );
+
+      const savedConfig = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
+        tiles: Array<{ kind: string; layout: { x: number; y: number; width: number; height: number } }>;
+      };
+      const savedConfigRoot = savedConfig.tiles.find((tile) => tile.kind === 'root_agent');
+      const savedConfigShell = savedConfig.tiles.find((tile) => tile.kind === 'shell');
+      const savedConfigBrowser = savedConfig.tiles.find((tile) => tile.kind === 'browser');
+      const savedConfigWork = savedConfig.tiles.find((tile) => tile.kind === 'work');
+      expect(savedConfigRoot?.layout.x).toBeCloseTo(savedRootPosition.x, 4);
+      expect(savedConfigRoot?.layout.y).toBeCloseTo(savedRootPosition.y, 4);
+      expect(savedConfigShell?.layout.x).toBeCloseTo(savedShellPosition.x, 4);
+      expect(savedConfigShell?.layout.y).toBeCloseTo(savedShellPosition.y, 4);
+      expect(savedConfigBrowser?.layout.x).toBeCloseTo(savedBrowserPosition.x, 4);
+      expect(savedConfigBrowser?.layout.y).toBeCloseTo(savedBrowserPosition.y, 4);
+      expect(savedConfigWork?.layout.x).toBeCloseTo(savedWorkPosition.x, 4);
+      expect(savedConfigWork?.layout.y).toBeCloseTo(savedWorkPosition.y, 4);
+
+      await spawnShellInActiveTab(client);
+      projection = await waitFor(
+        'session diverges after save',
+        () => client.getProjection(),
+        (nextProjection) =>
+          nextProjection.active_tab_id === sourceSessionId
+          && nextProjection.active_tab_terminals.length === 4,
+        30_000,
+        150,
+      );
+
+      await client.testDomQuery(`
+        const loadButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('LOAD')
+        );
+        if (loadButton instanceof HTMLButtonElement) {
+          loadButton.click();
+          return true;
+        }
+        return false;
+      `);
+
+      projection = await waitFor(
+        'current tab restored from saved session configuration',
+        () => client.getProjection(),
+        (nextProjection) =>
+          nextProjection.active_tab_id === sourceSessionId
+          && nextProjection.active_tab_terminals.length === 3
+          && nextProjection.active_tab_terminals.some((terminal) => terminal.kind === 'browser')
+          && nextProjection.active_tab_terminals.some((terminal) => terminal.kind === 'regular')
+          && nextProjection.active_tab_network_connections.length === 1
+          && nextProjection.active_tab_work_cards.length === 1,
+        45_000,
+        150,
+      );
+
+      projection = await waitFor(
+        'restored root, browser, and work positions after current-tab load',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextRoot = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+          const nextBrowser = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'browser');
+          const nextWork = nextProjection.active_tab_work_cards[0];
+          return Boolean(nextRoot)
+            && Boolean(nextBrowser)
+            && Boolean(nextWork)
+            && Math.abs(nextRoot!.x - savedRootPosition.x) < 0.001
+            && Math.abs(nextRoot!.y - savedRootPosition.y) < 0.001
+            && Math.abs(nextBrowser!.x - savedBrowserPosition.x) < 0.001
+            && Math.abs(nextBrowser!.y - savedBrowserPosition.y) < 0.001
+            && Math.abs(nextWork!.x - savedWorkPosition.x) < 0.001
+            && Math.abs(nextWork!.y - savedWorkPosition.y) < 0.001;
+        },
+        30_000,
+        150,
+      );
+
+      expect(projection.active_tab_work_cards).toHaveLength(1);
+      expect(projection.active_tab_network_connections).toHaveLength(1);
+      expect(projection.active_tab_terminals.some((terminal) => terminal.kind === 'regular')).toBe(true);
+      const restoredRoot = projection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent')!;
+      const restoredShell = projection.active_tab_terminals.find((terminal) => terminal.kind === 'regular')!;
+      const restoredBrowser = projection.active_tab_terminals.find((terminal) => terminal.kind === 'browser')!;
+      const restoredWork = projection.active_tab_work_cards[0]!;
+
+      await client.testDomQuery(`
+        const restoreButton = document.querySelector('[data-minimized-tile-id="${restoredShell.id}"]');
+        if (restoreButton instanceof HTMLButtonElement) {
+          restoreButton.click();
+          return true;
+        }
+        return false;
+      `);
+
+      projection = await waitFor(
+        'restored shell returns to saved world position after unminimize',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextShell = nextProjection.active_tab_terminals.find((terminal) => terminal.id === restoredShell.id);
+          return Boolean(nextShell)
+            && Math.abs(nextShell!.x - savedShellPosition.x) < 0.001
+            && Math.abs(nextShell!.y - savedShellPosition.y) < 0.001;
+        },
+        30_000,
+        150,
+      );
+
+      const tabCountBeforeToolbarLoad = projection.tabs.length;
+      await waitFor(
+        'saved session configuration appears in toolbar dropdown',
+        () =>
+          client.testDomQuery<{ ready: boolean }>(`
+            const select = document.querySelector('.tab-load-select');
+            const option = document.querySelector('.tab-load-select option[value="${configName}"]');
+            return {
+              ready: select instanceof HTMLSelectElement && !select.disabled && option instanceof HTMLOptionElement,
+            };
+          `),
+        (state) => state.ready,
+        30_000,
+        150,
+      );
+      await client.testDomQuery(`
+        const select = document.querySelector('.tab-load-select');
+        if (select instanceof HTMLSelectElement) {
+          select.value = ${JSON.stringify(configName)};
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        return false;
+      `);
+
+      const toolbarLoadedProjection = await waitFor(
+        'toolbar opens saved session configuration in a new tab',
+        () => client.getProjection(),
+        (nextProjection) =>
+          nextProjection.tabs.length === tabCountBeforeToolbarLoad + 1
+          && nextProjection.active_tab_id !== sourceSessionId
+          && nextProjection.active_tab_terminals.length === 3
+          && nextProjection.active_tab_terminals.some((terminal) => terminal.kind === 'browser')
+          && nextProjection.active_tab_network_connections.length === 1
+          && nextProjection.active_tab_work_cards.length === 1
+          && nextProjection.active_tab_terminals.some((terminal) => terminal.kind === 'regular'),
+        45_000,
+        150,
+      );
+
+      expect(toolbarLoadedProjection.tabs.some((tab) => tab.name === sessionName)).toBe(true);
+      const toolbarPositionProjection = await waitFor(
+        'restored root, browser, and work positions after toolbar load',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextRoot = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+          const nextBrowser = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'browser');
+          const nextWork = nextProjection.active_tab_work_cards[0];
+          return Boolean(nextRoot)
+            && Boolean(nextBrowser)
+            && Boolean(nextWork)
+            && Math.abs(nextRoot!.x - savedRootPosition.x) < 0.001
+            && Math.abs(nextRoot!.y - savedRootPosition.y) < 0.001
+            && Math.abs(nextBrowser!.x - savedBrowserPosition.x) < 0.001
+            && Math.abs(nextBrowser!.y - savedBrowserPosition.y) < 0.001
+            && Math.abs(nextWork!.x - savedWorkPosition.x) < 0.001
+            && Math.abs(nextWork!.y - savedWorkPosition.y) < 0.001;
+        },
+        30_000,
+        150,
+      );
+
+      const toolbarRoot = toolbarPositionProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent')!;
+      const toolbarShell = toolbarPositionProjection.active_tab_terminals.find((terminal) => terminal.kind === 'regular')!;
+      const toolbarBrowser = toolbarPositionProjection.active_tab_terminals.find((terminal) => terminal.kind === 'browser')!;
+      const toolbarWork = toolbarPositionProjection.active_tab_work_cards[0]!;
+
+      await client.testDomQuery(`
+        const restoreButton = document.querySelector('[data-minimized-tile-id="${toolbarShell.id}"]');
+        if (restoreButton instanceof HTMLButtonElement) {
+          restoreButton.click();
+          return true;
+        }
+        return false;
+      `);
+
+      const toolbarRestoredProjection = await waitFor(
+        'toolbar-loaded shell returns to saved world position after unminimize',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextShell = nextProjection.active_tab_terminals.find((terminal) => terminal.id === toolbarShell.id);
+          return Boolean(nextShell)
+            && Math.abs(nextShell!.x - savedShellPosition.x) < 0.001
+            && Math.abs(nextShell!.y - savedShellPosition.y) < 0.001;
+        },
+        30_000,
+        150,
+      );
+
+      const toolbarRestoredShell = toolbarRestoredProjection.active_tab_terminals.find((terminal) => terminal.id === toolbarShell.id)!;
+      expect(toolbarRestoredShell.x).toBeCloseTo(savedShellPosition.x, 4);
+      expect(toolbarRestoredShell.y).toBeCloseTo(savedShellPosition.y, 4);
+    } finally {
+      await fs.rm(configPath, { force: true }).catch(() => undefined);
+    }
+  });
+
+  it('confirms before overwriting an existing saved session configuration', async () => {
+    const sessionName = `overwrite-session-${Date.now()}`;
+    const configName = sanitizeSessionConfigName(sessionName);
+    const configPath = path.join(rootDir(), 'sessions', `${configName}_session.json`);
+
+    try {
+      let projection = await createIsolatedTab(client, sessionName);
+      const rootAgent = rootAgentForProjection(projection);
+      expect(rootAgent).toBeTruthy();
+
+      await client.settingsSidebarOpen();
+      await client.testDomQuery(`
+        const saveButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('SAVE')
+        );
+        if (!(saveButton instanceof HTMLButtonElement)) {
+          throw new Error('missing session save button');
+        }
+        saveButton.click();
+        return true;
+      `);
+
+      await waitFor(
+        'initial saved session configuration file exists',
+        async () => {
+          try {
+            await fs.access(configPath);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        (exists) => exists,
+        30_000,
+        150,
+      );
+
+      await waitFor(
+        'initial saved session configuration appears in toolbar dropdown',
+        () =>
+          client.testDomQuery<{ ready: boolean }>(`
+            return {
+              ready: document.querySelector('.tab-load-select option[value="${configName}"]') instanceof HTMLOptionElement,
+            };
+          `),
+        (state) => state.ready,
+        30_000,
+        150,
+      );
+
+      const initialConfig = await fs.readFile(configPath, 'utf8');
+      const initialProjection = await client.getProjection();
+      const initialRoot = initialProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+      expect(initialRoot).toBeTruthy();
+
+      await client.driverTileDrag(rootAgent!.tile_id, 160, 110);
+      const movedProjection = await waitFor(
+        'root tile moved before overwrite attempt',
+        () => client.getProjection(),
+        (nextProjection) => {
+          const nextRoot = nextProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent');
+          return Boolean(nextRoot)
+            && (nextRoot!.x !== initialRoot!.x || nextRoot!.y !== initialRoot!.y);
+        },
+        30_000,
+        150,
+      );
+      const movedRoot = movedProjection.active_tab_terminals.find((terminal) => terminal.kind === 'root_agent')!;
+
+      await client.testDomQuery(`
+        window.__saveConfirmCalls = [];
+        window.confirm = (message) => {
+          window.__saveConfirmCalls.push(String(message));
+          return false;
+        };
+        const saveButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('SAVE')
+        );
+        if (!(saveButton instanceof HTMLButtonElement)) {
+          throw new Error('missing session save button');
+        }
+        saveButton.click();
+        return true;
+      `);
+
+      const cancelledConfirm = await waitFor(
+        'overwrite confirmation appears and is cancelled',
+        () =>
+          client.testDomQuery<{ confirmCalls: string[] }>(`
+            return { confirmCalls: Array.from(window.__saveConfirmCalls ?? []) };
+          `),
+        (state) => state.confirmCalls.length === 1,
+        30_000,
+        150,
+      );
+
+      expect(cancelledConfirm.confirmCalls).toHaveLength(1);
+      expect(cancelledConfirm.confirmCalls[0]).toContain(`${configName}_session.json`);
+      expect(await fs.readFile(configPath, 'utf8')).toBe(initialConfig);
+
+      await client.testDomQuery(`
+        window.__saveConfirmCalls = [];
+        window.confirm = (message) => {
+          window.__saveConfirmCalls.push(String(message));
+          return true;
+        };
+        const saveButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('SAVE')
+        );
+        if (!(saveButton instanceof HTMLButtonElement)) {
+          throw new Error('missing session save button');
+        }
+        saveButton.click();
+        return true;
+      `);
+
+      const confirmedOverwrite = await waitFor(
+        'overwrite confirmation appears and is accepted',
+        () =>
+          client.testDomQuery<{ confirmCalls: string[] }>(`
+            return { confirmCalls: Array.from(window.__saveConfirmCalls ?? []) };
+          `),
+        (state) => state.confirmCalls.length === 1,
+        30_000,
+        150,
+      );
+
+      expect(confirmedOverwrite.confirmCalls).toHaveLength(1);
+
+      await waitFor(
+        'saved session configuration overwritten after confirmation',
+        async () => {
+          const parsed = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
+            tiles: Array<{ kind: string; layout: { x: number; y: number } }>;
+          };
+          const savedRoot = parsed.tiles.find((tile) => tile.kind === 'root_agent');
+          return (
+            Boolean(savedRoot)
+            && Math.abs(savedRoot!.layout.x - movedRoot.x) < 0.001
+            && Math.abs(savedRoot!.layout.y - movedRoot.y) < 0.001
+          );
+        },
+        (saved) => saved,
+        30_000,
+        150,
+      );
+    } finally {
+      await fs.rm(configPath, { force: true }).catch(() => undefined);
+    }
+  });
+
+  it('shows save and delete status for the current session configuration name', async () => {
+    const sessionName = `save-delete-session-${Date.now()}`;
+    const configName = sanitizeSessionConfigName(sessionName);
+    const fileName = `${configName}_session.json`;
+    const configPath = path.join(rootDir(), 'sessions', fileName);
+    const savedStatusText = `Saved ${fileName}.`;
+    const deletedStatusText = `Deleted ${fileName}.`;
+
+    try {
+      await createIsolatedTab(client, sessionName);
+      await client.settingsSidebarOpen();
+
+      const initialState = await waitFor(
+        'initial delete disabled and empty save status',
+        () =>
+          client.testDomQuery<{ deleteDisabled: boolean; statusText: string }>(`
+            const deleteButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+              (element.textContent ?? '').trim().startsWith('DELETE')
+            );
+            const status = document.querySelector('.session-config-status');
+            return {
+              deleteDisabled: deleteButton instanceof HTMLButtonElement ? deleteButton.disabled : true,
+              statusText: (status?.textContent ?? '').trim(),
+            };
+          `),
+        (state) => state.deleteDisabled && state.statusText === 'No saved session file for this name.',
+        30_000,
+        150,
+      );
+
+      expect(initialState.deleteDisabled).toBe(true);
+
+      await client.testDomQuery(`
+        const saveButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('SAVE')
+        );
+        if (!(saveButton instanceof HTMLButtonElement)) {
+          throw new Error('missing session save button');
+        }
+        saveButton.click();
+        return true;
+      `);
+
+      await waitFor(
+        'session configuration file saved',
+        async () => {
+          try {
+            await fs.access(configPath);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        (exists) => exists,
+        30_000,
+        150,
+      );
+
+      const savedState = await waitFor(
+        'delete enabled and save status shown',
+        () =>
+          client.testDomQuery<{ deleteDisabled: boolean; statusText: string }>(`
+            const deleteButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+              (element.textContent ?? '').trim().startsWith('DELETE')
+            );
+            const status = document.querySelector('.session-config-status');
+            return {
+              deleteDisabled: deleteButton instanceof HTMLButtonElement ? deleteButton.disabled : true,
+              statusText: (status?.textContent ?? '').trim(),
+            };
+          `),
+        (state) => !state.deleteDisabled && state.statusText === savedStatusText,
+        30_000,
+        150,
+      );
+
+      expect(savedState.deleteDisabled).toBe(false);
+
+      await client.testDomQuery(`
+        window.__deleteConfirmCalls = [];
+        window.confirm = (message) => {
+          window.__deleteConfirmCalls.push(String(message));
+          return true;
+        };
+        const deleteButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+          (element.textContent ?? '').trim().startsWith('DELETE')
+        );
+        if (!(deleteButton instanceof HTMLButtonElement)) {
+          throw new Error('missing session delete button');
+        }
+        deleteButton.click();
+        return true;
+      `);
+
+      const deleteConfirm = await waitFor(
+        'delete confirmation appears',
+        () =>
+          client.testDomQuery<{ confirmCalls: string[] }>(`
+            return { confirmCalls: Array.from(window.__deleteConfirmCalls ?? []) };
+          `),
+        (state) => state.confirmCalls.length === 1,
+        30_000,
+        150,
+      );
+
+      expect(deleteConfirm.confirmCalls[0]).toContain(fileName);
+
+      await waitFor(
+        'session configuration file deleted',
+        async () => {
+          try {
+            await fs.access(configPath);
+            return false;
+          } catch {
+            return true;
+          }
+        },
+        (deleted) => deleted,
+        30_000,
+        150,
+      );
+
+      const deletedState = await waitFor(
+        'delete disabled and delete status shown',
+        () =>
+          client.testDomQuery<{ deleteDisabled: boolean; statusText: string }>(`
+            const deleteButton = Array.from(document.querySelectorAll('.session-config-button')).find((element) =>
+              (element.textContent ?? '').trim().startsWith('DELETE')
+            );
+            const status = document.querySelector('.session-config-status');
+            return {
+              deleteDisabled: deleteButton instanceof HTMLButtonElement ? deleteButton.disabled : true,
+              statusText: (status?.textContent ?? '').trim(),
+            };
+          `),
+        (state) => state.deleteDisabled && state.statusText === deletedStatusText,
+        30_000,
+        150,
+      );
+
+      expect(deletedState.deleteDisabled).toBe(true);
+    } finally {
+      await fs.rm(configPath, { force: true }).catch(() => undefined);
+    }
   });
 
   it('covers shell create, tile selection/close, sidebar rename, and canvas actions through the typed driver', async () => {

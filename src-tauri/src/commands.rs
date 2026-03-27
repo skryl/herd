@@ -491,6 +491,20 @@ fn notify_agents_about_connection_change(
             mentions: Vec::new(),
             replay: false,
             ping_id: None,
+            delivery_reason: None,
+            subscription_scope: None,
+            subscription_direction: None,
+            action: None,
+            subject_tile_id: None,
+            peer_tile_id: None,
+            caller_tile_id: None,
+            caller_agent_id: None,
+            target_tile_id: None,
+            target_agent_id: None,
+            rpc_channel: None,
+            outcome: None,
+            args_json: None,
+            result_json: None,
             timestamp_ms: now_ms(),
         };
         if let Err(error) = state.send_event_to_agent(&agent.agent_id, event) {
@@ -1274,11 +1288,27 @@ pub fn create_work_item(
     } else {
         active_session_id(&tmux_state::snapshot(&state)?)?
     };
-    let item = work::create_work_item_at(
+    let backing = new_work_window_detached(
+        app.clone(),
+        Some(resolved_session_id.clone()),
+        &title,
+        None,
+    )?;
+    let item = match work::create_work_item_with_preferred_tile_id_at(
         Path::new(runtime::database_path()),
         &resolved_session_id,
         &title,
-    )?;
+        backing.tile_id.clone(),
+    ) {
+        Ok(item) => item,
+        Err(error) => {
+            let _ = state.remove_tile_record(&backing.tile_id);
+            let _ = tmux_state::kill_window(&backing.window_id);
+            let _ = tmux_state::emit_snapshot(&app);
+            return Err(error);
+        }
+    };
+    let _ = set_pane_title(app.clone(), backing.pane_id.clone(), item.title.clone());
     let _ = state.touch_channels_in_session(&item.session_id, std::slice::from_ref(&item.topic));
     emit_agent_debug_state(&app, &state);
     emit_work_updated(&app, &item);
@@ -1292,6 +1322,7 @@ pub fn delete_work_item(
     work_id: String,
 ) -> Result<(), String> {
     let item = work::get_work_item_at(Path::new(runtime::database_path()), &work_id)?;
+    let work_backing = state.tile_record(&item.tile_id)?;
     let removed_connections = network::disconnect_all_for_tile_at(
         Path::new(runtime::database_path()),
         &item.session_id,
@@ -1302,11 +1333,16 @@ pub fn delete_work_item(
         Path::new(runtime::database_path()),
         &work_id,
     )?;
+    if let Some(record) = work_backing {
+        let _ = state.remove_tile_record(&record.tile_id);
+        let _ = tmux_state::kill_window(&record.window_id);
+    }
     for connection in &removed_connections {
         notify_agents_about_connection_change(state.inner(), connection, false);
     }
     state.remove_tile_state(&item.tile_id);
     state.save();
+    let _ = tmux_state::emit_snapshot(&app);
     emit_agent_debug_state(&app, &state);
     emit_work_updated(&app, &item);
     Ok(())
@@ -1476,8 +1512,9 @@ pub fn save_layout_state(
     y: f64,
     width: f64,
     height: f64,
+    locked: bool,
 ) -> Result<(), String> {
-    state.set_tile_state(&pane_id, TileState { x, y, width, height });
+    state.set_tile_state(&pane_id, TileState { x, y, width, height, locked });
     state.save();
     Ok(())
 }
@@ -1520,7 +1557,7 @@ pub fn kill_session(app: tauri::AppHandle, session_id: String) -> Result<(), Str
         .filter(|pane| pane.session_id == session_id)
         .map(|pane| pane.id.as_str())
     {
-        browser::close_browser_webview(&app, pane_id);
+        browser::close_browser_surface(&app, pane_id);
     }
 
     tmux_state::kill_session(&session_id)?;
@@ -1570,6 +1607,39 @@ pub fn set_session_root_cwd(
     tmux_state::set_session_root_cwd(&session_id, &normalized)?;
     tmux_state::emit_snapshot(&app)?;
     Ok(normalized)
+}
+
+#[tauri::command]
+pub fn set_session_browser_backend(
+    app: tauri::AppHandle,
+    session_id: String,
+    backend: browser::BrowserBackend,
+) -> Result<String, String> {
+    if backend == browser::BrowserBackend::AgentBrowser && !browser::agent_browser_is_ready() {
+        return Err("agent-browser is not installed".to_string());
+    }
+
+    let previous_backend = tmux_state::session_browser_backend(&session_id)?.unwrap_or_default();
+    if previous_backend != backend {
+        let state = app.state::<AppState>();
+        let browser_records = state
+            .list_tile_records_in_session(&session_id)?
+            .into_iter()
+            .filter(|record| record.kind == TileRecordKind::Browser)
+            .collect::<Vec<_>>();
+
+        for record in &browser_records {
+            let current_url = browser::current_url_for_pane_with_backend(&app, &record.pane_id, previous_backend);
+            browser::close_browser_surface_for_backend(&app, &record.pane_id, previous_backend);
+            if let Some(url) = current_url.as_deref() {
+                let _ = browser::navigate_browser_with_backend(&app, &record.pane_id, backend, url);
+            }
+        }
+    }
+
+    tmux_state::set_session_browser_backend(&session_id, backend)?;
+    tmux_state::emit_snapshot(&app)?;
+    Ok(backend.as_str().to_string())
 }
 
 fn new_backing_window_internal(
@@ -1660,10 +1730,50 @@ pub fn new_shell_window_detached(
     new_shell_window_internal(app, target_session_id, false)
 }
 
-#[tauri::command]
-pub fn spawn_agent_window(
+pub fn new_work_window_detached(
     app: tauri::AppHandle,
     target_session_id: Option<String>,
+    title: &str,
+    preferred_tile_id: Option<String>,
+) -> Result<ShellWindowSpawn, String> {
+    let state = app.state::<AppState>();
+    let before = tmux_state::snapshot(state.inner())?;
+    let session_id = target_session_id.unwrap_or(active_session_id(&before)?);
+    let window_id = new_window_detached(app.clone(), Some(session_id.clone()))?;
+    let after = tmux_state::snapshot(state.inner())?;
+    let pane_id = after
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.pane_ids.first().cloned())
+        .ok_or("tmux did not report a pane for the new Work window".to_string())?;
+    let cwd = tmux_state::ensure_session_root_cwd(&session_id)?;
+    let tile = ensure_tmux_tile_record_for_backing(
+        state.inner(),
+        &session_id,
+        &window_id,
+        &pane_id,
+        TileRecordKind::Work,
+        false,
+        preferred_tile_id,
+    )?;
+
+    tmux_state::respawn_pane_shell_command(&pane_id, &build_shell_launch_command(&cwd), Some(&tile.tile_id))?;
+    let _ = tmux_state::rename_window(&window_id, "Work");
+    let _ = set_pane_title(app.clone(), pane_id.clone(), title.to_string());
+    tmux_state::emit_snapshot(&app)?;
+    Ok(ShellWindowSpawn {
+        tile_id: tile.tile_id,
+        pane_id,
+        window_id,
+        session_id,
+    })
+}
+
+pub fn spawn_agent_window_with_type(
+    app: tauri::AppHandle,
+    target_session_id: Option<String>,
+    agent_type: AgentType,
 ) -> Result<serde_json::Value, String> {
     let state = app.state::<AppState>();
     let before = tmux_state::snapshot(state.inner())?;
@@ -1686,8 +1796,16 @@ pub fn spawn_agent_window(
         agent_id,
         "Agent",
         AgentRole::Worker,
-        default_runtime_agent_type(),
+        agent_type,
     )
+}
+
+#[tauri::command]
+pub fn spawn_agent_window(
+    app: tauri::AppHandle,
+    target_session_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    spawn_agent_window_with_type(app, target_session_id, default_runtime_agent_type())
 }
 
 fn spawn_browser_window_internal(
@@ -1835,7 +1953,7 @@ pub fn kill_window(app: tauri::AppHandle, window_id: String) -> Result<(), Strin
 
     if session.window_ids.len() <= 1 {
         for pane_id in &window.pane_ids {
-            browser::close_browser_webview(&app, pane_id);
+            browser::close_browser_surface(&app, pane_id);
         }
         if matches!(state.tile_record_by_window(&window_id)?, Some(record) if record.kind == TileRecordKind::Shell) {
             let pane_id = window
@@ -1862,7 +1980,7 @@ pub fn kill_window(app: tauri::AppHandle, window_id: String) -> Result<(), Strin
     }
 
     for pane_id in &window.pane_ids {
-        browser::close_browser_webview(&app, pane_id);
+        browser::close_browser_surface(&app, pane_id);
     }
     tmux_state::kill_window(&window_id)?;
     tmux_state::emit_snapshot(&app)?;
@@ -2253,6 +2371,7 @@ mod tests {
                 window_ids: vec!["@1".to_string(), "@2".to_string()],
                 active_window_id: Some("@1".to_string()),
                 root_cwd: Some("/tmp/herd".to_string()),
+                browser_backend: crate::browser::BrowserBackend::LiveWebview,
             }],
             windows: vec![
                 TmuxWindow {
@@ -2530,12 +2649,16 @@ mod tests {
         assert!(root_skill.contains("self_display_status"));
         assert!(root_skill.contains("user-visible progress updates"));
         assert!(root_skill.contains("message_channel_subscribe"));
+        assert!(root_skill.contains("tile_subscribe"));
+        assert!(root_skill.contains("kind=tile_event"));
         assert!(worker_skill.contains("network_call"));
+        assert!(worker_skill.contains("network_subscribe"));
         assert!(worker_skill.contains("message_root"));
         assert!(worker_skill.contains("message_channel"));
         assert!(worker_skill.contains("self_led_control"));
         assert!(worker_skill.contains("self_display_status"));
         assert!(worker_skill.contains("user-visible progress updates"));
+        assert!(worker_skill.contains("kind=tile_event"));
         assert!(worker_skill.contains("Do not use `tile_call`"));
         assert!(worker_skill.contains("Do not use `browser_drive`"));
     }

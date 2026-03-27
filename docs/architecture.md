@@ -45,11 +45,12 @@ A Herd tab maps to one tmux session.
 Session scope is the main isolation boundary. These are session-private:
 
 - agent registry
-- topic registry
+- channel registry
 - chatter log
 - tile network graph
 - work registry
 - Root agent
+- session settings such as root spawn directory and browser backend
 
 Cross-session reads and writes are rejected for those domains.
 
@@ -224,7 +225,7 @@ Agent records currently carry:
 - `window_id`
 - `session_id`
 - `display_name`
-- liveness and topic state
+- liveness, chatter-subscription state, and channel state
 
 ### Agent Type
 
@@ -264,6 +265,7 @@ Properties:
 
 - worker-safe local-network MCP surface
 - self-targeted MCP surface for `self_info`, `self_display_draw`, `self_led_control`, and `self_display_status`
+- local-network tile-event subscriptions through `network_subscribe`, `network_unsubscribe`, and `network_subscription_list`
 - browser tile automation through `network_call` with browser action `drive`
 - browser extension control through `network_call` using browser message `extension_call` when the loaded page advertises it
 - visible local-network tiles may be inspected through `network_list` / `network_get`
@@ -298,6 +300,9 @@ Workers get:
 - `self_info`
 - `network_list`
 - `network_get`
+- `network_subscribe`
+- `network_unsubscribe`
+- `network_subscription_list`
 - `network_call`
 
 `self_info` resolves the sender tile and returns that tile receiver's native `get` payload. It does not go through sender-visible network filtering. `self_display_draw` updates only the calling agent tile's display drawer with a full ANSI frame plus explicit `columns` and `rows`. `self_led_control` and `self_display_status` update the calling tile's bottom-left chrome strip, so agent tiles and plain shell tiles can both drive their own LEDs/status line through the same sender-tile path.
@@ -308,8 +313,9 @@ Root gets the worker tools plus the full session control surface:
 
 - shell tools
 - browser tools
-- topic listing and session-scoped tile discovery
+- channel management and session-scoped tile discovery
 - session and network mutation tools
+- session-wide tile-event subscription tools
 - work inspection and work-stage tools
 
 ### Backend permission boundary
@@ -328,10 +334,11 @@ Meaning:
 
 Messaging is central to Herd.
 
-There are 4 semantic message paths:
+There are 5 semantic message paths:
 
 - direct
 - public
+- channel
 - network
 - root
 
@@ -357,12 +364,16 @@ Public messages may carry:
 
 - `@mentions`
 
+### Channel
+
 Channel messages are subscription-scoped chatter.
 
 - socket command: `message_channel`
 - CLI: `herd message channel ...`
 - MCP: `message_channel`
 - chatter display: `Sender -> #channel: message`
+
+Channels are normalized to lowercase and stored with a leading `#`.
 
 ### Network
 
@@ -411,8 +422,10 @@ Channel event kinds:
 
 - `direct`
 - `public`
+- `channel`
 - `network`
 - `root`
+- `tile_event`
 - `system`
 - `ping`
 
@@ -426,6 +439,20 @@ Important metadata fields:
 - `mentions`
 - `replay`
 - `timestamp_ms`
+- `delivery_reason`
+- `subscription_scope`
+- `subscription_direction`
+- `action`
+- `subject_tile_id`
+- `peer_tile_id`
+- `caller_tile_id`
+- `caller_agent_id`
+- `target_tile_id`
+- `target_agent_id`
+- `rpc_channel`
+- `outcome`
+- `args_json`
+- `result_json`
 
 Critical rule:
 
@@ -443,7 +470,7 @@ That activity view aggregates:
 - incoming DMs
 - outgoing DMs
 - outgoing public chatter
-- relevant public chatter by mention/topic
+- mentions and subscribed channel chatter
 - agent log entries
 
 Agent log entries currently include:
@@ -459,7 +486,7 @@ A Work item is a session-local tracked artifact with:
 
 - stable `work_id`
 - title
-- topic `#<work_id>`
+- work channel `#<work_id>`
 - current stage
 - per-stage status
 - review history
@@ -520,24 +547,36 @@ SQLite stores:
 - agent logs
 - work metadata and stage content
 - network connections
+- per-port access/networking overrides
 
 There is no separate persisted `work/` content directory in the current runtime model; work stage documents live in SQLite.
+
+Named saved-session snapshots live separately under the repo-local `sessions/` directory as JSON files.
 
 ## UI Surfaces
 
 The main UI surfaces are:
 
+- toolbar
+  - tabs
+  - `OPEN SESSION`
+  - shell / agent / browser / work spawn controls
 - canvas
   - tiles
   - network edges
   - hook-triggered lineage lines
-- sidebar
-  - `SETTINGS`
-    - `SPAWN DIR`
-    - `PORTS`
+  - minimized tile dock
+- tree sidebar
   - `WORK`
   - `AGENTS`
   - `TMUX`
+- settings sidebar
+  - `SPAWN DIR`
+  - `SESSION NAME`
+    - rename plus `SAVE` / `DELETE` / `LOAD`
+  - `BROWSER BACKEND`
+  - `PORTS`
+  - `WIRE SPARKS`
 - debug pane
   - `Info`
   - `Logs`
@@ -553,7 +592,7 @@ The sidebar is compact and selection-oriented. The canvas is the detailed spatia
 1. Herd reconnects to or creates its isolated tmux server.
 2. The active session/tab is hydrated into frontend state.
 3. Herd ensures one Root agent exists for each session.
-4. Agent/work/topic/chatter/network state is loaded from SQLite.
+4. Agent/work/channel/chatter/network state is loaded from SQLite.
 
 ### Worker coordination
 

@@ -2,13 +2,17 @@
 
 ![Herd screenshot](docs/screenshots/herd_chess.gif)
 
+## Docs Index
+
+| Document | What it covers |
+| --- | --- |
+| [`docs/quickstart.md`](docs/quickstart.md) | Fastest path from clone to a running local Herd app, plus the main dev and test commands |
+| [`docs/session-and-layout.md`](docs/session-and-layout.md) | Session settings, saved session files, browser backend switching, tile locking, minimizing, and layout workflows |
+| [`docs/architecture.md`](docs/architecture.md) | Runtime architecture, tile/session model, networks, Root vs worker roles, messaging, and persistence |
+| [`docs/keyboard-shortcuts.md`](docs/keyboard-shortcuts.md) | Keyboard-driven UI controls, navigation, sidebars, command bar, and close-confirmation shortcuts |
+| [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md) | Detailed CLI, socket API, MCP bridge, and integration `test_driver` reference |
+
 Herd is an experiment platform for agent collaboration. It gives agents explicit message channels, LAN-style local service discovery over visible tile networks, a per-session Root agent that can inspect and configure the shared canvas, and browser tiles that can host local extension pages with discoverable APIs. Under the hood, Herd runs an isolated `tmux` server, projects terminal-backed tiles into a spatial workspace, and exposes a local socket, CLI, and MCP bridge so users and agents operate inside the same environment.
-
-## Docs
-
-- [`docs/architecture.md`](docs/architecture.md): collaboration model, runtime architecture, Root/worker roles, messaging, networks, and persistence
-- [`docs/keyboard-shortcuts.md`](docs/keyboard-shortcuts.md): keyboard modes, navigation, view controls, sidebar controls, and command bar shortcuts
-- [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md): detailed CLI, socket, MCP, and `test_driver` reference
 
 ## Why Herd
 
@@ -109,16 +113,21 @@ Examples:
 ```bash
 herd network list
 herd tile list
-herd message network "Need another pair of eyes on this local network"
+herd message public "Need another pair of eyes on #delivery" --mention agent-1234
+herd message channel "#delivery" "Taking the browser pass"
 herd message root "Please inspect the local session and assign follow-up"
 herd tile create work --title "Socket API follow-up"
 ```
 
-Agent, topic, chatter, network, and work commands are session-private. They only expose the current tmux tab/session's registry data.
+Agent, channel, chatter, network, and work commands are session-private. They only expose the current tmux tab/session's registry data.
+
+Channel chatter is subscription-gated per session. Root or local user automation can inspect channels and manage subscriptions with `herd message channel list`, `herd message channel subscribe`, and `herd message channel unsubscribe`. The full command surface is documented in [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md).
 
 ## Browser Tiles And Extensions
 
 Browser tiles can host normal web content, local files, or built-in extension pages under [`extensions/browser/`](extensions/browser/). The repo currently ships browser-playable pages including `checkers`, `draw-poker`, `pong`, `snake-arena`, `texas-holdem`, `game-boy`, and `jsnes`.
+
+Each session can run browser tiles on either the default `live_webview` backend or the optional `agent_browser` backend, configured from the settings sidebar.
 
 Examples:
 
@@ -139,6 +148,12 @@ Browser screenshots support:
 
 The built-in Game Boy and JSNES emulator pages use the same screenshot contract and also expose extension methods for ROM loading and controller input.
 
+## Sessions And Layout
+
+Session-level controls live in the `SETTINGS` sidebar and the toolbar. From there you can change the session spawn directory, rename the session, save/load/delete a saved session configuration, switch browser backends, adjust visible port count, and toggle wire sparks.
+
+Saved session configurations are stored under `sessions/<config_name>_session.json`, and the toolbar's `OPEN SESSION` dropdown restores a selected save into a fresh tab instead of replacing the current one. For the full saved-session contract and layout tools such as shift-multi-select, lock/unlock, minimize/restore, anchored arrange, and ELK arrange, see [`docs/session-and-layout.md`](docs/session-and-layout.md).
+
 ## Runtime Files
 
 By default, Herd uses the runtime name `herd` and writes:
@@ -149,6 +164,8 @@ By default, Herd uses the runtime name `herd` and writes:
 - `tmp/herd.sqlite`: SQLite store for tile registry/layout state, chatter, agents, channels, network state, and work metadata/stage content
 
 If you set `HERD_RUNTIME_ID`, Herd namespaces those files under `herd-<runtime_id>` instead. The integration suite uses that to run isolated app instances without colliding with the default runtime.
+
+Saved session configurations live separately under [`sessions/`](sessions/) as repo-local JSON snapshots.
 
 ## MCP Server
 
@@ -172,7 +189,7 @@ The checked-in [`.mcp.json`](.mcp.json) points at:
 
 Herd-managed agent launches pass the repo-root `.mcp.json` explicitly with `--mcp-config`, so they can run from the configured session spawn directory without carrying duplicate MCP config files in subdirectories.
 
-Workers and Root use the same checked-in `server:herd` entry, but they do not see the same interface. Workers get messaging, `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, local-network discovery, and `network_call`; Root gets the broader session control surface. The MCP bridge also forwards inbound Herd events into the Claude channel when it runs inside a Herd-managed agent tile.
+Workers and Root use the same checked-in `server:herd` entry, but they do not see the same interface. Workers get messaging, `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, local-network discovery, network tile-event subscriptions, and `network_call`; Root gets the broader session control surface, including session-wide tile-event subscriptions. The MCP bridge also forwards inbound Herd events into the Claude channel when it runs inside a Herd-managed agent tile.
 
 The exact worker/root split, channel behavior, and browser/service-control details are documented in [`docs/socket-and-test-driver.md`](docs/socket-and-test-driver.md).
 
@@ -224,6 +241,7 @@ The managed integration suite currently covers:
 ## Repo Layout
 
 - [`docs/`](docs/): reference docs and screenshots
+- [`sessions/`](sessions/): saved session configuration snapshots
 - [`src/`](src/): Svelte frontend
 - [`src-tauri/`](src-tauri/): Rust backend and Tauri app
 - [`mcp-server/`](mcp-server/): stdio MCP bridge

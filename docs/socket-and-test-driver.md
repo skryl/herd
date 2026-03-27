@@ -29,10 +29,10 @@ herd tile list work
 herd tile get AbCdEf
 herd tile move AbCdEf 1180 260
 herd tile resize AbCdEf 760 520
-herd message topic list
+herd message channel list
 ```
 
-Agent, topic, chatter, network, and work operations are session-private. They resolve against the caller's current tmux tab/session and do not expose cross-session registry data.
+Agent, channel, chatter, network, and work operations are session-private. They resolve against the caller's current tmux tab/session and do not expose cross-session registry data.
 
 Public control APIs use Herd `tile_id`, not tmux pane ids. Tmux-backed tiles get short Herd-owned IDs such as `AbCdEf`; work tiles use `work:<work_id>`.
 
@@ -45,13 +45,13 @@ herd --agent-pid "$PPID" message direct agent-1234 "Can you take #prd-7?"
 Broadcast to public chatter:
 
 ```bash
-herd --agent-pid "$PPID" message public "I am picking up #prd-7 and syncing with @agent-1234"
+herd --agent-pid "$PPID" message public "I am picking up #prd-7 and syncing with @agent-1234" --mention agent-1234
 ```
 
-Send to the sender's local network:
+Send to a subscribed channel:
 
 ```bash
-herd --agent-pid "$PPID" message network "Need another pass on this local network"
+herd --agent-pid "$PPID" message channel '#prd-7' "Starting the socket refactor now"
 ```
 
 Send directly to the current session Root agent:
@@ -61,17 +61,26 @@ herd --agent-pid "$PPID" message root "Please inspect local work items and assig
 herd --agent-pid "$PPID" sudo "Please inspect local work items and assign follow-up"
 ```
 
-Publish to a topic explicitly:
+Send to the sender's local network:
 
 ```bash
-herd --agent-pid "$PPID" message topic '#prd-7' "Starting the socket refactor now"
+herd --agent-pid "$PPID" message network "Need another pass on this local network"
 ```
 
-Subscribe the current agent to a topic:
+List channels or manage channel subscriptions:
+
+```bash
+herd message channel list
+herd message channel subscribe agent-1234 '#prd-7'
+herd message channel unsubscribe agent-1234 '#prd-7'
+```
+
+Acknowledge a backend ping for the current or named agent:
 
 ```bash
 export HERD_AGENT_ID=agent-1234
-herd --agent-pid "$PPID" message topic subscribe '#prd-7'
+herd agent ack-ping
+herd agent ack-ping agent-1234
 ```
 
 Shell operations:
@@ -116,7 +125,23 @@ herd --agent-pid "$PPID" work stage complete work-s4-001
 herd self info
 ```
 
-Worker MCP exposes the message tools plus `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, `network_list`, `network_get`, and `network_call`. The local CLI/socket surface also exposes broader session-scoped network and work commands for Root, the app, and local automation.
+Worker tile-event subscriptions for network-visible tiles use `direction:action` selectors:
+
+```bash
+herd --agent-pid "$PPID" network subscribe MnOpQr in:exec
+herd --agent-pid "$PPID" network unsubscribe MnOpQr in:exec
+herd --agent-pid "$PPID" network subscriptions MnOpQr
+```
+
+Root can manage session-wide tile-event subscriptions for any same-session tile:
+
+```bash
+herd tile subscribe MnOpQr both:extension_call agent-1234
+herd tile unsubscribe MnOpQr both:extension_call agent-1234
+herd tile subscriptions MnOpQr agent-1234
+```
+
+Worker MCP exposes the message tools plus `self_info`, `self_display_draw`, `self_led_control`, `self_display_status`, `network_list`, `network_get`, `network_subscribe`, `network_unsubscribe`, `network_subscription_list`, and `network_call`. Root also gets the broader session-scoped tile and subscription controls.
 
 ## Socket API
 
@@ -150,6 +175,7 @@ Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain 
 - `network_list`
 - `network_get`
 - `tile_get`
+- `tile_call`
 - `tile_move`
 - `tile_resize`
 - `network_connect`
@@ -170,6 +196,22 @@ Normal control surfaces target Herd `tile_id` only. Tmux pane/window ids remain 
 `tile_move` is root-only and accepts `tile_id`, `x`, and `y`. It updates the canvas position for the tile and returns the updated tile object.
 
 `tile_resize` is root-only and accepts `tile_id`, `width`, and `height`. It updates the canvas size for the tile and returns the updated tile object.
+
+### Tile-event subscription commands
+
+- `network_subscribe`
+- `network_unsubscribe`
+- `network_subscription_list`
+- `tile_subscribe`
+- `tile_unsubscribe`
+- `tile_subscription_list`
+
+Subscription selectors use `direction:action` syntax:
+
+- directions: `in`, `out`, `both`, `*`
+- actions: tile message names such as `exec`, `get`, `navigate`, or `extension_call`
+
+Worker `network_*` subscription commands only target network-visible tiles in the sender's connected component. Root `tile_*` subscription commands can target any same-session tile.
 
 ### Shell instance commands
 
@@ -274,9 +316,12 @@ Permission boundary:
   - `self_display_status`
   - `network_list`
   - `network_get`
+  - `network_subscribe`
+  - `network_unsubscribe`
+  - `network_subscription_list`
   - `network_call`
 - `tile_get`, `tile_rename`, `tile_move`, and `tile_resize` are root-only.
-- Root MCP also exposes `browser_drive`.
+- Root MCP also exposes `browser_drive`, `tile_subscribe`, `tile_unsubscribe`, and `tile_subscription_list`.
 - Worker `network_call` is limited to visible local-network tiles and only to the worker-safe message subset for each tile kind. `shell` and directly controlled `browser` tiles expose write actions, including `extension_call` when a loaded browser page advertises it; `agent` and `root_agent` tiles stay read-only even when directly connected.
 - The raw socket is also used by the app, tests, and local CLI automation for session-scoped network/work actions.
 - Direct work stage mutation is still gated by the derived owner connection.
@@ -288,6 +333,34 @@ Message-channel behavior:
 - `replay=true` means historical context, usually last-hour chatter replay, not a fresh request.
 - `replay=false` means live traffic.
 - Replies that should be seen by Herd or other agents must go back out through `message_direct`, `message_public`, `message_channel`, `message_network`, or `message_root`.
+
+### Tile-event notifications
+
+Tile-event subscriptions deliver Claude channel events with `kind = "tile_event"`.
+
+Important metadata fields on those events include:
+
+- `delivery_reason`
+  - `subscription`
+  - `implicit_self_target`
+- `subscription_scope`
+  - `network`
+  - `tile`
+- `subscription_direction`
+  - `in`
+  - `out`
+  - `both`
+- `action`
+- `subject_tile_id`
+- `peer_tile_id`
+- `caller_tile_id`
+- `caller_agent_id`
+- `target_tile_id`
+- `target_agent_id`
+- `rpc_channel`
+- `outcome`
+- `args_json`
+- `result_json`
 
 ### Channel messaging
 
@@ -449,7 +522,7 @@ Generic tile messages reject:
 - other sessions
 - tile-specific action names not exposed for that tile kind
 
-Every socket-backed command now passes through the same internal message-delivery layer except the dedicated streaming `agent_events_subscribe` path. Session-scoped list, create, destroy, registry, topic, network, and message operations route through the session receiver, tile-instance operations route through tile receivers, and test/debug commands route through the herd receiver. Herd records structured `tile_message_logs` entries with `channel = cli | socket | mcp | internal`, target metadata, wrapper command, message name, args, outcome, and timing.
+Every socket-backed command now passes through the same internal message-delivery layer except the dedicated streaming `agent_events_subscribe` path. Session-scoped list, create, destroy, registry, channel, network, and message operations route through the session receiver, tile-instance operations route through tile receivers, and test/debug commands route through the herd receiver. Herd records structured `tile_message_logs` entries with `channel = cli | socket | mcp | internal`, target metadata, wrapper command, message name, args, outcome, and timing.
 
 `tile_move` is root-only and accepts `tile_id`, `x`, and `y`. It updates the canvas position for the tile and returns the updated tile object.
 
@@ -460,7 +533,7 @@ Work items are session-scoped. Use `tile_list` with `tile_type = work` for work 
 - stages: `plan -> prd -> artifact`
 - statuses: `ready -> in_progress -> completed -> approved`
 
-Each work item auto-creates topic `#<work_id>` and SQLite-backed stage content for:
+Each work item auto-creates work channel `#<work_id>` and SQLite-backed stage content for:
 
 - `plan`
 - `prd`
@@ -529,10 +602,12 @@ The current request surface includes:
 - Readiness and status: `ping`, `wait_for_ready`, `wait_for_bootstrap`, `wait_for_idle`, `get_status`
 - State snapshots: `get_state_tree`, `get_projection`
 - Keyboard and command bar control: `press_keys`, `command_bar_open`, `command_bar_set_text`, `command_bar_submit`, `command_bar_cancel`
-- Toolbar and sidebar control: `toolbar_select_tab`, `toolbar_add_tab`, `toolbar_spawn_shell`, `toolbar_spawn_agent`, `toolbar_spawn_work`, `sidebar_open`, `sidebar_close`, `sidebar_select_item`, `sidebar_move_selection`, `sidebar_begin_rename`
+- Toolbar and sidebar control: `toolbar_select_tab`, `toolbar_add_tab`, `toolbar_spawn_shell`, `toolbar_spawn_agent`, `toolbar_spawn_work`, `sidebar_open`, `sidebar_close`, `settings_sidebar_open`, `settings_sidebar_close`, `sidebar_select_item`, `sidebar_move_selection`, `sidebar_begin_rename`
 - Tile and canvas control: `tile_select`, `tile_close`, `tile_drag`, `tile_resize`, `tile_title_double_click`, `canvas_pan`, `canvas_context_menu`, `canvas_zoom_at`, `canvas_wheel`, `canvas_fit_all`, `canvas_reset`, `tile_context_menu`, `port_context_menu`, `context_menu_select`, `context_menu_dismiss`
-  These tile-oriented requests now take Herd `tile_id`, not tmux pane ids.
+  These tile-oriented requests take Herd `tile_id`, not tmux pane ids. `tile_select` also accepts optional `shift_key: true` for multi-select, and the context-menu requests cover batch lock/unlock, batch close, and per-port access/networking changes.
 - Close-confirm flow: `confirm_close_tab`, `cancel_close_tab`
+
+Current integration coverage also exercises settings-sidebar saved-session save/load/delete flows and the toolbar `OPEN SESSION` restore flow, using the typed requests above plus `test_dom_query` where there is no dedicated request type for a specific button or select control.
 
 The projection now includes debug and agent state such as:
 

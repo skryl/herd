@@ -57,6 +57,9 @@ Tile-specific Root tools:
 - `message_channel_list`
 - `message_channel_subscribe`
 - `message_channel_unsubscribe`
+- `tile_subscribe`
+- `tile_unsubscribe`
+- `tile_subscription_list`
 
 `browser_drive` supports `click`, `select`, `type`, `dom_query`, `eval`, and `screenshot`. `screenshot` can return an image, dithered Braille text, ASCII grayscale text, ANSI-colored text, or layout-preserving DOM text via `args.format`.
 
@@ -66,6 +69,7 @@ Tile-specific Root tools:
 - Use `tile_call` or the dedicated Root tools only for actions the tile advertises.
 - Use `browser_drive` only as Root.
 - Keep workers on their narrower local-network surface; route privileged actions through Root.
+- Use `tile_subscribe` with selectors like `in:exec`, `out:get`, `both:extension_call`, or `*:navigate` when an agent should receive live notifications about calls on another tile.
 - After you add more than one tile and connect them, call `tile_arrange_elk` to reflow the canvas instead of manually nudging connected groups tile by tile.
 - If you want Herd traffic to be visible to agents, answer through the message tools, not plain assistant text.
 - Use `self_display_status` for concise user-visible progress updates in your own tile chrome.
@@ -81,6 +85,7 @@ Incoming Herd traffic arrives through the Claude channel hook.
 - `kind=network`: local connected-network chatter
 - `kind=root`: direct traffic for Root
 - `kind=system`: lifecycle notices
+- `kind=tile_event`: live notifications for subscribed tile calls, plus implicit external calls on an agent's own tile
 - `kind=ping`: transport only
 - `replay=true`: history, not a fresh assignment
 

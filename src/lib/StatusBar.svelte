@@ -1,6 +1,6 @@
 <script lang="ts">
   import { mode } from './stores/mode';
-  import { sidebarOpen } from './stores/sidebar';
+  import { settingsSidebarOpen, sidebarOpen } from './stores/sidebar';
   import { selectedTerminalId } from './stores/terminals';
   import { activeTabTerminals } from './stores/tabs';
 
@@ -12,7 +12,15 @@
   });
 
   let totalInTab = $derived($activeTabTerminals.length);
-  let statusLabel = $derived($sidebarOpen && $mode === 'command' ? 'TREE' : $mode === 'command' ? 'CMD' : 'INS');
+  let statusLabel = $derived(
+    $mode !== 'command'
+      ? 'INS'
+      : $settingsSidebarOpen
+        ? 'SET'
+        : $sidebarOpen
+          ? 'TREE'
+          : 'CMD',
+  );
 </script>
 
 <div class="status-bar">
@@ -38,6 +46,14 @@
       <span class="shortcut"><span class="key">d</span> debug</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">:</span> cmd</span>
+    {:else if $settingsSidebarOpen && $mode === 'command'}
+      <span class="shortcut"><span class="key">Esc</span><span class="key">,</span> close settings</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">b</span> tree</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">d</span> debug</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">:</span> cmd</span>
     {:else if $mode === 'command'}
       <span class="shortcut"><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span> focus</span>
       <span class="sep">│</span>
@@ -47,7 +63,9 @@
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">Ctrl+h/j/k/l</span> move</span>
       <span class="sep">│</span>
-      <span class="shortcut"><span class="key">a</span><span class="key">A</span> re-arrange</span>
+      <span class="shortcut"><span class="key">a</span> align</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">A</span> arrange</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">t</span> tab</span>
       <span class="sep">│</span>
@@ -62,6 +80,8 @@
       <span class="shortcut"><span class="key">i</span> input</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">b</span> tree</span>
+      <span class="sep">│</span>
+      <span class="shortcut"><span class="key">,</span> settings</span>
       <span class="sep">│</span>
       <span class="shortcut"><span class="key">d</span> debug</span>
       <span class="sep">│</span>

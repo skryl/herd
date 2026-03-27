@@ -15,7 +15,7 @@ interface SocketResponse<T = unknown> {
 }
 
 interface AgentChannelEvent {
-  kind: 'direct' | 'public' | 'channel' | 'network' | 'root' | 'system' | 'ping';
+  kind: 'direct' | 'public' | 'channel' | 'network' | 'root' | 'tile_event' | 'system' | 'ping';
   from_agent_id?: string | null;
   from_display_name: string;
   to_agent_id?: string | null;
@@ -25,6 +25,20 @@ interface AgentChannelEvent {
   mentions: string[];
   replay: boolean;
   ping_id?: string | null;
+  delivery_reason?: 'subscription' | 'implicit_self_target' | null;
+  subscription_scope?: 'tile' | 'network' | null;
+  subscription_direction?: 'in' | 'out' | 'both' | null;
+  action?: string | null;
+  subject_tile_id?: string | null;
+  peer_tile_id?: string | null;
+  caller_tile_id?: string | null;
+  caller_agent_id?: string | null;
+  target_tile_id?: string | null;
+  target_agent_id?: string | null;
+  rpc_channel?: string | null;
+  outcome?: string | null;
+  args_json?: unknown;
+  result_json?: unknown;
   timestamp_ms: number;
 }
 
@@ -1069,7 +1083,7 @@ describe.sequential('worker/root mcp and permissions', () => {
     expect(signalSnapshot.receiverPortBlink).toBe(true);
   });
 
-  it('suppresses network sparks when disabled in the sidebar settings', async () => {
+  it('suppresses network sparks when disabled in the settings sidebar', async () => {
     const projection = await createIsolatedTab(client, 'worker-network-signal-disabled');
     const sessionId = projection.active_tab_id!;
     const rootProjection = await waitFor(
@@ -1093,7 +1107,7 @@ describe.sequential('worker/root mcp and permissions', () => {
       100,
     );
 
-    await client.sidebarOpen();
+    await client.settingsSidebarOpen();
     await client.testDomQuery(`
       document.querySelector('.wire-sparks-toggle')?.dispatchEvent(new MouseEvent('click', {
         bubbles: true,
@@ -2971,6 +2985,116 @@ return localStorage.getItem('${storageKey}');
     } finally {
       rootSubscription.close();
       workerSubscription.close();
+    }
+  });
+
+  it('delivers subscribed tile_event notifications and implicit self-target agent call events', async () => {
+    const projection = await createIsolatedTab(client, 'tile-events');
+    const sessionId = projection.active_tab_id!;
+    const rootProjection = await waitFor(
+      'root agent in tile-events tab',
+      () => client.getProjection(),
+      (nextProjection) => nextProjection.active_tab_id === sessionId && Boolean(rootAgentForProjection(nextProjection)),
+      60_000,
+      250,
+    );
+    const rootAgent = rootAgentForProjection(rootProjection)!;
+    const workerA = await spawnWorkerAgentInActiveTab(client);
+    const workerB = await spawnWorkerAgentInActiveTab(client);
+    const shellTileId = await spawnWorkerShellInActiveTab(client);
+
+    await client.networkConnect(workerA.paneId, 'left', shellTileId, 'right', rootAgent.tile_id, rootAgent.agent_id);
+    await client.tileSubscribe(shellTileId, 'in:exec', workerB.agentId, rootAgent.tile_id, rootAgent.agent_id);
+    await client.networkSubscribe(shellTileId, 'in:exec', workerA.paneId, workerA.agentId);
+
+    const tileSubscriptions = await client.tileSubscriptionList(shellTileId, workerB.agentId, rootAgent.tile_id, rootAgent.agent_id);
+    expect(tileSubscriptions).toHaveLength(1);
+    const networkSubscriptions = await client.networkSubscriptionList(shellTileId, workerA.paneId, workerA.agentId);
+    expect(networkSubscriptions).toHaveLength(1);
+
+    const workerASubscription = await openAgentEventSubscription(runtime.socketPath, workerA.agentId);
+    const workerBSubscription = await openAgentEventSubscription(runtime.socketPath, workerB.agentId);
+
+    try {
+      await client.tileCall(shellTileId, 'exec', { command: 'printf tile-events\\n' }, rootAgent.tile_id, rootAgent.agent_id);
+
+      const workerAEvents = await collectAgentEvents(
+        workerASubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'tile_event'
+              && event.delivery_reason === 'subscription'
+              && event.subscription_scope === 'network'
+              && event.subscription_direction === 'in'
+              && event.action === 'exec'
+              && event.subject_tile_id === shellTileId,
+          ),
+        10_000,
+      );
+      const workerATileEvent = workerAEvents.find(
+        (event) =>
+          event.kind === 'tile_event'
+          && event.delivery_reason === 'subscription'
+          && event.subscription_scope === 'network'
+          && event.action === 'exec',
+      )!;
+      expect(workerATileEvent.caller_agent_id).toBe(rootAgent.agent_id);
+      expect(workerATileEvent.target_tile_id).toBe(shellTileId);
+      expect(workerATileEvent.outcome).toBe('ok');
+
+      const workerBEvents = await collectAgentEvents(
+        workerBSubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'tile_event'
+              && event.delivery_reason === 'subscription'
+              && event.subscription_scope === 'tile'
+              && event.subscription_direction === 'in'
+              && event.action === 'exec'
+              && event.subject_tile_id === shellTileId,
+          ),
+        10_000,
+      );
+      const workerBTileEvent = workerBEvents.find(
+        (event) =>
+          event.kind === 'tile_event'
+          && event.delivery_reason === 'subscription'
+          && event.subscription_scope === 'tile'
+          && event.action === 'exec',
+      )!;
+      expect(workerBTileEvent.caller_agent_id).toBe(rootAgent.agent_id);
+      expect(workerBTileEvent.target_tile_id).toBe(shellTileId);
+      expect(workerBTileEvent.outcome).toBe('ok');
+
+      await client.tileCall(workerA.paneId, 'get', {}, rootAgent.tile_id, rootAgent.agent_id);
+
+      const implicitEvents = await collectAgentEvents(
+        workerASubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'tile_event'
+              && event.delivery_reason === 'implicit_self_target'
+              && event.action === 'get'
+              && event.target_tile_id === workerA.paneId,
+          ),
+        10_000,
+      );
+      const implicitEvent = implicitEvents.find(
+        (event) =>
+          event.kind === 'tile_event'
+          && event.delivery_reason === 'implicit_self_target'
+          && event.action === 'get',
+      )!;
+      expect(implicitEvent.caller_agent_id).toBe(rootAgent.agent_id);
+      expect(implicitEvent.target_tile_id).toBe(workerA.paneId);
+      expect(implicitEvent.target_agent_id).toBe(workerA.agentId);
+      expect(implicitEvent.outcome).toBe('ok');
+    } finally {
+      workerASubscription.close();
+      workerBSubscription.close();
     }
   });
 });

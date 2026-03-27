@@ -13,7 +13,7 @@
   import BrowserTextPreviewDrawer from './BrowserTextPreviewDrawer.svelte';
   import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
-  import type { TerminalInfo } from './types';
+  import type { BrowserBackend, TerminalInfo } from './types';
   import {
     backBrowserWebview,
     forwardBrowserWebview,
@@ -28,6 +28,7 @@
     type BrowserWebviewViewport,
   } from './tauri';
   import {
+    appState,
     browserWebviewsSuspended,
     canvasState,
     clientDeltaToWorldDelta,
@@ -38,7 +39,7 @@
     registerPaneDriverHandle,
     removeTerminal,
     selectTile,
-    selectedTerminalId,
+    selectedTileIds,
     tileActivityById,
     togglePaneMinimized,
     updateTerminal,
@@ -74,6 +75,7 @@
 
   let urlDraft = $state(DEFAULT_BROWSER_URL);
   let currentUrl = $state(DEFAULT_BROWSER_URL);
+  let screenshotDataUrl = $state<string | null>(null);
   let loading = $state(true);
   let isEditingUrl = false;
   let destroyed = false;
@@ -84,12 +86,17 @@
   let windowLogicalWidth = $state(0);
   let windowLogicalHeight = $state(0);
 
-  let isSelected = $derived($selectedTerminalId === info.id);
+  let isSelected = $derived($selectedTileIds.includes(info.tileId));
+  let isLocked = $derived(Boolean(info.locked));
   let canEditUrl = $derived($mode === 'input' && isSelected && !info.readOnly);
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
   let componentTypeLabel = $derived(info.readOnly ? 'VIEW' : 'WEB');
   let locationLabel = $derived(browserLocationLabel(currentUrl));
+  let browserBackend = $derived.by<BrowserBackend>(() => (
+    $appState.tmux.sessions[info.sessionId]?.browser_backend ?? 'live_webview'
+  ));
+  let usingAgentBrowser = $derived(browserBackend === 'agent_browser');
   let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
   let previewColumns = $derived(Math.max(40, Math.min(160, Math.round(Math.max(240, info.width - 20) / 6))));
   let browserPageZoom = $state(DEFAULT_BROWSER_PAGE_ZOOM);
@@ -236,6 +243,11 @@
   function applyBrowserState(state: BrowserWebviewState | null | undefined) {
     if (!state?.currentUrl) return;
     currentUrl = state.currentUrl;
+    if (state.backend === 'agent_browser') {
+      screenshotDataUrl = state.screenshotDataUrl ?? screenshotDataUrl;
+    } else {
+      screenshotDataUrl = null;
+    }
     if (!isEditingUrl) {
       urlDraft = state.currentUrl;
     }
@@ -302,7 +314,7 @@
     currentUrl = normalized;
     urlDraft = normalized;
     try {
-      await navigateBrowserWebview(info.paneId, normalized);
+      applyBrowserState(await navigateBrowserWebview(info.paneId, normalized));
       queueBrowserSync();
     } catch (error) {
       loading = false;
@@ -313,7 +325,7 @@
   async function refresh() {
     loading = true;
     try {
-      await reloadBrowserWebview(info.paneId);
+      applyBrowserState(await reloadBrowserWebview(info.paneId));
     } catch (error) {
       loading = false;
       console.error('browser_webview_reload failed:', error);
@@ -323,7 +335,7 @@
   async function goBack() {
     loading = true;
     try {
-      await backBrowserWebview(info.paneId);
+      applyBrowserState(await backBrowserWebview(info.paneId));
     } catch (error) {
       loading = false;
       console.error('browser_webview_back failed:', error);
@@ -333,7 +345,7 @@
   async function goForward() {
     loading = true;
     try {
-      await forwardBrowserWebview(info.paneId);
+      applyBrowserState(await forwardBrowserWebview(info.paneId));
     } catch (error) {
       loading = false;
       console.error('browser_webview_forward failed:', error);
@@ -427,6 +439,7 @@
 
   function handleTitleMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    if (isLocked) return;
     isDragging = true;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
@@ -492,7 +505,6 @@
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    selectTile(info.id);
     const viewport = (e.currentTarget as HTMLElement).closest('.canvas-viewport') as HTMLElement | null;
     const rect = viewport?.getBoundingClientRect();
     const clientX = rect ? e.clientX - rect.left : e.clientX;
@@ -645,6 +657,20 @@
       window.clearInterval(intervalId);
     };
   });
+
+  $effect(() => {
+    if (!usingAgentBrowser) {
+      screenshotDataUrl = null;
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      queueBrowserSync();
+    }, 1500);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  });
 </script>
 
 <svelte:window onmousemove={handleWindowMouseMove} onmouseup={handleWindowMouseUp} />
@@ -659,7 +685,7 @@
   data-browser-page-zoom={browserPageZoomLabel}
   style="left: 0; top: 0; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1}; transform: translate({browserTileX}px, {browserTileY}px) scale({$canvasState.zoom});"
   onmousedown={(e) => {
-    selectTile(info.id);
+    selectTile(info.id, e.shiftKey);
     e.stopPropagation();
   }}
   oncontextmenu={handleContextMenu}
@@ -671,6 +697,14 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="header-bar" onmousedown={handleTitleMouseDown} ondblclick={handleTitleDblClick}>
       <div class="header-left">
+        {#if isLocked}
+          <span class="tile-lock-indicator" title="Locked" aria-label="Locked">
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3.5 5V3.75a2.5 2.5 0 1 1 5 0V5" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              <rect x="2.2" y="5" width="7.6" height="5.2" rx="1" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </span>
+        {/if}
         <span class="browser-badge" title="Browser tile" aria-label="Browser tile">WEB</span>
         <span class="designator">{displayTitle}</span>
         <span class="component-type">{componentTypeLabel}</span>
@@ -788,9 +822,20 @@
 
     <div class="browser-frame-shell">
       <div class="screen-bezel">
-        <div bind:this={surfaceHostRef} class="browser-surface-host"></div>
-        <div class="browser-surface-placeholder" aria-hidden="true">
+        <div bind:this={surfaceHostRef} class="browser-surface-host">
+          {#if usingAgentBrowser && screenshotDataUrl}
+            <img class="browser-snapshot-image" src={screenshotDataUrl} alt={`Browser snapshot for ${currentUrl}`} />
+          {/if}
+        </div>
+        <div
+          class="browser-surface-placeholder"
+          class:hidden={usingAgentBrowser && Boolean(screenshotDataUrl)}
+          aria-hidden={usingAgentBrowser && Boolean(screenshotDataUrl)}
+        >
           <span class="placeholder-status">{loading ? 'Loading...' : 'Ready'}</span>
+          {#if usingAgentBrowser}
+            <span class="placeholder-status">Agent Browser</span>
+          {/if}
           <span class="placeholder-url">{currentUrl}</span>
         </div>
       </div>
@@ -972,6 +1017,19 @@
     gap: 6px;
   }
 
+  .tile-lock-indicator {
+    display: inline-flex;
+    width: 12px;
+    height: 12px;
+    color: var(--copper);
+    flex: 0 0 12px;
+  }
+
+  .tile-lock-indicator svg {
+    width: 100%;
+    height: 100%;
+  }
+
   .browser-badge {
     display: inline-flex;
     align-items: center;
@@ -1122,6 +1180,11 @@
     inset: 0;
   }
 
+  .browser-surface-host {
+    overflow: hidden;
+    background: #0b1218;
+  }
+
   .browser-surface-placeholder {
     display: flex;
     flex-direction: column;
@@ -1136,6 +1199,18 @@
     font-size: 9px;
     letter-spacing: 0.3px;
     pointer-events: none;
+  }
+
+  .browser-surface-placeholder.hidden {
+    opacity: 0;
+  }
+
+  .browser-snapshot-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    background: #04090d;
   }
 
   .placeholder-status {

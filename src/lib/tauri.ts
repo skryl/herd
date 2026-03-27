@@ -1,12 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AgentBrowserInstallStatus,
   AgentDebugState,
+  BrowserBackend,
   BrowserExtensionPage,
   ClaudeMenuData,
   LayoutStateMap,
+  LoadedSessionConfiguration,
   NetworkConnection,
   PortMode,
   PortNetworkingMode,
+  SavedSessionConfigurationSummary,
   TilePortSetting,
   TilePort,
   TmuxSnapshot,
@@ -24,6 +28,8 @@ export interface BrowserWebviewViewport {
 
 export interface BrowserWebviewState {
   currentUrl: string;
+  backend: BrowserBackend;
+  screenshotDataUrl?: string | null;
 }
 
 export type BrowserPreviewFormat = 'text' | 'braille' | 'ansi' | 'ascii';
@@ -129,8 +135,51 @@ export async function renameSession(sessionId: string, name: string): Promise<vo
   return invoke('rename_session', { sessionId, name });
 }
 
+export async function listSavedSessionConfigurations(): Promise<SavedSessionConfigurationSummary[]> {
+  return invoke<SavedSessionConfigurationSummary[]>('list_saved_session_configurations');
+}
+
+export async function saveSessionConfiguration(
+  sessionId: string,
+  minimizedTileIds: string[],
+  layoutEntriesByTile: LayoutStateMap,
+): Promise<SavedSessionConfigurationSummary> {
+  return invoke<SavedSessionConfigurationSummary>('save_session_configuration', {
+    sessionId,
+    minimizedTileIds,
+    layoutEntriesByTile,
+  });
+}
+
+export async function loadSessionConfiguration(
+  sessionId: string,
+  configName: string,
+): Promise<LoadedSessionConfiguration> {
+  return invoke<LoadedSessionConfiguration>('load_session_configuration', { sessionId, configName });
+}
+
+export async function deleteSessionConfiguration(configName: string): Promise<void> {
+  return invoke('delete_session_configuration', { configName });
+}
+
 export async function setSessionRootCwd(sessionId: string, cwd: string): Promise<string> {
   return invoke<string>('set_session_root_cwd', { sessionId, cwd });
+}
+
+export async function setSessionBrowserBackend(sessionId: string, backend: BrowserBackend): Promise<string> {
+  return invoke<string>('set_session_browser_backend', { sessionId, backend });
+}
+
+export async function getAgentBrowserInstallStatus(): Promise<AgentBrowserInstallStatus> {
+  return invoke<AgentBrowserInstallStatus>('get_agent_browser_install_status');
+}
+
+export async function setAgentBrowserInstallDeclined(declined: boolean): Promise<AgentBrowserInstallStatus> {
+  return invoke<AgentBrowserInstallStatus>('set_agent_browser_install_declined', { declined });
+}
+
+export async function installAgentBrowserRuntime(): Promise<AgentBrowserInstallStatus> {
+  return invoke<AgentBrowserInstallStatus>('install_agent_browser_runtime');
 }
 
 export async function newWindow(targetSessionId?: string | null): Promise<string> {
@@ -261,8 +310,9 @@ export async function saveLayoutState(
   y: number,
   width: number,
   height: number,
+  locked = false,
 ): Promise<void> {
-  return invoke('save_layout_state', { paneId, x, y, width, height });
+  return invoke('save_layout_state', { paneId, x, y, width, height, locked });
 }
 
 export async function tmuxStatus(): Promise<{ server: boolean; cc: boolean }> {

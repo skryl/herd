@@ -1,14 +1,24 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     activeSessionWorkItems,
     appState,
     agentInfos,
+    closeSettingsSidebar,
+    closeSidebar,
+    gridSnapEnabled,
+    gridSnapSize,
     networkCallSparksEnabled,
+    refreshSavedSessionConfigurations,
+    savedSessionConfigurations,
+    saveSessionConfigurationForSession,
     selectedWorkId,
     selectAgentItem,
+    loadSavedSessionConfigurationIntoSession,
     selectWorkItem,
     setSidebarSection,
     setSidebarSelection,
+    settingsSidebarOpen,
     sidebarSection,
     sidebarItems,
     sidebarOpen,
@@ -16,13 +26,56 @@
     tilePortCount,
   } from './stores/appState';
   import { TILE_PORT_COUNT_OPTIONS } from './tilePorts';
-  import { setSessionRootCwd } from './tauri';
+  import {
+    deleteSessionConfiguration,
+    getAgentBrowserInstallStatus,
+    installAgentBrowserRuntime,
+    renameSession,
+    setAgentBrowserInstallDeclined,
+    setSessionBrowserBackend,
+    setSessionRootCwd,
+  } from './tauri';
+  import { GRID_SNAP_SIZE_OPTIONS } from './types';
+  import type { AgentBrowserInstallStatus, BrowserBackend } from './types';
+
+  let { kind = 'tree' }: { kind?: 'tree' | 'settings' } = $props();
 
   let workCollapsed = $state(false);
-  let settingsCollapsed = $state(false);
   let tmuxCollapsed = $state(false);
   let agentsCollapsed = $state(false);
   let updatingSessionCwd = $state(false);
+  let renamingSession = $state(false);
+  let savingSessionConfig = $state(false);
+  let deletingSessionConfig = $state(false);
+  let loadingSessionConfig = $state(false);
+  let browserBackendBusy = $state(false);
+  let sessionNameDraft = $state('');
+  let sessionNameDirty = $state(false);
+  let sessionNameSessionId = $state<string | null>(null);
+  let agentBrowserStatus = $state<AgentBrowserInstallStatus | null>(null);
+  let sessionConfigStatus = $state<{ tone: 'success' | 'error'; text: string } | null>(null);
+
+  function sanitizeSessionConfigName(name: string): string | null {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    let sanitized = '';
+    let lastWasSeparator = false;
+    for (const ch of trimmed) {
+      if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+        sanitized += ch.toLowerCase();
+        lastWasSeparator = false;
+      } else if (!lastWasSeparator) {
+        sanitized += '_';
+        lastWasSeparator = true;
+      }
+    }
+
+    const normalized = sanitized.replace(/^_+|_+$/g, '');
+    return normalized.length > 0 ? normalized : null;
+  }
 
   let sortedAgents = $derived(
     [...$agentInfos].sort((left, right) => {
@@ -35,6 +88,21 @@
   let activeSession = $derived(
     $appState.tmux.activeSessionId ? ($appState.tmux.sessions[$appState.tmux.activeSessionId] ?? null) : null,
   );
+  let currentSessionConfigName = $derived(sanitizeSessionConfigName(sessionNameDraft));
+  let currentSavedSessionSummary = $derived.by(() => {
+    const configName = currentSessionConfigName;
+    if (!configName) {
+      return null;
+    }
+    return $savedSessionConfigurations.find((entry) => entry.config_name === configName) ?? null;
+  });
+  let activeSessionBrowserTileCount = $derived.by(() => {
+    const sessionId = activeSession?.id;
+    if (!sessionId) return 0;
+    return Object.values($appState.tmux.panes).filter(
+      (pane) => pane.session_id === sessionId && (pane.role === 'browser' || pane.command === 'browser'),
+    ).length;
+  });
   let sessionWorkItems = $derived($activeSessionWorkItems);
   let selectedTileId = $derived.by(() => {
     const paneId = $appState.ui.selectedPaneId;
@@ -42,6 +110,18 @@
     const pane = $appState.tmux.panes[paneId];
     if (!pane) return null;
     return pane.tile_id ?? $appState.tmux.windows[pane.window_id]?.tile_id ?? null;
+  });
+  let sidebarVisible = $derived(kind === 'tree' ? $sidebarOpen : $settingsSidebarOpen);
+
+  $effect(() => {
+    const nextSessionId = activeSession?.id ?? null;
+    const nextSessionName = activeSession?.name ?? '';
+    if (nextSessionId !== sessionNameSessionId || !sessionNameDirty) {
+      sessionNameSessionId = nextSessionId;
+      sessionNameDraft = nextSessionName;
+      sessionNameDirty = false;
+      sessionConfigStatus = null;
+    }
   });
 
   async function handleEditSpawnDirectory() {
@@ -62,101 +142,424 @@
     }
   }
 
+  async function refreshAgentBrowserRuntimeStatus() {
+    try {
+      agentBrowserStatus = await getAgentBrowserInstallStatus();
+    } catch (error) {
+      console.error('get_agent_browser_install_status failed:', error);
+      agentBrowserStatus = null;
+    }
+  }
+
+  async function ensureAgentBrowserInstalled() {
+    const currentStatus = agentBrowserStatus ?? await getAgentBrowserInstallStatus();
+    agentBrowserStatus = currentStatus;
+    if (currentStatus.ready) {
+      return currentStatus;
+    }
+
+    const confirmed = window.confirm(
+      `Install agent-browser ${currentStatus.version} and Chrome for Testing into ${currentStatus.runtime_dir}?`,
+    );
+    if (!confirmed) {
+      agentBrowserStatus = await setAgentBrowserInstallDeclined(true);
+      return null;
+    }
+
+    agentBrowserStatus = await installAgentBrowserRuntime();
+    return agentBrowserStatus;
+  }
+
+  async function handleSelectBrowserBackend(nextBackend: BrowserBackend) {
+    if (!activeSession || browserBackendBusy || activeSession.browser_backend === nextBackend) {
+      return;
+    }
+
+    if (
+      activeSessionBrowserTileCount > 0
+      && !window.confirm(
+        `Switch this session's browser backend to ${nextBackend === 'agent_browser' ? 'Agent Browser' : 'Live Webview'}? Existing browser tiles will reconnect through the new backend.`,
+      )
+    ) {
+      return;
+    }
+
+    browserBackendBusy = true;
+    try {
+      if (nextBackend === 'agent_browser') {
+        const status = await ensureAgentBrowserInstalled();
+        if (!status?.ready) {
+          return;
+        }
+      }
+      await setSessionBrowserBackend(activeSession.id, nextBackend);
+      await refreshAgentBrowserRuntimeStatus();
+    } catch (error) {
+      console.error('set_session_browser_backend failed:', error);
+    } finally {
+      browserBackendBusy = false;
+    }
+  }
+
+  async function commitSessionName(): Promise<string | null> {
+    if (!activeSession) return null;
+    const trimmed = sessionNameDraft.trim();
+    if (!trimmed) {
+      sessionNameDraft = activeSession.name;
+      sessionNameDirty = false;
+      return activeSession.name;
+    }
+    if (trimmed === activeSession.name) {
+      sessionNameDirty = false;
+      return trimmed;
+    }
+
+    renamingSession = true;
+    try {
+      await renameSession(activeSession.id, trimmed);
+      sessionNameDraft = trimmed;
+      sessionNameDirty = false;
+      return trimmed;
+    } catch (error) {
+      console.error('rename_session failed:', error);
+      sessionNameDraft = activeSession.name;
+      sessionNameDirty = false;
+      return null;
+    } finally {
+      renamingSession = false;
+    }
+  }
+
+  async function handleSaveSessionConfiguration() {
+    if (!activeSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig) return;
+    const committedName = await commitSessionName();
+    if (!committedName) return;
+
+    const configName = sanitizeSessionConfigName(committedName);
+    if (!configName) return;
+    const existingSummary = $savedSessionConfigurations.find((entry) => entry.config_name === configName);
+    if (
+      existingSummary
+      && !window.confirm(
+        `Overwrite saved session "${existingSummary.session_name}" (${existingSummary.file_name})?`,
+      )
+    ) {
+      return;
+    }
+
+    savingSessionConfig = true;
+    sessionConfigStatus = null;
+    try {
+      const summary = await saveSessionConfigurationForSession(activeSession.id);
+      await refreshSavedSessionConfigurations();
+      sessionConfigStatus = {
+        tone: 'success',
+        text: existingSummary
+          ? `Overwrote ${summary.file_name}.`
+          : `Saved ${summary.file_name}.`,
+      };
+    } catch (error) {
+      console.error('save_session_configuration failed:', error);
+      sessionConfigStatus = {
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Failed to save session.',
+      };
+    } finally {
+      savingSessionConfig = false;
+    }
+  }
+
+  async function handleDeleteSessionConfiguration() {
+    if (!activeSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig) return;
+    const summary = currentSavedSessionSummary;
+    if (!summary) return;
+    if (!window.confirm(`Delete saved session "${summary.session_name}" (${summary.file_name})?`)) {
+      return;
+    }
+
+    deletingSessionConfig = true;
+    sessionConfigStatus = null;
+    try {
+      await deleteSessionConfiguration(summary.config_name);
+      await refreshSavedSessionConfigurations();
+      sessionConfigStatus = {
+        tone: 'success',
+        text: `Deleted ${summary.file_name}.`,
+      };
+    } catch (error) {
+      console.error('delete_session_configuration failed:', error);
+      sessionConfigStatus = {
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Failed to delete saved session.',
+      };
+    } finally {
+      deletingSessionConfig = false;
+    }
+  }
+
+  async function handleLoadSessionConfiguration() {
+    if (!activeSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig) return;
+    const committedName = await commitSessionName();
+    if (!committedName) return;
+
+    loadingSessionConfig = true;
+    try {
+      await loadSavedSessionConfigurationIntoSession(activeSession.id, committedName);
+      await refreshSavedSessionConfigurations();
+    } catch (error) {
+      console.error('load_session_configuration failed:', error);
+      sessionConfigStatus = {
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Failed to load saved session.',
+      };
+    } finally {
+      loadingSessionConfig = false;
+    }
+  }
+
   function ownerLabel(agentId: string | null | undefined) {
     if (!agentId) return 'unowned';
     return $agentInfos.find((agent) => agent.agent_id === agentId)?.display_name ?? agentId;
   }
+
+  onMount(() => {
+    if (kind === 'settings') {
+      void refreshAgentBrowserRuntimeStatus();
+    }
+  });
 </script>
 
-{#if $sidebarOpen}
+{#if sidebarVisible}
   <div class="sidebar">
     <div class="sidebar-titlebar">
-      <span class="sidebar-root-title">TREE</span>
+      <span class="sidebar-root-title">{kind === 'tree' ? 'TREE' : 'SETTINGS'}</span>
       <button
         class="sidebar-hide"
         type="button"
         title="Hide sidebar"
         aria-label="Hide sidebar"
-        onclick={() => sidebarOpen.set(false)}
+        onclick={() => {
+          if (kind === 'tree') {
+            closeSidebar();
+          } else {
+            closeSettingsSidebar();
+          }
+        }}
       >
         ×
       </button>
     </div>
     <div class="sidebar-sections">
-      <section class="sidebar-section" class:focused-section={$sidebarSection === 'settings'}>
-        <div class="sidebar-subheader">
-          <button class="sidebar-subheader-main" type="button" onclick={() => setSidebarSection('settings')}>
-            <span class="sidebar-subtitle settings">SETTINGS</span>
-          </button>
-          <button
-            class="section-toggle"
-            type="button"
-            title={settingsCollapsed ? 'Expand SETTINGS section' : 'Collapse SETTINGS section'}
-            aria-label={settingsCollapsed ? 'Expand SETTINGS section' : 'Collapse SETTINGS section'}
-            onclick={(event) => {
-              event.stopPropagation();
-              settingsCollapsed = !settingsCollapsed;
-            }}
-          >
-            {settingsCollapsed ? '+' : '−'}
-          </button>
+      {#if kind === 'settings'}
+        <div class="session-cwd-card settings-card">
+          <div class="session-cwd-topline">
+            <span class="session-cwd-label settings-card-label">SPAWN DIR</span>
+            <button
+              class="session-cwd-edit"
+              type="button"
+              disabled={!activeSession || updatingSessionCwd}
+              title="Edit spawn directory for the active tab"
+              onclick={handleEditSpawnDirectory}
+            >
+              {updatingSessionCwd ? '...' : 'EDIT'}
+            </button>
+          </div>
+          <div class="session-cwd-value">{activeSession?.root_cwd ?? 'unavailable'}</div>
         </div>
-        {#if !settingsCollapsed}
-          <div class="session-cwd-card settings-card">
-            <div class="session-cwd-topline">
-              <span class="session-cwd-label settings-card-label">SPAWN DIR</span>
+        <div class="session-config-card settings-card">
+          <div class="session-config-topline">
+            <span class="settings-card-label">SESSION NAME</span>
+          </div>
+          <input
+            class="session-name-input"
+            type="text"
+            bind:value={sessionNameDraft}
+            placeholder="Session name"
+            disabled={!activeSession || renamingSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig}
+            oninput={() => {
+              sessionNameDirty = true;
+              sessionConfigStatus = null;
+            }}
+            onblur={() => {
+              void commitSessionName();
+            }}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                void commitSessionName();
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                sessionNameDraft = activeSession?.name ?? '';
+                sessionNameDirty = false;
+              }
+            }}
+          />
+          <div class="session-config-actions">
+            <button
+              class="session-config-button"
+              type="button"
+              disabled={!activeSession || renamingSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig}
+              onclick={handleSaveSessionConfiguration}
+            >
+              {savingSessionConfig ? 'SAVING...' : 'SAVE'}
+            </button>
+            <button
+              class="session-config-button"
+              type="button"
+              disabled={!activeSession || renamingSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig || !currentSavedSessionSummary}
+              onclick={handleDeleteSessionConfiguration}
+            >
+              {deletingSessionConfig ? 'DELETING...' : 'DELETE'}
+            </button>
+            <button
+              class="session-config-button"
+              type="button"
+              disabled={!activeSession || renamingSession || savingSessionConfig || deletingSessionConfig || loadingSessionConfig}
+              onclick={handleLoadSessionConfiguration}
+            >
+              {loadingSessionConfig ? 'LOADING...' : 'LOAD'}
+            </button>
+          </div>
+          <div
+            class="session-config-status"
+            class:success={sessionConfigStatus?.tone === 'success'}
+            class:error={sessionConfigStatus?.tone === 'error'}
+          >
+            {#if sessionConfigStatus}
+              {sessionConfigStatus.text}
+            {:else if currentSavedSessionSummary}
+              Saved file: {currentSavedSessionSummary.file_name}
+            {:else}
+              No saved session file for this name.
+            {/if}
+          </div>
+        </div>
+        <div class="browser-backend-card settings-card">
+          <div class="browser-backend-topline">
+            <span class="settings-card-label">BROWSER BACKEND</span>
+            <span class="browser-backend-status">
+              {agentBrowserStatus?.ready ? 'READY' : (agentBrowserStatus?.declined ? 'DECLINED' : 'NOT INSTALLED')}
+            </span>
+          </div>
+          <div class="browser-backend-options">
+            <button
+              class="browser-backend-toggle"
+              class:selected={activeSession?.browser_backend === 'live_webview'}
+              type="button"
+              disabled={!activeSession || browserBackendBusy}
+              aria-pressed={activeSession?.browser_backend === 'live_webview'}
+              onclick={() => {
+                void handleSelectBrowserBackend('live_webview');
+              }}
+            >
+              LIVE WEBVIEW
+            </button>
+            <button
+              class="browser-backend-toggle"
+              class:selected={activeSession?.browser_backend === 'agent_browser'}
+              type="button"
+              disabled={!activeSession || browserBackendBusy}
+              aria-pressed={activeSession?.browser_backend === 'agent_browser'}
+              onclick={() => {
+                void handleSelectBrowserBackend('agent_browser');
+              }}
+            >
+              AGENT BROWSER
+            </button>
+          </div>
+          <div class="browser-backend-note">
+            {#if browserBackendBusy}
+              Updating browser backend…
+            {:else if agentBrowserStatus?.error}
+              {agentBrowserStatus.error}
+            {:else if agentBrowserStatus?.ready}
+              Runtime: {agentBrowserStatus.runtime_dir}
+            {:else if agentBrowserStatus?.declined}
+              Agent Browser stays unavailable until you choose it again.
+            {:else}
+              Selecting Agent Browser will install its bundled runtime and Chrome for Testing.
+            {/if}
+          </div>
+        </div>
+        <div class="tile-port-count-card settings-card">
+          <div class="tile-port-count-topline">
+            <span class="settings-card-label">PORTS</span>
+            <span class="tile-port-count-current">{$tilePortCount}</span>
+          </div>
+          <div class="tile-port-count-group" role="group" aria-label="Tile port count">
+            {#each TILE_PORT_COUNT_OPTIONS as count}
               <button
-                class="session-cwd-edit"
+                class="tile-port-count-toggle"
+                class:selected={$tilePortCount === count}
                 type="button"
-                disabled={!activeSession || updatingSessionCwd}
-                title="Edit spawn directory for the active tab"
-                onclick={handleEditSpawnDirectory}
+                data-port-count={count}
+                aria-pressed={$tilePortCount === count}
+                onclick={() => tilePortCount.set(count)}
               >
-                {updatingSessionCwd ? '...' : 'EDIT'}
+                {count}
               </button>
-            </div>
-            <div class="session-cwd-value">{activeSession?.root_cwd ?? 'unavailable'}</div>
+            {/each}
           </div>
-          <div class="tile-port-count-card settings-card">
-            <div class="tile-port-count-topline">
-              <span class="settings-card-label">PORTS</span>
-              <span class="tile-port-count-current">{$tilePortCount}</span>
-            </div>
-            <div class="tile-port-count-group" role="group" aria-label="Tile port count">
-              {#each TILE_PORT_COUNT_OPTIONS as count}
-                <button
-                  class="tile-port-count-toggle"
-                  class:selected={$tilePortCount === count}
-                  type="button"
-                  data-port-count={count}
-                  aria-pressed={$tilePortCount === count}
-                  onclick={() => tilePortCount.set(count)}
-                >
-                  {count}
-                </button>
-              {/each}
-            </div>
-            <div class="tile-port-count-help">available ports per tile</div>
+          <div class="tile-port-count-help">available ports per tile</div>
+        </div>
+        <div class="wire-sparks-card settings-card">
+          <div class="wire-sparks-topline">
+            <span class="settings-card-label">SNAP TO GRID</span>
+            <button
+              class="wire-sparks-toggle"
+              class:selected={$gridSnapEnabled}
+              type="button"
+              aria-label="Toggle snap to grid"
+              aria-pressed={$gridSnapEnabled}
+              onclick={() => gridSnapEnabled.set(!$gridSnapEnabled)}
+            >
+              <span class="wire-sparks-toggle-thumb" aria-hidden="true"></span>
+              <span class="wire-sparks-toggle-option">ON</span>
+              <span class="wire-sparks-toggle-option">OFF</span>
+            </button>
           </div>
-          <div class="wire-sparks-card settings-card">
-            <div class="wire-sparks-topline">
-              <span class="settings-card-label">WIRE SPARKS</span>
-              <span class="wire-sparks-current">{$networkCallSparksEnabled ? 'ON' : 'OFF'}</span>
-            </div>
+          <div class="tile-port-count-help">snap tile movement and placement to the canvas grid</div>
+        </div>
+        <div class="tile-port-count-card settings-card">
+          <div class="tile-port-count-topline">
+            <span class="settings-card-label">GRID SIZE</span>
+            <span class="tile-port-count-current">{$gridSnapSize}</span>
+          </div>
+          <div class="tile-port-count-group" role="group" aria-label="Canvas grid snap size">
+            {#each GRID_SNAP_SIZE_OPTIONS as size}
+              <button
+                class="tile-port-count-toggle"
+                class:selected={$gridSnapSize === size}
+                type="button"
+                data-grid-snap-size={size}
+                aria-pressed={$gridSnapSize === size}
+                onclick={() => gridSnapSize.set(size)}
+              >
+                {size}
+              </button>
+            {/each}
+          </div>
+          <div class="tile-port-count-help">snap granularity in canvas pixels</div>
+        </div>
+        <div class="wire-sparks-card settings-card">
+          <div class="wire-sparks-topline">
+            <span class="settings-card-label">WIRE SPARKS</span>
             <button
               class="wire-sparks-toggle"
               class:selected={$networkCallSparksEnabled}
               type="button"
+              aria-label="Toggle wire sparks"
               aria-pressed={$networkCallSparksEnabled}
               onclick={() => networkCallSparksEnabled.set(!$networkCallSparksEnabled)}
             >
-              {$networkCallSparksEnabled ? 'DISABLE' : 'ENABLE'}
+              <span class="wire-sparks-toggle-thumb" aria-hidden="true"></span>
+              <span class="wire-sparks-toggle-option">ON</span>
+              <span class="wire-sparks-toggle-option">OFF</span>
             </button>
-            <div class="tile-port-count-help">animate network calls over canvas wires</div>
           </div>
-        {/if}
-      </section>
-
+          <div class="tile-port-count-help">animate network calls over canvas wires</div>
+        </div>
+      {:else}
       <section class="sidebar-section" class:focused-section={$sidebarSection === 'work'}>
         <div class="sidebar-subheader">
           <button class="sidebar-subheader-main" type="button" onclick={() => setSidebarSection('work')}>
@@ -298,6 +701,7 @@
           </div>
         {/if}
       </section>
+      {/if}
     </div>
   </div>
 {/if}
@@ -396,10 +800,6 @@
     color: #6ebcff;
   }
 
-  .sidebar-subtitle.settings {
-    color: var(--phosphor-amber);
-  }
-
   .sidebar-subtitle.agents {
     color: var(--copper);
   }
@@ -474,6 +874,138 @@
     line-height: 1.4;
   }
 
+  .browser-backend-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .browser-backend-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .browser-backend-status {
+    font-size: 9px;
+    color: var(--silk-dim);
+    letter-spacing: 1px;
+  }
+
+  .browser-backend-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .browser-backend-toggle {
+    border: 1px solid var(--component-border);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--silk-dim);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 6px 0;
+    cursor: pointer;
+  }
+
+  .browser-backend-toggle:hover:not(:disabled) {
+    border-color: var(--copper);
+    color: var(--copper);
+  }
+
+  .browser-backend-toggle.selected {
+    border-color: var(--copper);
+    color: var(--silk-white);
+    background: rgba(242, 176, 90, 0.12);
+  }
+
+  .browser-backend-toggle:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .browser-backend-note {
+    font-size: 10px;
+    color: var(--silk-dim);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .session-config-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .session-config-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .session-name-input {
+    width: 100%;
+    border: 1px solid var(--component-border);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--silk-white);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 6px 8px;
+    outline: none;
+  }
+
+  .session-name-input:focus {
+    border-color: var(--copper);
+  }
+
+  .session-name-input:disabled {
+    opacity: 0.6;
+  }
+
+  .session-config-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .session-config-button {
+    border: 1px solid var(--component-border);
+    background: rgba(0, 0, 0, 0.16);
+    color: var(--silk-white);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 6px 0;
+    cursor: pointer;
+  }
+
+  .session-config-button:hover:not(:disabled) {
+    border-color: var(--copper);
+    color: var(--copper);
+  }
+
+  .session-config-button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .session-config-status {
+    min-height: 14px;
+    font-size: 10px;
+    color: var(--silk-dim);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .session-config-status.success {
+    color: var(--phosphor-green);
+  }
+
+  .session-config-status.error {
+    color: var(--phosphor-red);
+  }
+
   .tile-port-count-card {
     display: flex;
     flex-direction: column;
@@ -483,7 +1015,7 @@
   .wire-sparks-card {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
 
   .tile-port-count-topline {
@@ -539,32 +1071,73 @@
     gap: 8px;
   }
 
-  .wire-sparks-current {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--silk-white);
-  }
-
   .wire-sparks-toggle {
+    position: relative;
+    display: inline-grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+    width: 72px;
+    padding: 2px;
     border: 1px solid var(--component-border);
-    background: rgba(0, 0, 0, 0.16);
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.22);
     color: var(--silk-dim);
     font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 6px 8px;
+    font-size: 9px;
+    line-height: 1;
     cursor: pointer;
+    overflow: hidden;
+    transition:
+      border-color 0.14s ease,
+      background 0.14s ease,
+      color 0.14s ease,
+      box-shadow 0.14s ease;
+  }
+
+  .wire-sparks-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    border-radius: 999px;
+    background: rgba(242, 176, 90, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 0 10px rgba(242, 176, 90, 0.12);
+    transform: translateX(100%);
+    transition:
+      transform 0.16s ease,
+      background 0.16s ease,
+      box-shadow 0.16s ease;
+  }
+
+  .wire-sparks-toggle-option {
+    position: relative;
+    z-index: 1;
+    padding: 4px 0;
     text-align: center;
+    letter-spacing: 0.5px;
   }
 
   .wire-sparks-toggle:hover {
     border-color: var(--copper);
     color: var(--copper);
+    box-shadow: 0 0 12px rgba(242, 176, 90, 0.12);
   }
 
   .wire-sparks-toggle.selected {
     border-color: var(--copper);
     color: var(--silk-white);
-    background: rgba(242, 176, 90, 0.12);
+    background: rgba(242, 176, 90, 0.08);
+  }
+
+  .wire-sparks-toggle.selected .wire-sparks-toggle-thumb {
+    transform: translateX(0);
+    background: rgba(242, 176, 90, 0.18);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 0 12px rgba(242, 176, 90, 0.18);
   }
 
   .work-list {

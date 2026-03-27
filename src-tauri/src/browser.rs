@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 use tauri::{
@@ -13,6 +16,8 @@ use tauri::{
 const DEFAULT_BROWSER_URL: &str = "https://example.com/";
 const BROWSER_URL_EVENT: &str = "browser-url-changed";
 const BROWSER_DRIVE_TIMEOUT: Duration = Duration::from_secs(5);
+const AGENT_BROWSER_VERSION: &str = "0.22.3";
+const AGENT_BROWSER_TARBALL_URL: &str = "https://registry.npmjs.org/agent-browser/-/agent-browser-0.22.3.tgz";
 const DEFAULT_BROWSER_PAGE_ZOOM: f64 = 1.0;
 const MIN_BROWSER_PAGE_ZOOM: f64 = 0.25;
 const MAX_BROWSER_PAGE_ZOOM: f64 = 20.0;
@@ -27,6 +32,287 @@ const ASCII_TEXT_ASPECT_RATIO: f64 = 0.5;
 const TEXT_GRID_MIN_ROW_HEIGHT_RATIO: f64 = 0.9;
 const TEXT_GRID_MAX_ROW_HEIGHT_RATIO: f64 = 2.2;
 const TEXT_GRID_FALLBACK_ROW_HEIGHT_RATIO: f64 = 1.4;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserBackend {
+    LiveWebview,
+    AgentBrowser,
+}
+
+impl BrowserBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveWebview => "live_webview",
+            Self::AgentBrowser => "agent_browser",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "live_webview" => Ok(Self::LiveWebview),
+            "agent_browser" => Ok(Self::AgentBrowser),
+            other => Err(format!("unknown browser backend: {other}")),
+        }
+    }
+}
+
+impl Default for BrowserBackend {
+    fn default() -> Self {
+        Self::LiveWebview
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBrowserInstallStatus {
+    pub supported: bool,
+    pub ready: bool,
+    pub prompt_pending: bool,
+    pub declined: bool,
+    pub binary_installed: bool,
+    pub chrome_installed: bool,
+    pub runtime_dir: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentBrowserPaneContext {
+    tile_id: String,
+    incognito: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentBrowserCommandEnvelope {
+    success: bool,
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[cfg(target_os = "macos")]
+fn agent_browser_binary_file_name() -> Option<&'static str> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Some("agent-browser-darwin-arm64");
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        return Some("agent-browser-darwin-x64");
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn agent_browser_binary_file_name() -> Option<&'static str> {
+    None
+}
+
+fn agent_browser_runtime_dir() -> PathBuf {
+    crate::runtime::project_tmp_dir().join("agent-browser")
+}
+
+fn agent_browser_home_dir() -> PathBuf {
+    agent_browser_runtime_dir().join("home")
+}
+
+fn agent_browser_profiles_dir() -> PathBuf {
+    agent_browser_runtime_dir().join("profiles")
+}
+
+fn agent_browser_capture_dir() -> PathBuf {
+    agent_browser_runtime_dir().join("captures")
+}
+
+fn agent_browser_declined_marker_path() -> PathBuf {
+    agent_browser_runtime_dir().join("install-declined")
+}
+
+fn agent_browser_extract_dir() -> PathBuf {
+    agent_browser_runtime_dir().join("package")
+}
+
+fn agent_browser_binary_path() -> Option<PathBuf> {
+    agent_browser_binary_file_name().map(|name| agent_browser_runtime_dir().join(name))
+}
+
+fn agent_browser_supported() -> bool {
+    agent_browser_binary_file_name().is_some()
+}
+
+fn agent_browser_home_has_chrome() -> bool {
+    let browsers_dir = agent_browser_home_dir().join("browsers");
+    fs::read_dir(&browsers_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().is_dir())
+}
+
+fn build_agent_browser_install_status(error: Option<String>) -> AgentBrowserInstallStatus {
+    let runtime_dir = agent_browser_runtime_dir();
+    let binary_installed = agent_browser_binary_path()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let chrome_installed = agent_browser_home_has_chrome();
+    let declined = agent_browser_declined_marker_path().is_file();
+    let ready = agent_browser_supported() && binary_installed && chrome_installed;
+    AgentBrowserInstallStatus {
+        supported: agent_browser_supported(),
+        ready,
+        prompt_pending: agent_browser_supported() && !ready && !declined,
+        declined,
+        binary_installed,
+        chrome_installed,
+        runtime_dir: runtime_dir.to_string_lossy().to_string(),
+        version: AGENT_BROWSER_VERSION.to_string(),
+        error,
+    }
+}
+
+pub fn agent_browser_install_status() -> AgentBrowserInstallStatus {
+    build_agent_browser_install_status(None)
+}
+
+pub fn agent_browser_is_ready() -> bool {
+    agent_browser_install_status().ready
+}
+
+fn ensure_agent_browser_runtime_dirs() -> Result<(), String> {
+    for dir in [
+        agent_browser_runtime_dir(),
+        agent_browser_home_dir(),
+        agent_browser_profiles_dir(),
+        agent_browser_capture_dir(),
+    ] {
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create agent-browser runtime directory {}: {error}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn set_agent_browser_declined_marker(declined: bool) -> Result<(), String> {
+    ensure_agent_browser_runtime_dirs()?;
+    let marker = agent_browser_declined_marker_path();
+    if declined {
+        fs::write(&marker, AGENT_BROWSER_VERSION.as_bytes())
+            .map_err(|error| format!("failed to record agent-browser install decline at {}: {error}", marker.display()))?;
+    } else if marker.exists() {
+        fs::remove_file(&marker)
+            .map_err(|error| format!("failed to clear agent-browser install decline at {}: {error}", marker.display()))?;
+    }
+    Ok(())
+}
+
+fn run_command_for_output(command: &mut Command, description: &str) -> Result<std::process::Output, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run {description}: {error}"))?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let message = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("{description} exited with status {}", output.status)
+    };
+    Err(message)
+}
+
+fn install_agent_browser_binary() -> Result<(), String> {
+    if !agent_browser_supported() {
+        return Err("agent-browser is currently supported only on macOS".to_string());
+    }
+
+    ensure_agent_browser_runtime_dirs()?;
+    let runtime_dir = agent_browser_runtime_dir();
+    let tarball_path = runtime_dir.join(format!("agent-browser-{AGENT_BROWSER_VERSION}.tgz"));
+    let extract_dir = agent_browser_extract_dir();
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)
+            .map_err(|error| format!("failed to clear agent-browser extract directory {}: {error}", extract_dir.display()))?;
+    }
+    fs::create_dir_all(&extract_dir)
+        .map_err(|error| format!("failed to create agent-browser extract directory {}: {error}", extract_dir.display()))?;
+
+    run_command_for_output(
+        Command::new("curl")
+            .arg("-fsSL")
+            .arg(AGENT_BROWSER_TARBALL_URL)
+            .arg("-o")
+            .arg(&tarball_path),
+        "agent-browser runtime download",
+    )?;
+
+    run_command_for_output(
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(&tarball_path)
+            .arg("-C")
+            .arg(&extract_dir),
+        "agent-browser runtime extract",
+    )?;
+
+    let binary_name = agent_browser_binary_file_name()
+        .ok_or_else(|| "agent-browser is currently unsupported on this platform".to_string())?;
+    let source_binary = extract_dir.join("package/bin").join(binary_name);
+    if !source_binary.is_file() {
+        return Err(format!(
+            "agent-browser package did not contain {} at {}",
+            binary_name,
+            source_binary.display(),
+        ));
+    }
+    let target_binary = agent_browser_binary_path()
+        .ok_or_else(|| "agent-browser binary path is unavailable on this platform".to_string())?;
+    fs::copy(&source_binary, &target_binary).map_err(|error| {
+        format!(
+            "failed to install agent-browser binary from {} to {}: {error}",
+            source_binary.display(),
+            target_binary.display(),
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&target_binary)
+            .map_err(|error| format!("failed to read agent-browser binary metadata {}: {error}", target_binary.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&target_binary, permissions).map_err(|error| {
+            format!(
+                "failed to mark agent-browser binary executable at {}: {error}",
+                target_binary.display(),
+            )
+        })?;
+    }
+    let _ = fs::remove_file(&tarball_path);
+    let _ = fs::remove_dir_all(&extract_dir);
+    Ok(())
+}
+
+fn install_agent_browser_runtime_blocking() -> Result<AgentBrowserInstallStatus, String> {
+    install_agent_browser_binary()?;
+    ensure_agent_browser_runtime_dirs()?;
+    let binary = agent_browser_binary_path()
+        .ok_or_else(|| "agent-browser binary path is unavailable on this platform".to_string())?;
+    run_command_for_output(
+        Command::new(&binary)
+            .env("AGENT_BROWSER_HOME", agent_browser_home_dir())
+            .arg("install"),
+        "agent-browser browser install",
+    )?;
+    set_agent_browser_declined_marker(false)?;
+    Ok(agent_browser_install_status())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +329,9 @@ pub struct BrowserViewport {
 #[serde(rename_all = "camelCase")]
 pub struct BrowserWebviewState {
     pub current_url: String,
+    pub backend: BrowserBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,9 +609,308 @@ fn browser_current_url(webview: &tauri::Webview) -> Result<String, String> {
         .map_err(|error| format!("failed to read browser URL: {error}"))
 }
 
+fn browser_backend_for_session(session_id: &str) -> BrowserBackend {
+    crate::tmux_state::session_browser_backend(session_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+fn browser_backend_for_pane(app: &tauri::AppHandle, pane_id: &str) -> BrowserBackend {
+    let state = app.state::<crate::state::AppState>();
+    if let Some(record) = state.tile_record_by_pane(pane_id).ok().flatten() {
+        return browser_backend_for_session(&record.session_id);
+    }
+
+    let snapshot = crate::tmux_state::snapshot(state.inner()).ok();
+    snapshot
+        .and_then(|snapshot| snapshot.panes.into_iter().find(|pane| pane.id == pane_id))
+        .map(|pane| browser_backend_for_session(&pane.session_id))
+        .unwrap_or_default()
+}
+
+fn agent_browser_pane_context(app: &tauri::AppHandle, pane_id: &str) -> Result<AgentBrowserPaneContext, String> {
+    let state = app.state::<crate::state::AppState>();
+    let record = state
+        .tile_record_by_pane(pane_id)?
+        .ok_or_else(|| format!("browser tile pane {pane_id} is missing a tile record"))?;
+    Ok(AgentBrowserPaneContext {
+        tile_id: record.tile_id,
+        incognito: record.browser_incognito,
+    })
+}
+
+fn agent_browser_profile_dir(context: &AgentBrowserPaneContext) -> PathBuf {
+    agent_browser_profiles_dir().join(&context.tile_id)
+}
+
+fn agent_browser_capture_path(context: &AgentBrowserPaneContext, prefix: &str) -> PathBuf {
+    agent_browser_capture_dir().join(format!("{prefix}-{}-{}.png", context.tile_id, uuid::Uuid::new_v4()))
+}
+
+fn agent_browser_data_url_from_png(png_bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    format!("data:image/png;base64,{}", STANDARD.encode(png_bytes))
+}
+
+fn agent_browser_base_command(context: &AgentBrowserPaneContext) -> Result<Command, String> {
+    if !agent_browser_is_ready() {
+        return Err("agent-browser is not installed".to_string());
+    }
+    ensure_agent_browser_runtime_dirs()?;
+    let binary = agent_browser_binary_path()
+        .ok_or_else(|| "agent-browser binary path is unavailable on this platform".to_string())?;
+    let mut command = Command::new(binary);
+    command
+        .env("AGENT_BROWSER_HOME", agent_browser_home_dir())
+        .arg("--json")
+        .arg("--session")
+        .arg(&context.tile_id)
+        .arg("--allow-file-access");
+    if !context.incognito {
+        let profile_dir = agent_browser_profile_dir(context);
+        fs::create_dir_all(&profile_dir).map_err(|error| {
+            format!(
+                "failed to create agent-browser profile directory {}: {error}",
+                profile_dir.display(),
+            )
+        })?;
+        command.arg("--profile").arg(profile_dir);
+    }
+    Ok(command)
+}
+
+fn agent_browser_value_error(value: Value) -> String {
+    match value {
+        Value::String(message) => message,
+        other => other.to_string(),
+    }
+}
+
+fn run_agent_browser_json_command(
+    context: &AgentBrowserPaneContext,
+    arguments: &[String],
+    description: &str,
+) -> Result<Value, String> {
+    let mut command = agent_browser_base_command(context)?;
+    command.args(arguments);
+    let output = run_command_for_output(&mut command, description)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("{description} returned invalid UTF-8: {error}"))?;
+    let envelope: AgentBrowserCommandEnvelope = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("{description} returned invalid JSON: {error}"))?;
+    if envelope.success {
+        Ok(envelope.data.unwrap_or(Value::Null))
+    } else {
+        Err(envelope
+            .error
+            .map(agent_browser_value_error)
+            .unwrap_or_else(|| format!("{description} failed")))
+    }
+}
+
+fn parse_browser_envelope_value<T>(value: Value, context: &str) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match value {
+        Value::String(raw) => serde_json::from_str(&raw)
+            .map_err(|error| format!("{context} returned invalid envelope JSON: {error}")),
+        other => serde_json::from_value(other)
+            .map_err(|error| format!("{context} returned invalid envelope value: {error}")),
+    }
+}
+
+fn agent_browser_current_url_for_context(context: &AgentBrowserPaneContext) -> Result<String, String> {
+    let value = run_agent_browser_json_command(
+        context,
+        &["get".to_string(), "url".to_string()],
+        "agent-browser get url",
+    )?;
+    value
+        .as_str()
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "agent-browser get url returned no URL".to_string())
+}
+
+fn agent_browser_open_url(context: &AgentBrowserPaneContext, url: &str) -> Result<String, String> {
+    run_agent_browser_json_command(
+        context,
+        &["open".to_string(), url.to_string()],
+        "agent-browser open",
+    )?;
+    agent_browser_current_url_for_context(context).or_else(|_| Ok(url.to_string()))
+}
+
+fn agent_browser_load_path(context: &AgentBrowserPaneContext, path: &str) -> Result<String, String> {
+    let url = resolve_browser_file_url(path)?;
+    agent_browser_open_url(context, url.as_str())
+}
+
+fn ensure_agent_browser_started(
+    context: &AgentBrowserPaneContext,
+    initial_url: Option<&str>,
+) -> Result<String, String> {
+    agent_browser_current_url_for_context(context).or_else(|_| {
+        agent_browser_open_url(context, initial_url.unwrap_or(DEFAULT_BROWSER_URL))
+    })
+}
+
+fn agent_browser_eval_value(context: &AgentBrowserPaneContext, script: &str) -> Result<Value, String> {
+    run_agent_browser_json_command(
+        context,
+        &["eval".to_string(), script.to_string()],
+        "agent-browser eval",
+    )
+}
+
+fn agent_browser_snapshot_text(
+    context: &AgentBrowserPaneContext,
+    columns: u32,
+) -> Result<BrowserTextScreenshotResult, String> {
+    let value = run_agent_browser_json_command(
+        context,
+        &["snapshot".to_string(), "-c".to_string()],
+        "agent-browser snapshot",
+    )?;
+    let snapshot_text = value
+        .get("snapshot")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    Ok(BrowserTextScreenshotResult {
+        format: BrowserScreenshotFormat::Text.as_str().to_string(),
+        rows: snapshot_text.lines().count() as u32,
+        text: snapshot_text,
+        columns,
+    })
+}
+
+fn agent_browser_screenshot_png(context: &AgentBrowserPaneContext) -> Result<Vec<u8>, String> {
+    let capture_path = agent_browser_capture_path(context, "capture");
+    run_agent_browser_json_command(
+        context,
+        &["screenshot".to_string(), capture_path.to_string_lossy().to_string()],
+        "agent-browser screenshot",
+    )?;
+    let bytes = fs::read(&capture_path)
+        .map_err(|error| format!("failed to read agent-browser screenshot {}: {error}", capture_path.display()))?;
+    let _ = fs::remove_file(&capture_path);
+    Ok(bytes)
+}
+
+fn agent_browser_state_for_pane(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    include_screenshot: bool,
+    initial_url: Option<&str>,
+) -> Result<BrowserWebviewState, String> {
+    let context = agent_browser_pane_context(app, pane_id)?;
+    let current_url = ensure_agent_browser_started(&context, initial_url)?;
+    let screenshot_data_url = if include_screenshot {
+        Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?))
+    } else {
+        None
+    };
+    Ok(BrowserWebviewState {
+        current_url,
+        backend: BrowserBackend::AgentBrowser,
+        screenshot_data_url,
+    })
+}
+
+pub fn current_url_for_pane_with_backend(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    backend: BrowserBackend,
+) -> Option<String> {
+    match backend {
+        BrowserBackend::LiveWebview => {
+            let webview = get_browser_webview(app, pane_id)?;
+            browser_current_url(&webview).ok()
+        }
+        BrowserBackend::AgentBrowser => {
+            let context = agent_browser_pane_context(app, pane_id).ok()?;
+            agent_browser_current_url_for_context(&context).ok()
+        }
+    }
+}
+
 pub fn current_url_for_pane(app: &tauri::AppHandle, pane_id: &str) -> Option<String> {
-    let webview = get_browser_webview(app, pane_id)?;
-    browser_current_url(&webview).ok()
+    current_url_for_pane_with_backend(app, pane_id, browser_backend_for_pane(app, pane_id))
+}
+
+pub fn navigate_browser_with_backend(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    backend: BrowserBackend,
+    url: &str,
+) -> Result<BrowserWebviewState, String> {
+    match backend {
+        BrowserBackend::LiveWebview => {
+            let parsed = parse_browser_url(Some(url))?;
+            if get_browser_webview(app, pane_id).is_some() {
+                return navigate_existing_browser_webview(app, pane_id, parsed);
+            }
+            let hidden = hidden_browser_viewport();
+            let webview = ensure_browser_webview(app, pane_id, Some(parsed.as_str()), &hidden)?;
+            apply_browser_viewport(app, pane_id, &webview, &hidden)?;
+            Ok(BrowserWebviewState {
+                current_url: browser_current_url(&webview)?,
+                backend: BrowserBackend::LiveWebview,
+                screenshot_data_url: None,
+            })
+        }
+        BrowserBackend::AgentBrowser => {
+            let context = agent_browser_pane_context(app, pane_id)?;
+            let current_url = agent_browser_open_url(&context, parse_browser_url(Some(url))?.as_str())?;
+            let screenshot_data_url = Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?));
+            emit_browser_url_changed(app, pane_id, current_url.clone(), false);
+            Ok(BrowserWebviewState {
+                current_url,
+                backend: BrowserBackend::AgentBrowser,
+                screenshot_data_url,
+            })
+        }
+    }
+}
+
+pub fn load_browser_with_backend(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    backend: BrowserBackend,
+    path: &str,
+) -> Result<BrowserWebviewState, String> {
+    match backend {
+        BrowserBackend::LiveWebview => {
+            let parsed = resolve_browser_file_url(path)?;
+            if get_browser_webview(app, pane_id).is_some() {
+                return navigate_existing_browser_webview(app, pane_id, parsed);
+            }
+            let hidden = hidden_browser_viewport();
+            let webview = ensure_browser_webview(app, pane_id, Some(parsed.as_str()), &hidden)?;
+            apply_browser_viewport(app, pane_id, &webview, &hidden)?;
+            Ok(BrowserWebviewState {
+                current_url: browser_current_url(&webview)?,
+                backend: BrowserBackend::LiveWebview,
+                screenshot_data_url: None,
+            })
+        }
+        BrowserBackend::AgentBrowser => {
+            let context = agent_browser_pane_context(app, pane_id)?;
+            let current_url = agent_browser_load_path(&context, path)?;
+            let screenshot_data_url = Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?));
+            emit_browser_url_changed(app, pane_id, current_url.clone(), false);
+            Ok(BrowserWebviewState {
+                current_url,
+                backend: BrowserBackend::AgentBrowser,
+                screenshot_data_url,
+            })
+        }
+    }
 }
 
 fn emit_browser_url_changed(
@@ -989,11 +1577,21 @@ pub fn browser_extension_info_for_pane(
     app: &tauri::AppHandle,
     pane_id: &str,
 ) -> Option<crate::network::BrowserExtensionInfo> {
-    let webview = get_browser_webview(app, pane_id)?;
-    let current_url = browser_current_url(&webview).ok()?;
+    let current_url = current_url_for_pane(app, pane_id)?;
     let source_path = browser_extension_source_path(&current_url)?;
-    let raw_result = evaluate_browser_script(&webview, browser_extension_manifest_script()).ok()?;
-    let envelope: BrowserExtensionEnvelope = serde_json::from_str(&raw_result).ok()?;
+    let backend = browser_backend_for_pane(app, pane_id);
+    let envelope: BrowserExtensionEnvelope = match backend {
+        BrowserBackend::LiveWebview => {
+            let webview = get_browser_webview(app, pane_id)?;
+            let raw_result = evaluate_browser_script(&webview, browser_extension_manifest_script()).ok()?;
+            serde_json::from_str(&raw_result).ok()?
+        }
+        BrowserBackend::AgentBrowser => {
+            let context = agent_browser_pane_context(app, pane_id).ok()?;
+            let raw_result = agent_browser_eval_value(&context, browser_extension_manifest_script()).ok()?;
+            parse_browser_envelope_value(raw_result, "browser extension manifest").ok()?
+        }
+    };
     if !envelope.ok {
         return None;
     }
@@ -1525,6 +2123,61 @@ pub fn drive_browser_webview(
     action: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    if browser_backend_for_pane(app, pane_id) == BrowserBackend::AgentBrowser {
+        let context = agent_browser_pane_context(app, pane_id)?;
+        let _ = ensure_agent_browser_started(&context, None)?;
+        if action == "screenshot" {
+            let options = browser_screenshot_options(args)
+                .map_err(|error| format!("browser_drive {action} failed for pane {pane_id}: {error}"))?;
+            let screenshot = match options.format {
+                BrowserScreenshotFormat::Text => {
+                    serde_json::to_value(agent_browser_snapshot_text(&context, options.columns)?)
+                        .map_err(|error| format!("browser_drive {action} returned invalid JSON: {error}"))?
+                }
+                BrowserScreenshotFormat::Image
+                | BrowserScreenshotFormat::Braille
+                | BrowserScreenshotFormat::Ascii
+                | BrowserScreenshotFormat::Ansi => {
+                    let png_bytes = agent_browser_screenshot_png(&context)?;
+                    serde_json::to_value(browser_screenshot_result_from_png(&png_bytes, args)?)
+                        .map_err(|error| format!("browser_drive {action} returned invalid screenshot JSON: {error}"))?
+                }
+            };
+            return Ok(screenshot);
+        }
+
+        let result = match action {
+            "click" => {
+                let selector = required_browser_drive_string_arg(args, "selector", action)?;
+                run_agent_browser_json_command(&context, &["click".to_string(), selector], "agent-browser click")
+            }
+            "select" => {
+                let selector = required_browser_drive_string_arg(args, "selector", action)?;
+                let value = required_browser_drive_string_arg(args, "value", action)?;
+                run_agent_browser_json_command(
+                    &context,
+                    &["select".to_string(), selector, value],
+                    "agent-browser select",
+                )
+            }
+            "type" => {
+                let selector = required_browser_drive_string_arg(args, "selector", action)?;
+                let text = required_browser_drive_string_arg(args, "text", action)?;
+                run_agent_browser_json_command(
+                    &context,
+                    &["fill".to_string(), selector, text],
+                    "agent-browser fill",
+                )
+            }
+            "dom_query" | "eval" => {
+                let js = required_browser_drive_string_arg(args, "js", action)?;
+                agent_browser_eval_value(&context, &js)
+            }
+            other => Err(format!("unsupported browser_drive action: {other}")),
+        };
+        return result.map_err(|error| format!("browser_drive {action} failed for pane {pane_id}: {error}"));
+    }
+
     let webview = get_browser_webview(app, pane_id)
         .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
     if action == "screenshot" {
@@ -1571,8 +2224,6 @@ pub fn call_browser_extension(
     args: &Value,
     caller: &BrowserExtensionCallerContext,
 ) -> Result<Value, String> {
-    let webview = get_browser_webview(app, pane_id)
-        .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
     let extension = browser_extension_info_for_pane(app, pane_id)
         .ok_or_else(|| format!("browser tile {pane_id} is not hosting a browser extension page"))?;
     if !extension.methods.iter().any(|candidate| candidate.name == method) {
@@ -1583,10 +2234,23 @@ pub fn call_browser_extension(
         ));
     }
     let script = browser_extension_call_script(method, args, caller)?;
-    let raw_result = evaluate_browser_script(&webview, &script)
-        .map_err(|error| format!("browser extension call {method} failed for pane {pane_id}: {error}"))?;
-    let envelope: BrowserExtensionEnvelope = serde_json::from_str(&raw_result)
-        .map_err(|error| format!("browser extension call {method} returned invalid JSON: {error}"))?;
+    let backend = browser_backend_for_pane(app, pane_id);
+    let envelope: BrowserExtensionEnvelope = match backend {
+        BrowserBackend::LiveWebview => {
+            let webview = get_browser_webview(app, pane_id)
+                .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
+            let raw_result = evaluate_browser_script(&webview, &script)
+                .map_err(|error| format!("browser extension call {method} failed for pane {pane_id}: {error}"))?;
+            serde_json::from_str(&raw_result)
+                .map_err(|error| format!("browser extension call {method} returned invalid JSON: {error}"))?
+        }
+        BrowserBackend::AgentBrowser => {
+            let context = agent_browser_pane_context(app, pane_id)?;
+            let raw_result = agent_browser_eval_value(&context, &script)
+                .map_err(|error| format!("browser extension call {method} failed for pane {pane_id}: {error}"))?;
+            parse_browser_envelope_value(raw_result, &format!("browser extension call {method}"))?
+        }
+    };
     if envelope.ok {
         let data = envelope.data.unwrap_or(Value::Null);
         if method == "screenshot" {
@@ -1857,6 +2521,49 @@ pub fn close_browser_webview(app: &tauri::AppHandle, pane_id: &str) {
     }
 }
 
+fn shutdown_agent_browser_for_pane(app: &tauri::AppHandle, pane_id: &str) {
+    if !agent_browser_is_ready() {
+        return;
+    }
+    let Ok(context) = agent_browser_pane_context(app, pane_id) else {
+        return;
+    };
+    let _ = run_agent_browser_json_command(&context, &["close".to_string()], "agent-browser close");
+}
+
+pub fn close_browser_surface_for_backend(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    backend: BrowserBackend,
+) {
+    match backend {
+        BrowserBackend::LiveWebview => close_browser_webview(app, pane_id),
+        BrowserBackend::AgentBrowser => shutdown_agent_browser_for_pane(app, pane_id),
+    }
+}
+
+pub fn close_browser_surface(app: &tauri::AppHandle, pane_id: &str) {
+    close_browser_surface_for_backend(app, pane_id, browser_backend_for_pane(app, pane_id));
+}
+
+#[tauri::command]
+pub fn get_agent_browser_install_status() -> AgentBrowserInstallStatus {
+    agent_browser_install_status()
+}
+
+#[tauri::command]
+pub fn set_agent_browser_install_declined(declined: bool) -> Result<AgentBrowserInstallStatus, String> {
+    set_agent_browser_declined_marker(declined)?;
+    Ok(agent_browser_install_status())
+}
+
+#[tauri::command]
+pub async fn install_agent_browser_runtime() -> Result<AgentBrowserInstallStatus, String> {
+    tokio::task::spawn_blocking(install_agent_browser_runtime_blocking)
+        .await
+        .map_err(|error| format!("agent-browser install task failed: {error}"))?
+}
+
 fn navigate_existing_browser_webview(
     app: &tauri::AppHandle,
     pane_id: &str,
@@ -1870,6 +2577,8 @@ fn navigate_existing_browser_webview(
     emit_browser_url_changed(app, pane_id, parsed.to_string(), true);
     Ok(BrowserWebviewState {
         current_url: browser_current_url(&webview)?,
+        backend: BrowserBackend::LiveWebview,
+        screenshot_data_url: None,
     })
 }
 
@@ -1878,17 +2587,7 @@ pub fn navigate_browser_webview(
     pane_id: &str,
     url: &str,
 ) -> Result<BrowserWebviewState, String> {
-    let parsed = parse_browser_url(Some(url))?;
-    if get_browser_webview(app, pane_id).is_some() {
-        return navigate_existing_browser_webview(app, pane_id, parsed);
-    }
-
-    let hidden = hidden_browser_viewport();
-    let webview = ensure_browser_webview(app, pane_id, Some(parsed.as_str()), &hidden)?;
-    apply_browser_viewport(app, pane_id, &webview, &hidden)?;
-    Ok(BrowserWebviewState {
-        current_url: browser_current_url(&webview)?,
-    })
+    navigate_browser_with_backend(app, pane_id, browser_backend_for_pane(app, pane_id), url)
 }
 
 pub fn load_browser_webview(
@@ -1896,17 +2595,7 @@ pub fn load_browser_webview(
     pane_id: &str,
     path: &str,
 ) -> Result<BrowserWebviewState, String> {
-    let parsed = resolve_browser_file_url(path)?;
-    if get_browser_webview(app, pane_id).is_some() {
-        return navigate_existing_browser_webview(app, pane_id, parsed);
-    }
-
-    let hidden = hidden_browser_viewport();
-    let webview = ensure_browser_webview(app, pane_id, Some(parsed.as_str()), &hidden)?;
-    apply_browser_viewport(app, pane_id, &webview, &hidden)?;
-    Ok(BrowserWebviewState {
-        current_url: browser_current_url(&webview)?,
-    })
+    load_browser_with_backend(app, pane_id, browser_backend_for_pane(app, pane_id), path)
 }
 
 #[tauri::command]
@@ -1916,10 +2605,16 @@ pub async fn browser_webview_sync(
     initial_url: Option<String>,
     viewport: BrowserViewport,
 ) -> Result<BrowserWebviewState, String> {
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        return agent_browser_state_for_pane(&app, &pane_id, viewport.visible, initial_url.as_deref());
+    }
+
     let webview = ensure_browser_webview(&app, &pane_id, initial_url.as_deref(), &viewport)?;
     apply_browser_viewport(&app, &pane_id, &webview, &viewport)?;
     Ok(BrowserWebviewState {
         current_url: browser_current_url(&webview)?,
+        backend: BrowserBackend::LiveWebview,
+        screenshot_data_url: None,
     })
 }
 
@@ -1946,6 +2641,19 @@ pub async fn browser_webview_reload(
     app: tauri::AppHandle,
     pane_id: String,
 ) -> Result<BrowserWebviewState, String> {
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        let context = agent_browser_pane_context(&app, &pane_id)?;
+        run_agent_browser_json_command(&context, &["reload".to_string()], "agent-browser reload")?;
+        let current_url = agent_browser_current_url_for_context(&context)?;
+        let screenshot_data_url = Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?));
+        emit_browser_url_changed(&app, &pane_id, current_url.clone(), false);
+        return Ok(BrowserWebviewState {
+            current_url,
+            backend: BrowserBackend::AgentBrowser,
+            screenshot_data_url,
+        });
+    }
+
     let webview = get_browser_webview(&app, &pane_id)
         .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
     webview
@@ -1953,6 +2661,8 @@ pub async fn browser_webview_reload(
         .map_err(|error| format!("failed to reload browser webview: {error}"))?;
     Ok(BrowserWebviewState {
         current_url: browser_current_url(&webview)?,
+        backend: BrowserBackend::LiveWebview,
+        screenshot_data_url: None,
     })
 }
 
@@ -1961,6 +2671,19 @@ pub async fn browser_webview_back(
     app: tauri::AppHandle,
     pane_id: String,
 ) -> Result<BrowserWebviewState, String> {
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        let context = agent_browser_pane_context(&app, &pane_id)?;
+        run_agent_browser_json_command(&context, &["back".to_string()], "agent-browser back")?;
+        let current_url = agent_browser_current_url_for_context(&context)?;
+        let screenshot_data_url = Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?));
+        emit_browser_url_changed(&app, &pane_id, current_url.clone(), false);
+        return Ok(BrowserWebviewState {
+            current_url,
+            backend: BrowserBackend::AgentBrowser,
+            screenshot_data_url,
+        });
+    }
+
     let webview = get_browser_webview(&app, &pane_id)
         .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
     webview
@@ -1968,6 +2691,8 @@ pub async fn browser_webview_back(
         .map_err(|error| format!("failed to navigate browser history backward: {error}"))?;
     Ok(BrowserWebviewState {
         current_url: browser_current_url(&webview)?,
+        backend: BrowserBackend::LiveWebview,
+        screenshot_data_url: None,
     })
 }
 
@@ -1976,6 +2701,19 @@ pub async fn browser_webview_forward(
     app: tauri::AppHandle,
     pane_id: String,
 ) -> Result<BrowserWebviewState, String> {
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        let context = agent_browser_pane_context(&app, &pane_id)?;
+        run_agent_browser_json_command(&context, &["forward".to_string()], "agent-browser forward")?;
+        let current_url = agent_browser_current_url_for_context(&context)?;
+        let screenshot_data_url = Some(agent_browser_data_url_from_png(&agent_browser_screenshot_png(&context)?));
+        emit_browser_url_changed(&app, &pane_id, current_url.clone(), false);
+        return Ok(BrowserWebviewState {
+            current_url,
+            backend: BrowserBackend::AgentBrowser,
+            screenshot_data_url,
+        });
+    }
+
     let webview = get_browser_webview(&app, &pane_id)
         .ok_or_else(|| format!("browser webview not found for pane {pane_id}"))?;
     webview
@@ -1983,11 +2721,17 @@ pub async fn browser_webview_forward(
         .map_err(|error| format!("failed to navigate browser history forward: {error}"))?;
     Ok(BrowserWebviewState {
         current_url: browser_current_url(&webview)?,
+        backend: BrowserBackend::LiveWebview,
+        screenshot_data_url: None,
     })
 }
 
 #[tauri::command]
 pub async fn browser_webview_hide(app: tauri::AppHandle, pane_id: String) -> Result<(), String> {
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        return Ok(());
+    }
+
     if let Some(webview) = get_browser_webview(&app, &pane_id) {
         webview
             .hide()
@@ -2005,6 +2749,25 @@ pub async fn browser_webview_preview(
 ) -> Result<BrowserTextScreenshotResult, String> {
     let columns_value = columns.map(Value::from);
     let options = browser_preview_options(format.as_deref(), columns_value.as_ref())?;
+    if browser_backend_for_pane(&app, &pane_id) == BrowserBackend::AgentBrowser {
+        let context = agent_browser_pane_context(&app, &pane_id)?;
+        let _ = ensure_agent_browser_started(&context, None)?;
+        return match options.format {
+            BrowserScreenshotFormat::Text => agent_browser_snapshot_text(&context, options.columns),
+            BrowserScreenshotFormat::Braille
+            | BrowserScreenshotFormat::Ascii
+            | BrowserScreenshotFormat::Ansi => {
+                let png_bytes = agent_browser_screenshot_png(&context)?;
+                let BrowserScreenshotResult::Text(result) =
+                    text_screenshot_result_from_png(&png_bytes, options.format, options.columns)?
+                else {
+                    unreachable!("agent-browser preview should only return text screenshot payloads");
+                };
+                Ok(result)
+            }
+            BrowserScreenshotFormat::Image => unreachable!("browser preview should only request text formats"),
+        };
+    }
     browser_preview_result(&app, &pane_id, options.format, options.columns)
 }
 

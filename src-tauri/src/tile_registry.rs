@@ -14,6 +14,7 @@ pub enum TileRecordKind {
     Shell,
     Browser,
     Agent,
+    Work,
 }
 
 impl TileRecordKind {
@@ -22,6 +23,7 @@ impl TileRecordKind {
             Self::Shell => "shell",
             Self::Browser => "browser",
             Self::Agent => "agent",
+            Self::Work => "work",
         }
     }
 
@@ -30,6 +32,7 @@ impl TileRecordKind {
             "shell" => Ok(Self::Shell),
             "browser" => Ok(Self::Browser),
             "agent" => Ok(Self::Agent),
+            "work" => Ok(Self::Work),
             other => Err(format!("unknown tile kind: {other}")),
         }
     }

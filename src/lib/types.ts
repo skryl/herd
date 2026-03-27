@@ -17,6 +17,7 @@ export interface TerminalInfo {
   kind?: PaneKind;
   agentId?: string | null;
   minimized?: boolean;
+  locked?: boolean;
 }
 
 export interface CanvasState {
@@ -25,11 +26,26 @@ export interface CanvasState {
   zoom: number;
 }
 
-export type PaneKind = 'regular' | 'claude' | 'root_agent' | 'browser' | 'output';
+export type PaneKind = 'regular' | 'claude' | 'root_agent' | 'browser' | 'work' | 'output';
+export type BrowserBackend = 'live_webview' | 'agent_browser';
+export const GRID_SNAP_SIZE_OPTIONS = [10, 20, 40, 80] as const;
+export type GridSnapSize = (typeof GRID_SNAP_SIZE_OPTIONS)[number];
+
+export interface AgentBrowserInstallStatus {
+  supported: boolean;
+  ready: boolean;
+  prompt_pending: boolean;
+  declined: boolean;
+  binary_installed: boolean;
+  chrome_installed: boolean;
+  runtime_dir: string;
+  version: string;
+  error?: string | null;
+}
 export type DebugTab = 'info' | 'chatter' | 'logs';
 export type AgentType = 'claude' | 'fixture';
 export type AgentRole = 'root' | 'worker';
-export type SidebarSection = 'settings' | 'work' | 'agents' | 'tmux';
+export type SidebarSection = 'work' | 'agents' | 'tmux';
 export type TilePortSide = 'left' | 'top' | 'right' | 'bottom';
 export type TilePortSlot = 1 | 2 | 3 | 4;
 export type TilePortCount = 4 | 8 | 12 | 16;
@@ -256,6 +272,7 @@ export interface ProjectedTerminalInfo {
   kind?: PaneKind;
   agentId?: string | null;
   minimized?: boolean;
+  locked?: boolean;
 }
 
 export interface ProjectionSidebarTreeItem {
@@ -341,6 +358,7 @@ export interface WorkCanvasCard {
   width: number;
   height: number;
   minimized?: boolean;
+  locked?: boolean;
 }
 
 export interface AgentDisplayFrame {
@@ -390,7 +408,7 @@ export interface AgentDebugState {
   port_settings: TilePortSetting[];
 }
 
-export type ContextMenuTarget = 'canvas' | 'pane' | 'port';
+export type ContextMenuTarget = 'canvas' | 'tile' | 'port';
 
 export interface ClaudeCommandDescriptor {
   name: string;
@@ -417,7 +435,9 @@ export interface ContextMenuState {
   target: ContextMenuTarget;
   paneId: string | null;
   tileId: string | null;
+  workId?: string | null;
   portId: TilePort | null;
+  selectionTileIds: string[];
   clientX: number;
   clientY: number;
   worldX: number | null;
@@ -482,6 +502,7 @@ export interface TmuxSession {
   window_ids: string[];
   active_window_id: string | null;
   root_cwd?: string | null;
+  browser_backend: BrowserBackend;
 }
 
 export interface TmuxWindow {
@@ -531,6 +552,7 @@ export interface LayoutEntry {
   y: number;
   width: number;
   height: number;
+  locked?: boolean;
 }
 
 export interface PaneViewportHint {
@@ -546,8 +568,11 @@ export interface UiState {
   commandText: string;
   helpOpen: boolean;
   sidebarOpen: boolean;
+  settingsSidebarOpen: boolean;
   sidebarSection: SidebarSection;
   sidebarSelectedIdx: number;
+  gridSnapEnabled: boolean;
+  gridSnapSize: GridSnapSize;
   tilePortCount: TilePortCount;
   networkCallSparksEnabled: boolean;
   debugPaneOpen: boolean;
@@ -555,11 +580,14 @@ export interface UiState {
   debugTab: DebugTab;
   selectedPaneId: string | null;
   selectedWorkId: string | null;
+  selectedTileIds: string[];
   paneViewportHints: Record<string, PaneViewportHint>;
   arrangementCycleBySession: Record<string, number>;
   arrangementModeBySession: Record<string, ArrangementMode | null>;
   canvas: CanvasState;
+  canvasBySession: Record<string, CanvasState>;
   zoomBookmark: CanvasZoomBookmark | null;
+  zoomBookmarkBySession: Record<string, CanvasZoomBookmark>;
   closeTabConfirmation: CloseTabConfirmation | null;
   closePaneConfirmation: ClosePaneConfirmation | null;
   contextMenu: ContextMenuState | null;
@@ -616,6 +644,20 @@ export interface LayoutStateMap {
   [paneId: string]: LayoutEntry;
 }
 
+export interface SavedSessionConfigurationSummary {
+  config_name: string;
+  session_name: string;
+  file_name: string;
+  updated_at: number;
+}
+
+export interface LoadedSessionConfiguration {
+  session_id: string;
+  session_name: string;
+  minimized_tile_ids: string[];
+  layout_entries_by_tile: LayoutStateMap;
+}
+
 export interface TestDriverKey {
   key: string;
   shift_key?: boolean;
@@ -644,10 +686,12 @@ export type TestDriverRequest =
   | { type: 'toolbar_spawn_work'; title: string }
   | { type: 'sidebar_open' }
   | { type: 'sidebar_close' }
+  | { type: 'settings_sidebar_open' }
+  | { type: 'settings_sidebar_close' }
   | { type: 'sidebar_select_item'; index: number }
   | { type: 'sidebar_move_selection'; delta: number }
   | { type: 'sidebar_begin_rename' }
-  | { type: 'tile_select'; tile_id: string }
+  | { type: 'tile_select'; tile_id: string; shift_key?: boolean }
   | { type: 'tile_close'; tile_id: string }
   | { type: 'tile_drag'; tile_id: string; dx: number; dy: number }
   | { type: 'tile_resize'; tile_id: string; width: number; height: number }
@@ -683,6 +727,7 @@ export interface TestDriverProjection {
     text: string;
   };
   help_open: boolean;
+  settings_sidebar_open: boolean;
   sidebar: {
     open: boolean;
     section: SidebarSection;
@@ -693,6 +738,7 @@ export interface TestDriverProjection {
   close_pane_confirmation: ProjectionCloseTileConfirmation | null;
   context_menu: ProjectionContextMenu | null;
   selected_tile_id: string | null;
+  selected_tile_ids: string[];
   selected_work_id: string | null;
   debug_tab: DebugTab;
   agents: AgentInfo[];

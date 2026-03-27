@@ -648,8 +648,7 @@ describe.sequential('work registry integration', () => {
       const events = await collectAgentEvents(
         subscription,
         (received) =>
-          received.some((event) => event.kind === 'system' && event.message === 'Signed On')
-          && received.some(
+          received.some(
             (event) =>
               event.kind === 'direct'
               && event.from_display_name === 'HERD'
@@ -664,7 +663,7 @@ describe.sequential('work registry integration', () => {
         15_000,
       );
 
-      expect(events.some((event) => event.kind === 'system' && event.message === 'Signed On')).toBe(true);
+      expect(events.some((event) => event.kind === 'system' && event.message === 'Signed On')).toBe(false);
       expect(
         events.some(
           (event) =>
@@ -683,6 +682,78 @@ describe.sequential('work registry integration', () => {
       ).toBe(true);
     } finally {
       subscription.close();
+    }
+  });
+
+  it('delivers sign-on and sign-off system events only to Root', async () => {
+    const projection = await createIsolatedTab(client, 'root-only-system-events');
+    const sessionId = projection.active_tab_id!;
+    const rootAgent = await waitForRootAgentInSession(client, sessionId);
+    const rootSubscription = await openAgentEventSubscription(runtime.socketPath, rootAgent.agent_id);
+    const workerPaneId = await spawnShellInActiveTab(client);
+    const workerRegistration = await client.agentRegister('agent-root-only-events', workerPaneId, 'Worker Events');
+    const workerSubscription = await openAgentEventSubscription(runtime.socketPath, 'agent-root-only-events');
+
+    try {
+      const rootSignOnEvents = await collectAgentEvents(
+        rootSubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'system'
+              && event.message === 'Signed On'
+              && event.from_display_name === workerRegistration.agent.display_name,
+          ),
+        15_000,
+      );
+      expect(
+        rootSignOnEvents.some(
+          (event) =>
+            event.kind === 'system'
+            && event.message === 'Signed On'
+            && event.from_display_name === workerRegistration.agent.display_name,
+        ),
+      ).toBe(true);
+
+      const workerBootstrapEvents = await collectAgentEvents(
+        workerSubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'direct'
+              && event.from_display_name === 'HERD'
+              && event.message === HERD_WELCOME_MESSAGE,
+          ),
+        15_000,
+      );
+      expect(
+        workerBootstrapEvents.some((event) => event.kind === 'system' && event.message === 'Signed On'),
+      ).toBe(false);
+
+      workerSubscription.close();
+
+      const rootSignOffEvents = await collectAgentEvents(
+        rootSubscription,
+        (events) =>
+          events.some(
+            (event) =>
+              event.kind === 'system'
+              && event.message === 'Signed Off'
+              && event.from_display_name === workerRegistration.agent.display_name,
+          ),
+        15_000,
+      );
+      expect(
+        rootSignOffEvents.some(
+          (event) =>
+            event.kind === 'system'
+            && event.message === 'Signed Off'
+            && event.from_display_name === workerRegistration.agent.display_name,
+        ),
+      ).toBe(true);
+    } finally {
+      rootSubscription.close();
+      workerSubscription.close();
     }
   });
 

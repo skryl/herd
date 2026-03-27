@@ -101,6 +101,20 @@ pub struct WorkItem {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedWorkItem {
+    pub work_id: Option<String>,
+    pub tile_id: String,
+    pub session_id: String,
+    pub title: String,
+    pub topic: String,
+    pub current_stage: WorkStage,
+    pub stages: Vec<WorkStageState>,
+    pub reviews: Vec<WorkReviewEntry>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl WorkItem {
     pub fn current_stage_state(&self) -> Option<&WorkStageState> {
         self.stages.iter().find(|stage| stage.stage == self.current_stage)
@@ -229,10 +243,11 @@ pub fn tile_id_for_work_with_conn(conn: &Connection, work_id: &str) -> Result<St
     .ok_or_else(|| format!("work item {work_id} is missing a tile id"))
 }
 
-pub fn create_work_item_at(
+fn create_work_item_with_tile_id_at(
     db_path: &Path,
     session_id: &str,
     title: &str,
+    preferred_tile_id: Option<String>,
 ) -> Result<WorkItem, String> {
     let normalized_title = normalize_title(title)?;
 
@@ -242,7 +257,9 @@ pub fn create_work_item_at(
         .map_err(|error| format!("failed to begin work create transaction: {error}"))?;
 
     let work_id = next_work_id(&tx, session_id)?;
-    let tile_id = crate::tile_registry::generate_unique_tile_id_with_conn(&tx)?;
+    let tile_id = preferred_tile_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(crate::tile_registry::generate_unique_tile_id_with_conn(&tx)?);
     let topic = work_topic(&work_id);
     let created_at = now_ms();
     let data_json = serde_json::to_string(&WorkItemData {
@@ -281,6 +298,106 @@ pub fn create_work_item_at(
 
     tx.commit()
         .map_err(|error| format!("failed to commit work create transaction: {error}"))?;
+    get_work_item_at(db_path, &work_id)
+}
+
+pub fn create_work_item_at(
+    db_path: &Path,
+    session_id: &str,
+    title: &str,
+) -> Result<WorkItem, String> {
+    create_work_item_with_tile_id_at(db_path, session_id, title, None)
+}
+
+pub fn create_work_item_with_preferred_tile_id_at(
+    db_path: &Path,
+    session_id: &str,
+    title: &str,
+    tile_id: String,
+) -> Result<WorkItem, String> {
+    create_work_item_with_tile_id_at(db_path, session_id, title, Some(tile_id))
+}
+
+pub fn import_work_item_at(
+    db_path: &Path,
+    item: ImportedWorkItem,
+) -> Result<WorkItem, String> {
+    let normalized_title = normalize_title(&item.title)?;
+    let normalized_topic = item.topic.trim();
+    if normalized_topic.is_empty() {
+        return Err("imported work topic cannot be empty".to_string());
+    }
+    if item.tile_id.trim().is_empty() {
+        return Err("imported work tile_id cannot be empty".to_string());
+    }
+    let stages = normalize_import_stages(&item.stages)?;
+    let work_id = if let Some(work_id) = item.work_id.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        work_id.to_string()
+    } else {
+        let conn = db::open_at(db_path)?;
+        next_work_id(&conn, &item.session_id)?
+    };
+
+    let mut conn = db::open_at(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin work import transaction: {error}"))?;
+
+    tx.execute(
+        "INSERT INTO work_item (work_id, tile_id, session_id, title, owner_agent_id, current_stage, data_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            work_id,
+            item.tile_id,
+            item.session_id,
+            normalized_title,
+            Option::<String>::None,
+            item.current_stage.as_str(),
+            serde_json::to_string(&WorkItemData {
+                topic: normalized_topic.to_string(),
+            })
+            .map_err(|error| format!("failed to serialize imported work item data: {error}"))?,
+            item.created_at,
+            item.updated_at,
+        ],
+    )
+    .map_err(|error| format!("failed to insert imported work item: {error}"))?;
+
+    for stage in &stages {
+        tx.execute(
+            "INSERT INTO work_stage (work_id, stage_name, status, content) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                work_id,
+                stage.stage.as_str(),
+                stage.status.as_str(),
+                default_stage_content(
+                    &normalized_title,
+                    &work_id,
+                    &item.session_id,
+                    normalized_topic,
+                    stage.stage,
+                ),
+            ],
+        )
+        .map_err(|error| format!("failed to insert imported stage {}: {error}", stage.stage.as_str()))?;
+    }
+
+    for review in &item.reviews {
+        tx.execute(
+            "INSERT INTO work_review (work_id, stage_name, decision, comment, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                work_id,
+                review.stage.as_str(),
+                review.decision.as_str(),
+                review.comment,
+                review.created_at,
+            ],
+        )
+        .map_err(|error| format!("failed to insert imported review for {}: {error}", review.stage.as_str()))?;
+    }
+
+    tx.commit()
+        .map_err(|error| format!("failed to commit work import transaction: {error}"))?;
     get_work_item_at(db_path, &work_id)
 }
 
@@ -475,6 +592,20 @@ fn normalize_title(title: &str) -> Result<String, String> {
     } else {
         Ok(title.to_string())
     }
+}
+
+fn normalize_import_stages(stages: &[WorkStageState]) -> Result<Vec<WorkStageState>, String> {
+    let mut normalized = stages.to_vec();
+    normalized.sort_by_key(|stage| stage.stage);
+    if normalized.len() != WorkStage::ALL.len() {
+        return Err(format!("imported work item requires exactly {} stages", WorkStage::ALL.len()));
+    }
+    for (expected, actual) in WorkStage::ALL.iter().zip(normalized.iter()) {
+        if actual.stage != *expected {
+            return Err("imported work item stages must cover plan, prd, and artifact".to_string());
+        }
+    }
+    Ok(normalized)
 }
 
 fn require_owner(item: &WorkItem, owner_agent_id: &str) -> Result<(), String> {

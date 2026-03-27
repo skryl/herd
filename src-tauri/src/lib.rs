@@ -6,6 +6,7 @@ mod db;
 mod network;
 mod persist;
 mod runtime;
+mod session_config;
 mod socket;
 mod state;
 mod tile_registry;
@@ -118,6 +119,9 @@ fn run_gui() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             browser::browser_extension_pages,
+            browser::get_agent_browser_install_status,
+            browser::set_agent_browser_install_declined,
+            browser::install_agent_browser_runtime,
             browser::browser_webview_sync,
             browser::browser_webview_navigate,
             browser::browser_webview_load,
@@ -148,6 +152,11 @@ fn run_gui() {
             commands::select_session,
             commands::rename_session,
             commands::set_session_root_cwd,
+            commands::set_session_browser_backend,
+            session_config::list_saved_session_configurations,
+            session_config::save_session_configuration,
+            session_config::load_session_configuration,
+            session_config::delete_session_configuration,
             commands::new_window,
             commands::spawn_agent_window,
             commands::spawn_browser_window,

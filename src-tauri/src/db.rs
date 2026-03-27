@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{now_ms, AgentInfo, AgentRole, AgentType};
+use crate::agent::{now_ms, AgentInfo, AgentRole, AgentType, TileSubscriptionRecord};
 use crate::runtime;
 
 const SCHEMA_SQL: &str = r#"
@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS tile_state (
   x REAL NOT NULL,
   y REAL NOT NULL,
   width REAL NOT NULL,
-  height REAL NOT NULL
+  height REAL NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tile_registry (
@@ -69,6 +70,18 @@ CREATE TABLE IF NOT EXISTS topic (
   name TEXT PRIMARY KEY,
   data_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tile_subscription (
+  session_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  subscriber_tile_id TEXT NOT NULL,
+  subject_tile_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  action TEXT NOT NULL,
+  data_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, scope, subscriber_tile_id, subject_tile_id, direction, action)
 );
 
 CREATE TABLE IF NOT EXISTS network_connection (
@@ -203,6 +216,7 @@ pub fn open_at(path: &Path) -> Result<Connection, String> {
         .map_err(|error| format!("failed to open sqlite db {}: {error}", path.display()))?;
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|error| format!("failed to initialize sqlite schema {}: {error}", path.display()))?;
+    ensure_tile_state_locked_column(&conn)?;
     ensure_optional_work_item_tile_id_column(&conn)?;
     ensure_tile_registry_browser_incognito_column(&conn)?;
     ensure_work_stage_content_storage(&mut conn)?;
@@ -235,6 +249,18 @@ fn ensure_optional_work_item_tile_id_column(conn: &Connection) -> Result<(), Str
     }
     conn.execute("ALTER TABLE work_item ADD COLUMN tile_id TEXT", [])
         .map_err(|error| format!("failed to add work_item.tile_id column: {error}"))?;
+    Ok(())
+}
+
+fn ensure_tile_state_locked_column(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "tile_state", "locked")? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE tile_state ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|error| format!("failed to add tile_state.locked column: {error}"))?;
     Ok(())
 }
 
@@ -444,6 +470,93 @@ pub fn replace_channels_at(path: &Path, channels: &[PersistedChannelRecord]) -> 
     Ok(())
 }
 
+pub fn load_tile_subscriptions() -> Result<Vec<TileSubscriptionRecord>, String> {
+    load_tile_subscriptions_at(Path::new(runtime::database_path()))
+}
+
+pub fn load_tile_subscriptions_at(path: &Path) -> Result<Vec<TileSubscriptionRecord>, String> {
+    let conn = open_at(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT data_json
+             FROM tile_subscription
+             ORDER BY session_id, subscriber_tile_id, subject_tile_id, scope, direction, action",
+        )
+        .map_err(|error| format!("failed to prepare tile subscription query: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("failed to query tile subscriptions: {error}"))?;
+    let mut subscriptions = Vec::new();
+    for row in rows {
+        let json = row.map_err(|error| format!("failed to decode tile subscription row: {error}"))?;
+        let subscription = serde_json::from_str::<TileSubscriptionRecord>(&json)
+            .map_err(|error| format!("failed to parse tile subscription json: {error}"))?;
+        subscriptions.push(subscription);
+    }
+    Ok(subscriptions)
+}
+
+pub fn replace_tile_subscriptions(subscriptions: &[TileSubscriptionRecord]) -> Result<(), String> {
+    replace_tile_subscriptions_at(Path::new(runtime::database_path()), subscriptions)
+}
+
+pub fn replace_tile_subscriptions_at(path: &Path, subscriptions: &[TileSubscriptionRecord]) -> Result<(), String> {
+    let mut conn = open_at(path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin tile subscription transaction: {error}"))?;
+    tx.execute("DELETE FROM tile_subscription", [])
+        .map_err(|error| format!("failed to clear tile subscription rows: {error}"))?;
+    let updated_at = now_ms();
+    for subscription in subscriptions {
+        let data_json = serde_json::to_string(subscription).map_err(|error| {
+            format!(
+                "failed to serialize tile subscription {}:{}:{}:{}:{}: {error}",
+                subscription.session_id,
+                subscription.scope as u8,
+                subscription.subscriber_tile_id,
+                subscription.subject_tile_id,
+                subscription.action,
+            )
+        })?;
+        tx.execute(
+            "INSERT INTO tile_subscription (
+              session_id,
+              scope,
+              subscriber_tile_id,
+              subject_tile_id,
+              direction,
+              action,
+              data_json,
+              updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                subscription.session_id,
+                serde_json::to_string(&subscription.scope).unwrap_or_default(),
+                subscription.subscriber_tile_id,
+                subscription.subject_tile_id,
+                serde_json::to_string(&subscription.direction).unwrap_or_default(),
+                subscription.action,
+                data_json,
+                updated_at
+            ],
+        )
+        .map_err(|error| {
+            format!(
+                "failed to insert tile subscription {}:{}:{}:{}:{}: {error}",
+                subscription.session_id,
+                subscription.subscriber_tile_id,
+                subscription.subject_tile_id,
+                serde_json::to_string(&subscription.direction).unwrap_or_default(),
+                subscription.action,
+            )
+        })?;
+    }
+    tx.commit()
+        .map_err(|error| format!("failed to commit tile subscription transaction: {error}"))?;
+    Ok(())
+}
+
 pub fn reset_runtime_presence_state() -> Result<(), String> {
     reset_runtime_presence_state_at(Path::new(runtime::database_path()))
 }
@@ -460,10 +573,18 @@ pub fn reset_runtime_presence_state_at(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_agents_at, load_channels_at, open_at, replace_agents_at, replace_channels_at,
-        reset_runtime_presence_state_at, PersistedChannelRecord,
+        load_agents_at, load_channels_at, load_tile_subscriptions_at, open_at, replace_agents_at,
+        replace_channels_at, replace_tile_subscriptions_at, reset_runtime_presence_state_at,
+        PersistedChannelRecord,
     };
-    use crate::agent::{AgentInfo, AgentRole, AgentType};
+    use crate::agent::{
+        AgentInfo,
+        AgentRole,
+        AgentType,
+        TileSubscriptionDirection,
+        TileSubscriptionRecord,
+        TileSubscriptionScope,
+    };
     use rusqlite::{params, Connection};
     use std::fs;
     use std::path::PathBuf;
@@ -500,6 +621,7 @@ mod tests {
         assert!(names.contains(&"work_stage".to_string()));
         assert!(names.contains(&"work_review".to_string()));
         assert!(names.contains(&"tile_registry".to_string()));
+        assert!(names.contains(&"tile_subscription".to_string()));
 
         let _ = fs::remove_file(path);
     }
@@ -539,6 +661,35 @@ mod tests {
 
         assert_eq!(load_agents_at(&path).unwrap(), agents);
         assert_eq!(load_channels_at(&path).unwrap(), channels);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tile_subscriptions_round_trip_through_sqlite() {
+        let path = temp_db_path("tile-subscriptions");
+        let subscriptions = vec![
+            TileSubscriptionRecord {
+                session_id: "$1".to_string(),
+                scope: TileSubscriptionScope::Tile,
+                subscriber_tile_id: "%root".to_string(),
+                subject_tile_id: "%shell".to_string(),
+                direction: TileSubscriptionDirection::In,
+                action: "exec".to_string(),
+            },
+            TileSubscriptionRecord {
+                session_id: "$1".to_string(),
+                scope: TileSubscriptionScope::Network,
+                subscriber_tile_id: "%worker".to_string(),
+                subject_tile_id: "%browser".to_string(),
+                direction: TileSubscriptionDirection::Out,
+                action: "extension_call".to_string(),
+            },
+        ];
+
+        replace_tile_subscriptions_at(&path, &subscriptions).unwrap();
+
+        assert_eq!(load_tile_subscriptions_at(&path).unwrap(), subscriptions);
 
         let _ = fs::remove_file(path);
     }

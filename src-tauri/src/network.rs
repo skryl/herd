@@ -412,6 +412,7 @@ pub fn reconciled_tmux_tile_record_kind(
     match existing_kind {
         Some(TileRecordKind::Agent) => TileRecordKind::Agent,
         Some(TileRecordKind::Browser) => TileRecordKind::Browser,
+        Some(TileRecordKind::Work) => TileRecordKind::Work,
         Some(TileRecordKind::Shell) | None => inferred_tmux_tile_record_kind(window_name, pane_title),
     }
 }
@@ -425,6 +426,7 @@ pub fn network_tile_kind_from_record_kind(
     match record_kind {
         TileRecordKind::Browser => NetworkTileKind::Browser,
         TileRecordKind::Shell => NetworkTileKind::Shell,
+        TileRecordKind::Work => NetworkTileKind::Work,
         TileRecordKind::Agent => match agent_role {
             Some(AgentRole::Root) => NetworkTileKind::RootAgent,
             Some(AgentRole::Worker) => NetworkTileKind::Agent,
@@ -601,6 +603,34 @@ pub fn list_port_settings_at(db_path: &Path, session_id: &str) -> Result<Vec<Til
     list_port_settings_with_conn(&conn, session_id)
 }
 
+pub fn list_all_port_settings_at(db_path: &Path) -> Result<Vec<TilePortSetting>, String> {
+    let conn = db::open_at(db_path)?;
+    list_all_port_settings_with_conn(&conn)
+}
+
+pub fn list_all_port_settings_with_conn(conn: &Connection) -> Result<Vec<TilePortSetting>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, tile_id, port, access_mode, networking_mode
+             FROM tile_port_setting
+             ORDER BY session_id ASC, tile_id ASC, port ASC",
+        )
+        .map_err(|error| format!("failed to prepare port setting query: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(TilePortSetting {
+                session_id: row.get(0)?,
+                tile_id: row.get(1)?,
+                port: parse_port(&row.get::<_, String>(2)?)?,
+                access_mode: parse_port_mode(&row.get::<_, String>(3)?)?,
+                networking_mode: parse_port_networking_mode(&row.get::<_, String>(4)?)?,
+            })
+        })
+        .map_err(|error| format!("failed to query port settings: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to decode port setting rows: {error}"))
+}
+
 pub fn list_port_settings_with_conn(
     conn: &Connection,
     session_id: &str,
@@ -626,6 +656,39 @@ pub fn list_port_settings_with_conn(
         .map_err(|error| format!("failed to query port settings: {error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to decode port setting rows: {error}"))
+}
+
+pub fn replace_port_settings_at(db_path: &Path, settings: &[TilePortSetting]) -> Result<(), String> {
+    let mut conn = db::open_at(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to begin port setting replace transaction: {error}"))?;
+    tx.execute("DELETE FROM tile_port_setting", [])
+        .map_err(|error| format!("failed to clear port settings: {error}"))?;
+    for setting in settings {
+        tx.execute(
+            "INSERT INTO tile_port_setting (session_id, tile_id, port, access_mode, networking_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                setting.session_id,
+                setting.tile_id,
+                setting.port.as_str(),
+                setting.access_mode.as_str(),
+                setting.networking_mode.as_str(),
+            ],
+        )
+        .map_err(|error| {
+            format!(
+                "failed to replace port setting {}:{} for session {}: {error}",
+                setting.tile_id,
+                setting.port.as_str(),
+                setting.session_id,
+            )
+        })?;
+    }
+    tx.commit()
+        .map_err(|error| format!("failed to commit port setting replace transaction: {error}"))?;
+    Ok(())
 }
 
 pub fn set_port_settings_at(

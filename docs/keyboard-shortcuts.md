@@ -9,6 +9,7 @@ Herd is primarily keyboard-driven. This page tracks the current shortcut surface
 - `:`: open the command bar
 - `?`: open help; any key or click closes it
 - `b`: toggle the `TREE` sidebar
+- `,`: toggle the `SETTINGS` sidebar
 - `d`: toggle the debug pane
 
 ## Navigation
@@ -21,7 +22,7 @@ Herd is primarily keyboard-driven. This page tracks the current shortcut surface
 
 - `Ctrl+h/j/k/l`: move the selected shell
 - `Ctrl+Shift+h/j/k/l`: move the selected shell faster
-- `H / J / K / L`: pan the canvas
+- `H / J / K / L`: pan the canvas when the sidebar is not open
 
 ## View
 
@@ -31,7 +32,8 @@ Herd is primarily keyboard-driven. This page tracks the current shortcut surface
 - `Shift+=`: zoom the canvas in
 - `f`: fit all shells in view
 - `0`: reset canvas zoom and pan
-- `a`: cycle anchored arrangements for the active tab (`circle`, `snowflake`, `stack-down`, `stack-right`, `spiral`) and fit the view
+- `a`: align the active session to the nearest grid points using the current grid size
+- `Shift+A`: arrange the current session with ELK first, then cycle `circle`, `snowflake`, `stack-down`, `stack-right`, and `spiral`, fitting the view after each press
 
 ## Tiles And Tabs
 
@@ -40,7 +42,7 @@ Herd is primarily keyboard-driven. This page tracks the current shortcut surface
 - `t`: create a new tab
 - `w` or `X`: close the active tab
 
-## Sidebar
+## Tree Sidebar
 
 - `Shift+j / Shift+k`: focus the next / previous sidebar section
 - `j / k`: move within the focused sidebar section
@@ -48,20 +50,28 @@ Herd is primarily keyboard-driven. This page tracks the current shortcut surface
 - `i`: enter input mode for the selected shell
 - `z`: zoom to the selected shell
 - `Z`: fullscreen zoom the selected shell
-- `Esc` or `b`: close the sidebar
+- `Esc` or `b`: close the tree sidebar
 
-Sidebar section order is:
+Tree sidebar section order is:
 
-- `SETTINGS`
 - `WORK`
 - `AGENTS`
 - `TMUX`
 
-The `SETTINGS` section currently includes:
+## Settings Sidebar
+
+- `Esc` or `,`: close the settings sidebar
+
+The `SETTINGS` sidebar currently includes:
 
 - `SPAWN DIR`
+- `SESSION NAME`
+  - rename the active session and drive `SAVE`, `DELETE`, and `LOAD` for the current saved-session name
+- `BROWSER BACKEND`
+  - switch between `LIVE WEBVIEW` and `AGENT BROWSER`
 - `PORTS`
   - toggle between `4`, `8`, `12`, and `16` total visible ports per tile
+- `WIRE SPARKS`
 
 ## Command Bar
 

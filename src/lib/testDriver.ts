@@ -7,10 +7,13 @@ import {
   beginSidebarRename,
   buildTestDriverProjection,
   cancelCommandBar,
+  deleteWorkCard,
   dismissContextMenu,
   closeSidebar,
+  closeSettingsSidebar,
   commandText,
   dispatchIntent,
+  dragWorkCardBy,
   dragTileBy,
   fitCanvasToActiveTab,
   mode,
@@ -19,13 +22,16 @@ import {
   panCanvasBy,
   openCanvasContextMenu,
   openPaneContextMenu,
+  openSettingsSidebar,
   openPortContextMenu,
+  openWorkContextMenu,
   paneIdForTileId,
   refreshWorkItems,
   removeTerminal,
   resizeTileTo,
   selectContextMenuItem,
   selectTile,
+  selectWorkItem,
   setSidebarSelection,
   submitCommandBar,
   wheelCanvas,
@@ -84,12 +90,20 @@ async function waitForIdle(timeoutMs = 10_000, settleMs = 150): Promise<void> {
 }
 
 async function executeRequest(request: TestDriverRequest): Promise<unknown> {
-  const resolvePaneId = (tileId: string) => {
+  const resolveWorkId = (tileId: string) => {
+    return Object.values(get(appState).work.items).find((item) => item.tile_id === tileId)?.work_id ?? null;
+  };
+
+  const resolveTileTarget = (tileId: string) => {
     const paneId = paneIdForTileId(get(appState), tileId);
-    if (!paneId) {
-      throw new Error(`no backing pane found for tile ${tileId}`);
+    if (paneId) {
+      return { kind: 'pane' as const, paneId };
     }
-    return paneId;
+    const workId = resolveWorkId(tileId);
+    if (workId) {
+      return { kind: 'work' as const, workId };
+    }
+    throw new Error(`no tile target found for ${tileId}`);
   };
 
   switch (request.type) {
@@ -152,6 +166,12 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
     case 'sidebar_close':
       closeSidebar();
       return null;
+    case 'settings_sidebar_open':
+      openSettingsSidebar();
+      return null;
+    case 'settings_sidebar_close':
+      closeSettingsSidebar();
+      return null;
     case 'sidebar_select_item':
       setSidebarSelection(request.index);
       return null;
@@ -161,21 +181,53 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
     case 'sidebar_begin_rename':
       beginSidebarRename();
       return null;
-    case 'tile_select':
-      selectTile(resolvePaneId(request.tile_id));
+    case 'tile_select': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind === 'pane') {
+        selectTile(target.paneId, request.shift_key === true);
+      } else {
+        selectWorkItem(target.workId, request.shift_key === true);
+      }
       return null;
-    case 'tile_close':
-      removeTerminal(resolvePaneId(request.tile_id));
+    }
+    case 'tile_close': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind === 'pane') {
+        removeTerminal(target.paneId);
+      } else {
+        const sessionId = get(appState).work.items[target.workId]?.session_id;
+        if (!sessionId) {
+          throw new Error(`no session found for work tile ${request.tile_id}`);
+        }
+        await deleteWorkCard(target.workId, sessionId);
+      }
       return null;
-    case 'tile_drag':
-      await dragTileBy(resolvePaneId(request.tile_id), request.dx, request.dy);
+    }
+    case 'tile_drag': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind === 'pane') {
+        await dragTileBy(target.paneId, request.dx, request.dy);
+      } else {
+        await dragWorkCardBy(target.workId, request.dx, request.dy);
+      }
       return null;
-    case 'tile_resize':
-      await resizeTileTo(resolvePaneId(request.tile_id), request.width, request.height);
+    }
+    case 'tile_resize': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind !== 'pane') {
+        throw new Error(`tile ${request.tile_id} is not resizable by the test driver`);
+      }
+      await resizeTileTo(target.paneId, request.width, request.height);
       return null;
-    case 'tile_title_double_click':
-      zoomCanvasToTile(resolvePaneId(request.tile_id), request.viewport_width, request.viewport_height);
+    }
+    case 'tile_title_double_click': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind !== 'pane') {
+        throw new Error(`tile ${request.tile_id} does not support title double click zoom`);
+      }
+      zoomCanvasToTile(target.paneId, request.viewport_width, request.viewport_height);
       return null;
+    }
     case 'canvas_pan':
       panCanvasBy(request.dx, request.dy);
       return null;
@@ -197,9 +249,15 @@ async function executeRequest(request: TestDriverRequest): Promise<unknown> {
     case 'canvas_reset':
       await dispatchIntent({ type: 'reset-canvas' });
       return null;
-    case 'tile_context_menu':
-      openPaneContextMenu(resolvePaneId(request.tile_id), request.client_x, request.client_y);
+    case 'tile_context_menu': {
+      const target = resolveTileTarget(request.tile_id);
+      if (target.kind === 'pane') {
+        openPaneContextMenu(target.paneId, request.client_x, request.client_y);
+      } else {
+        openWorkContextMenu(target.workId, request.client_x, request.client_y);
+      }
       return null;
+    }
     case 'port_context_menu':
       openPortContextMenu(request.tile_id, request.port, request.client_x, request.client_y);
       return null;

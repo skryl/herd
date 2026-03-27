@@ -29,7 +29,13 @@
     updateWorkCardLayout,
   } from './lib/stores/appState';
   import { activeTabId } from './lib/stores/tabs';
-  import { createWorkItem, setTestDriverState } from './lib/tauri';
+  import {
+    createWorkItem,
+    getAgentBrowserInstallStatus,
+    installAgentBrowserRuntime,
+    setAgentBrowserInstallDeclined,
+    setTestDriverState,
+  } from './lib/tauri';
   import { installTestDriver } from './lib/testDriver';
   import type { AgentDebugState, ChatterEntry, HerdMode, PaneKind, PendingSpawnPlacement, TileSignalState, TmuxSnapshot } from './lib/types';
 
@@ -204,6 +210,21 @@
       void handleArrangeElkEvent(event.payload);
     });
     await bootstrapAppState();
+    try {
+      const status = await getAgentBrowserInstallStatus();
+      if (status.prompt_pending && !navigator.webdriver) {
+        const confirmed = window.confirm(
+          `Install agent-browser ${status.version} and Chrome for Testing into ${status.runtime_dir}?`,
+        );
+        if (confirmed) {
+          await installAgentBrowserRuntime();
+        } else {
+          await setAgentBrowserInstallDeclined(true);
+        }
+      }
+    } catch (error) {
+      console.error('initial agent-browser install prompt failed:', error);
+    }
     await setTestDriverState({ bootstrapComplete: true });
   });
 
@@ -229,7 +250,8 @@
   onSpawnBrowser={handleSpawnBrowser}
   onSpawnWork={() => handleSpawnWork()}
 />
-<Sidebar />
+<Sidebar kind="tree" />
+<Sidebar kind="settings" />
 <Canvas />
 <CommandBar />
 <ConfirmDialog />

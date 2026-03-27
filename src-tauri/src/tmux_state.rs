@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     agent::AgentRole,
+    browser::BrowserBackend,
     network::{self, NetworkTileKind},
     runtime,
     state::{AppState, WindowParentSource},
@@ -33,6 +34,7 @@ pub struct TmuxSession {
     pub active_window_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_cwd: Option<String>,
+    pub browser_backend: BrowserBackend,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,7 +93,8 @@ fn pane_role_for_record(
         NetworkTileKind::RootAgent => "root_agent".to_string(),
         NetworkTileKind::Agent => "claude".to_string(),
         NetworkTileKind::Browser => "browser".to_string(),
-        NetworkTileKind::Shell | NetworkTileKind::Work => "regular".to_string(),
+        NetworkTileKind::Work => "work".to_string(),
+        NetworkTileKind::Shell => "regular".to_string(),
     })
 }
 
@@ -136,6 +139,7 @@ fn parse_snapshot(
             window_ids: Vec::new(),
             active_window_id: None,
             root_cwd: None,
+            browser_backend: BrowserBackend::default(),
         });
     }
 
@@ -279,6 +283,7 @@ fn parse_snapshot(
             window_ids: Vec::new(),
             active_window_id: None,
             root_cwd: None,
+            browser_backend: BrowserBackend::default(),
         });
     }
 
@@ -456,10 +461,21 @@ fn default_session_root_cwd() -> String {
         .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
 }
 
+const SESSION_ROOT_CWD_ENV: &str = "HERD_TAB_ROOT_CWD";
+const SESSION_BROWSER_BACKEND_ENV: &str = "HERD_BROWSER_BACKEND";
+
 pub fn set_session_root_cwd(target: &str, cwd: &str) -> Result<(), String> {
     ensure_success(
-        run_tmux(&["set-environment", "-t", target, "HERD_TAB_ROOT_CWD", cwd])?,
+        run_tmux(&["set-environment", "-t", target, SESSION_ROOT_CWD_ENV, cwd])?,
         "tmux set-environment HERD_TAB_ROOT_CWD failed",
+    )?;
+    Ok(())
+}
+
+pub fn set_session_browser_backend(target: &str, backend: BrowserBackend) -> Result<(), String> {
+    ensure_success(
+        run_tmux(&["set-environment", "-t", target, SESSION_BROWSER_BACKEND_ENV, backend.as_str()])?,
+        "tmux set-environment HERD_BROWSER_BACKEND failed",
     )?;
     Ok(())
 }
@@ -473,15 +489,27 @@ pub fn set_session_env(target: &str, key: &str, value: &str) -> Result<(), Strin
 }
 
 pub fn session_root_cwd(target: &str) -> Result<Option<String>, String> {
-    let output = run_tmux(&["show-environment", "-t", target, "HERD_TAB_ROOT_CWD"])?;
+    let output = run_tmux(&["show-environment", "-t", target, SESSION_ROOT_CWD_ENV])?;
     if !output.status.success() {
         return Ok(None);
     }
     let value = String::from_utf8_lossy(&output.stdout)
         .trim()
-        .strip_prefix("HERD_TAB_ROOT_CWD=")
+        .strip_prefix(&format!("{SESSION_ROOT_CWD_ENV}="))
         .map(str::to_string);
     Ok(value.filter(|value| !value.trim().is_empty()))
+}
+
+pub fn session_browser_backend(target: &str) -> Result<Option<BrowserBackend>, String> {
+    let output = run_tmux(&["show-environment", "-t", target, SESSION_BROWSER_BACKEND_ENV])?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let Some(value) = raw.trim().strip_prefix(&format!("{SESSION_BROWSER_BACKEND_ENV}=")) else {
+        return Ok(None);
+    };
+    BrowserBackend::parse(value).map(Some)
 }
 
 pub fn ensure_session_root_cwd(target: &str) -> Result<String, String> {
@@ -491,6 +519,23 @@ pub fn ensure_session_root_cwd(target: &str) -> Result<String, String> {
     let cwd = default_session_root_cwd();
     set_session_root_cwd(target, &cwd)?;
     Ok(cwd)
+}
+
+fn default_session_browser_backend() -> BrowserBackend {
+    if crate::browser::agent_browser_is_ready() {
+        BrowserBackend::AgentBrowser
+    } else {
+        BrowserBackend::LiveWebview
+    }
+}
+
+pub fn ensure_session_browser_backend(target: &str) -> Result<BrowserBackend, String> {
+    if let Some(existing) = session_browser_backend(target)? {
+        return Ok(existing);
+    }
+    let backend = default_session_browser_backend();
+    set_session_browser_backend(target, backend)?;
+    Ok(backend)
 }
 
 fn unique_session_name(base: Option<&str>) -> Result<String, String> {
@@ -512,6 +557,7 @@ pub fn ensure_default_session() -> Result<String, String> {
     if let Some(name) = first_session_name()? {
         let _ = set_session_env(&name, "HERD_SOCK", runtime::socket_path());
         let _ = ensure_session_root_cwd(&name);
+        let _ = ensure_session_browser_backend(&name);
         return Ok(name);
     }
     let herd_sock = format!("HERD_SOCK={}", runtime::socket_path());
@@ -534,6 +580,7 @@ pub fn ensure_default_session() -> Result<String, String> {
     )?;
     let _ = set_session_env(runtime::session_name(), "HERD_SOCK", runtime::socket_path());
     let _ = set_session_root_cwd(runtime::session_name(), &default_session_root_cwd());
+    let _ = set_session_browser_backend(runtime::session_name(), default_session_browser_backend());
     Ok(runtime::session_name().to_string())
 }
 
@@ -575,6 +622,7 @@ pub fn create_session(name: Option<&str>) -> Result<String, String> {
     let session_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let _ = set_session_env(&session_id, "HERD_SOCK", runtime::socket_path());
     let _ = set_session_root_cwd(&session_id, &default_session_root_cwd());
+    let _ = set_session_browser_backend(&session_id, default_session_browser_backend());
     Ok(session_id)
 }
 
@@ -826,6 +874,10 @@ pub fn snapshot(state: &AppState) -> Result<TmuxSnapshot, String> {
             .ok()
             .flatten()
             .or_else(|| Some(default_session_root_cwd()));
+        session.browser_backend = session_browser_backend(&session.id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(default_session_browser_backend);
     }
 
     Ok(snapshot)

@@ -4,18 +4,22 @@ import type { TestDriverKey } from '../types';
 import {
   activeTabId,
   addTab,
+  alignSessionToGrid,
   appState,
   autoArrange,
   autoArrangeWithElk,
   beginSidebarRename,
   closePaneConfirmation,
   closeSidebar,
+  closeSettingsSidebar,
   closeTabConfirmation,
   commandBarOpen,
   contextMenuState,
   dismissContextMenu,
   dispatchIntent,
   fitCanvasToActiveTab,
+  gridSnapEnabled,
+  gridSnapSize,
   helpOpen,
   mode,
   moveSidebarSection,
@@ -28,6 +32,7 @@ import {
   selectDirectional,
   selectNextTerminal,
   selectPrevTerminal,
+  settingsSidebarOpen,
   sidebarOpen,
   zoomCanvasAtViewportCenter,
 } from '../stores/appState';
@@ -47,6 +52,16 @@ function viewportWidth(context?: KeyboardActionContext): number {
 
 function viewportHeight(context?: KeyboardActionContext): number {
   return context?.viewportHeight ?? (window.innerHeight - 54);
+}
+
+function shouldRunElkArrangeShortcut(sessionId: string | null): boolean {
+  if (!sessionId) {
+    return true;
+  }
+  const state = get(appState);
+  const arrangementMode = state.ui.arrangementModeBySession[sessionId] ?? null;
+  const arrangementCycle = state.ui.arrangementCycleBySession[sessionId] ?? 0;
+  return arrangementMode === null || (arrangementMode === 'spiral' && arrangementCycle === 0);
 }
 
 export function keyInputToData(input: TestDriverKey): string | null {
@@ -146,6 +161,11 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
       }
       return false;
     }
+    if (get(settingsSidebarOpen)) {
+      handled();
+      closeSettingsSidebar();
+      return true;
+    }
     if (get(sidebarOpen)) {
       handled();
       closeSidebar();
@@ -173,7 +193,8 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
   }
 
   if (input.ctrl_key && !input.meta_key && !input.alt_key && ['h', 'j', 'k', 'l'].includes(lowerKey)) {
-    const distance = WINDOW_MOVE_STEP * (input.shift_key ? 2 : 1);
+    const baseDistance = get(gridSnapEnabled) ? get(gridSnapSize) : WINDOW_MOVE_STEP;
+    const distance = baseDistance * (input.shift_key ? 2 : 1);
     const dx = lowerKey === 'h' ? -distance : lowerKey === 'l' ? distance : 0;
     const dy = lowerKey === 'k' ? -distance : lowerKey === 'j' ? distance : 0;
     const selectedId = get(selectedTerminalId);
@@ -206,6 +227,12 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
   if (!input.ctrl_key && !input.meta_key && !input.alt_key && !input.shift_key && input.key === 'b') {
     handled();
     await dispatchIntent({ type: 'toggle-sidebar' });
+    return true;
+  }
+
+  if (!input.ctrl_key && !input.meta_key && !input.alt_key && !input.shift_key && input.key === ',') {
+    handled();
+    await dispatchIntent({ type: 'toggle-settings-sidebar' });
     return true;
   }
 
@@ -336,15 +363,18 @@ export async function handleGlobalKeyInput(input: TestDriverKey, context?: Keybo
       return true;
     case 'a':
       handled();
-      await autoArrange(get(activeTabId));
-      fitCanvasToActiveTab(viewportWidth(context), viewportHeight(context));
+      await alignSessionToGrid(get(activeTabId));
       return true;
     case 'A':
       if (!input.shift_key) {
         return false;
       }
       handled();
-      await autoArrangeWithElk(get(activeTabId));
+      if (shouldRunElkArrangeShortcut(get(activeTabId))) {
+        await autoArrangeWithElk(get(activeTabId));
+      } else {
+        await autoArrange(get(activeTabId));
+      }
       fitCanvasToActiveTab(viewportWidth(context), viewportHeight(context));
       return true;
     case 's':

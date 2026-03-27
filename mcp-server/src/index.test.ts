@@ -12,6 +12,7 @@ import {
   resolveAgentRole,
   resolveMcpMode,
   unwrapNestedScreenshotResult,
+  WORKER_ONLY_TOOL_NAMES,
   WORKER_TOOL_NAMES,
 } from "./index.js";
 
@@ -36,7 +37,12 @@ describe("mcp tool surface parity", () => {
       "network_get",
       "network_call",
     ]);
-    expect(WORKER_TOOL_NAMES).toEqual([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES]);
+    expect(WORKER_ONLY_TOOL_NAMES).toEqual([
+      "network_subscribe",
+      "network_unsubscribe",
+      "network_subscription_list",
+    ]);
+    expect(WORKER_TOOL_NAMES).toEqual([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES, ...WORKER_ONLY_TOOL_NAMES]);
   });
 
   it("exposes the full latest root tool surface", () => {
@@ -46,6 +52,9 @@ describe("mcp tool surface parity", () => {
       "tile_list",
       "tile_rename",
       "tile_call",
+      "tile_subscribe",
+      "tile_unsubscribe",
+      "tile_subscription_list",
       "shell_input_send",
       "shell_exec",
       "shell_output_read",
@@ -67,7 +76,7 @@ describe("mcp tool surface parity", () => {
       "work_review_approve",
       "work_review_improve",
     ]);
-    expect(ROOT_TOOL_NAMES).toEqual([...WORKER_TOOL_NAMES, ...ROOT_ONLY_TOOL_NAMES]);
+    expect(ROOT_TOOL_NAMES).toEqual([...MESSAGE_TOOL_NAMES, ...SHARED_TOOL_NAMES, ...ROOT_ONLY_TOOL_NAMES]);
   });
 
   it("does not expose internal lifecycle or test commands through MCP", () => {

@@ -21,6 +21,9 @@ use crate::agent::{
     AgentType,
     ChannelInfo,
     ChatterEntry,
+    TileSubscriptionDirection,
+    TileSubscriptionRecord,
+    TileSubscriptionScope,
     TileSignalLed,
     TileSignalState,
     TILE_SIGNAL_LED_COUNT,
@@ -131,6 +134,7 @@ pub struct AppState {
     browser_page_zoom_by_pane: Arc<Mutex<HashMap<String, f64>>>,
     agent_records: Arc<Mutex<HashMap<String, AgentRecord>>>,
     channel_records: Arc<Mutex<HashMap<String, ChannelRecord>>>,
+    tile_subscription_records: Arc<Mutex<HashMap<String, TileSubscriptionRecord>>>,
     chatter_entries: Arc<Mutex<Vec<ChatterEntry>>>,
     agent_log_entries: Arc<Mutex<Vec<AgentLogEntry>>>,
     tile_message_log_entries: Arc<Mutex<Vec<TileMessageLogEntry>>>,
@@ -161,6 +165,7 @@ impl AppState {
             }
         }
         let persisted_channels = db::load_channels().unwrap_or_default();
+        let persisted_tile_subscriptions = db::load_tile_subscriptions().unwrap_or_default();
         let persisted_tiles = tile_registry::load();
         let chatter_entries = persist::load_chatter_entries();
         let agent_log_entries = persist::load_agent_log_entries();
@@ -188,6 +193,9 @@ impl AppState {
             browser_page_zoom_by_pane: Arc::new(Mutex::new(HashMap::new())),
             agent_records: Arc::new(Mutex::new(build_agent_record_map(persisted_agents))),
             channel_records: Arc::new(Mutex::new(build_channel_record_map(persisted_channels))),
+            tile_subscription_records: Arc::new(Mutex::new(build_tile_subscription_record_map(
+                persisted_tile_subscriptions,
+            ))),
             chatter_entries: Arc::new(Mutex::new(chatter_entries)),
             agent_log_entries: Arc::new(Mutex::new(agent_log_entries)),
             tile_message_log_entries: Arc::new(Mutex::new(tile_message_log_entries)),
@@ -536,8 +544,16 @@ impl AppState {
                 last_activity_at: record.last_activity_at,
             })
             .collect::<Vec<_>>();
+        let subscriptions = self
+            .tile_subscription_records
+            .lock()
+            .map_err(|e| e.to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         db::replace_agents(&agents)?;
         db::replace_channels(&channels)?;
+        db::replace_tile_subscriptions(&subscriptions)?;
         Ok(())
     }
 
@@ -732,6 +748,13 @@ impl AppState {
         if let Ok(mut generations) = self.tile_signal_program_generations.lock() {
             generations.retain(|tile_id, _| valid_tile_ids.contains(tile_id));
         }
+        if let Ok(mut subscriptions) = self.tile_subscription_records.lock() {
+            subscriptions.retain(|_, record| {
+                valid_tile_ids.contains(&record.subscriber_tile_id)
+                    && valid_tile_ids.contains(&record.subject_tile_id)
+            });
+        }
+        self.persist_agent_and_channel_state()?;
         self.persist_tile_registry_state()
     }
 
@@ -749,6 +772,12 @@ impl AppState {
         drop(tiles);
         if removed.is_some() {
             self.remove_tile_signal_state(tile_id);
+            if let Ok(mut subscriptions) = self.tile_subscription_records.lock() {
+                subscriptions.retain(|_, record| {
+                    record.subscriber_tile_id != tile_id && record.subject_tile_id != tile_id
+                });
+            }
+            self.persist_agent_and_channel_state()?;
         }
         self.persist_tile_registry_state()?;
         Ok(removed)
@@ -939,6 +968,80 @@ impl AppState {
             .collect::<Vec<_>>();
         list.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(list)
+    }
+
+    pub fn list_tile_subscriptions_in_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TileSubscriptionRecord>, String> {
+        let records = self.tile_subscription_records.lock().map_err(|e| e.to_string())?;
+        let mut list = records
+            .values()
+            .filter(|record| record.session_id == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| {
+            left.subscriber_tile_id
+                .cmp(&right.subscriber_tile_id)
+                .then_with(|| left.subject_tile_id.cmp(&right.subject_tile_id))
+                .then_with(|| left.scope.cmp(&right.scope))
+                .then_with(|| left.direction.cmp(&right.direction))
+                .then_with(|| left.action.cmp(&right.action))
+        });
+        Ok(list)
+    }
+
+    pub fn add_tile_subscription(
+        &self,
+        record: TileSubscriptionRecord,
+    ) -> Result<TileSubscriptionRecord, String> {
+        let key = tile_subscription_key(&record);
+        self.tile_subscription_records
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(key, record.clone());
+        self.persist_agent_and_channel_state()?;
+        Ok(record)
+    }
+
+    pub fn remove_tile_subscription(
+        &self,
+        session_id: &str,
+        scope: TileSubscriptionScope,
+        subscriber_tile_id: &str,
+        subject_tile_id: &str,
+        direction: TileSubscriptionDirection,
+        action: &str,
+    ) -> Result<bool, String> {
+        let removed = self
+            .tile_subscription_records
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(&tile_subscription_key_parts(
+                session_id,
+                scope,
+                subscriber_tile_id,
+                subject_tile_id,
+                direction,
+                action,
+            ))
+            .is_some();
+        if removed {
+            self.persist_agent_and_channel_state()?;
+        }
+        Ok(removed)
+    }
+
+    pub fn clear_tile_subscriptions_in_session(&self, session_id: &str) -> Result<(), String> {
+        let mut records = self.tile_subscription_records.lock().map_err(|e| e.to_string())?;
+        let before = records.len();
+        records.retain(|_, record| record.session_id != session_id);
+        let changed = records.len() != before;
+        drop(records);
+        if changed {
+            self.persist_agent_and_channel_state()?;
+        }
+        Ok(())
     }
 
     pub fn chatter_entries(&self) -> Result<Vec<ChatterEntry>, String> {
@@ -1425,6 +1528,15 @@ fn build_channel_record_map(channels: Vec<PersistedChannelRecord>) -> HashMap<St
         .collect()
 }
 
+fn build_tile_subscription_record_map(
+    records: Vec<TileSubscriptionRecord>,
+) -> HashMap<String, TileSubscriptionRecord> {
+    records
+        .into_iter()
+        .map(|record| (tile_subscription_key(&record), record))
+        .collect()
+}
+
 fn build_tile_record_map(records: Vec<TileRecord>) -> HashMap<String, TileRecord> {
     records
         .into_iter()
@@ -1434,6 +1546,30 @@ fn build_tile_record_map(records: Vec<TileRecord>) -> HashMap<String, TileRecord
 
 fn channel_key(session_id: &str, channel_name: &str) -> String {
     format!("{session_id}::{channel_name}")
+}
+
+fn tile_subscription_key(record: &TileSubscriptionRecord) -> String {
+    tile_subscription_key_parts(
+        &record.session_id,
+        record.scope,
+        &record.subscriber_tile_id,
+        &record.subject_tile_id,
+        record.direction,
+        &record.action,
+    )
+}
+
+fn tile_subscription_key_parts(
+    session_id: &str,
+    scope: TileSubscriptionScope,
+    subscriber_tile_id: &str,
+    subject_tile_id: &str,
+    direction: TileSubscriptionDirection,
+    action: &str,
+) -> String {
+    format!(
+        "{session_id}::{scope:?}::{subscriber_tile_id}::{subject_tile_id}::{direction:?}::{action}"
+    )
 }
 
 fn parse_agent_display_index(display_name: &str) -> Option<u64> {

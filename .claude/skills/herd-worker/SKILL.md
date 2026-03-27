@@ -28,6 +28,9 @@ Local-network discovery and calls:
 - `network_list`
 - `network_get`
 - `network_call`
+- `network_subscribe`
+- `network_unsubscribe`
+- `network_subscription_list`
 
 ## Operating Rules
 
@@ -37,6 +40,7 @@ Local-network discovery and calls:
 - Call only actions advertised in a tile's `responds_to`.
 - Inspect `message_api` for required args and browser-drive subcommands.
 - Browser automation goes through `network_call` with browser action `drive`.
+- Use `network_subscribe` with selectors like `in:exec`, `out:get`, `both:extension_call`, or `*:navigate` when you need live tile-call notifications from local-network tiles.
 - Agent and `root_agent` tiles are read-only on the network.
 - If the action you need is not on your local-network surface, ask Root through `message_root`.
 - Use `self_display_status` for concise user-visible progress updates in your tile chrome.
@@ -51,6 +55,7 @@ Incoming Herd traffic arrives through the Claude channel hook.
 - `kind=public`: session-wide chatter
 - `kind=network`: your local connected-network traffic
 - `kind=system`: lifecycle notices
+- `kind=tile_event`: live notifications for subscribed tile calls, plus implicit external calls on your own agent tile
 - `kind=ping`: transport only
 - `replay=true`: history, not a fresh assignment
 

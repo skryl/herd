@@ -20,7 +20,7 @@
     reportPaneViewport,
     removeTerminal,
     selectTile,
-    selectedTerminalId,
+    selectedTileIds,
     tileSignalByTileId,
     tileActivityById,
     togglePaneMinimized,
@@ -44,7 +44,8 @@
   let lastViewportKey = '';
   let unregisterDriverHandle: (() => void) | null = null;
 
-  let isSelected = $derived($selectedTerminalId === info.id);
+  let isSelected = $derived($selectedTileIds.includes(info.tileId));
+  let isLocked = $derived(Boolean(info.locked));
   let designator = $derived(`P${info.id.replace(/\D/g, '') || info.paneId.replace(/\D/g, '')}`);
   let displayTitle = $derived(info.title !== 'shell' ? info.title : designator);
   let activityEntries = $derived($tileActivityById[info.tileId] ?? []);
@@ -224,6 +225,7 @@
 
   function handleTitleMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    if (isLocked) return;
     isDragging = true;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
@@ -288,7 +290,6 @@
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    selectTile(info.id);
     const viewport = (e.currentTarget as HTMLElement).closest('.canvas-viewport') as HTMLElement | null;
     const rect = viewport?.getBoundingClientRect();
     const clientX = rect ? e.clientX - rect.left : e.clientX;
@@ -320,7 +321,7 @@
   data-tile-id={info.tileId}
   style="left: {info.x}px; top: {info.y}px; width: {info.width}px; height: {info.height}px; z-index: {isSelected ? 10 : 1};"
   onmousedown={(e) => {
-    selectTile(info.id);
+    selectTile(info.id, e.shiftKey);
     if ($mode === 'command') {
       e.preventDefault();
     }
@@ -335,6 +336,14 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="header-bar" onmousedown={handleTitleMouseDown} ondblclick={handleTitleDblClick}>
       <div class="header-left">
+        {#if isLocked}
+          <span class="tile-lock-indicator" title="Locked" aria-label="Locked">
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3.5 5V3.75a2.5 2.5 0 1 1 5 0V5" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              <rect x="2.2" y="5" width="7.6" height="5.2" rx="1" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </span>
+        {/if}
         {#if isAgentTile}
           <span class="agent-badge" class:root-agent-badge={isRootAgentTile} title={isRootAgentTile ? 'Root agent tile' : 'Agent tile'} aria-label={isRootAgentTile ? 'Root agent tile' : 'Agent tile'}>
             {isRootAgentTile ? 'ROOT' : 'CC'}
@@ -601,6 +610,19 @@
     flex: 1;
   }
 
+  .tile-lock-indicator {
+    display: inline-flex;
+    width: 12px;
+    height: 12px;
+    color: var(--copper);
+    flex: 0 0 12px;
+  }
+
+  .tile-lock-indicator svg {
+    width: 100%;
+    height: 100%;
+  }
+
   .header-right {
     flex-shrink: 0;
   }
@@ -747,7 +769,7 @@
   }
 
   .info-strip {
-    height: 20px;
+    height: 24px;
     padding: 0 8px;
     border-top: 1px solid var(--component-border);
     display: flex;
@@ -779,7 +801,7 @@
   .shell-view-toggle-btn,
   .display-toggle-btn,
   .activity-toggle-btn {
-    height: 16px;
+    height: 18px;
     padding: 0 6px;
     border: 1px solid var(--activity-border);
     background: rgba(0, 0, 0, 0.18);

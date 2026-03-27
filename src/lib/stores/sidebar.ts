@@ -1,1 +1,1 @@
-export { sidebarOpen, sidebarSelectedIdx } from './appState';
+export { anySidebarOpen, settingsSidebarOpen, sidebarOpen, sidebarSelectedIdx } from './appState';

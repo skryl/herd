@@ -21,6 +21,7 @@ src-tauri/log/
 
 # Local runtime state
 tmp/
+sessions/
 work/
 
 # MCP server build

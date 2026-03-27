@@ -100,6 +100,72 @@ pub struct ChannelInfo {
     pub last_activity_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TileSubscriptionScope {
+    Tile,
+    Network,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TileSubscriptionDirection {
+    In,
+    Out,
+    Both,
+}
+
+impl TileSubscriptionDirection {
+    pub fn matches_incoming(self) -> bool {
+        matches!(self, Self::In | Self::Both)
+    }
+
+    pub fn matches_outgoing(self) -> bool {
+        matches!(self, Self::Out | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TileSubscriptionRecord {
+    pub session_id: String,
+    pub scope: TileSubscriptionScope,
+    pub subscriber_tile_id: String,
+    pub subject_tile_id: String,
+    pub direction: TileSubscriptionDirection,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TileEventDeliveryReason {
+    Subscription,
+    ImplicitSelfTarget,
+}
+
+pub fn parse_tile_subscription_selector(
+    selector: &str,
+) -> Result<(TileSubscriptionDirection, String), String> {
+    let trimmed = selector.trim();
+    let Some((raw_direction, raw_action)) = trimmed.split_once(':') else {
+        return Err("tile subscription event selectors must use direction:action syntax".to_string());
+    };
+    let direction = match raw_direction.trim() {
+        "in" => TileSubscriptionDirection::In,
+        "out" => TileSubscriptionDirection::Out,
+        "both" | "*" => TileSubscriptionDirection::Both,
+        other => {
+            return Err(format!(
+                "unsupported tile subscription direction {other}; use in, out, both, or *"
+            ))
+        }
+    };
+    let action = raw_action.trim();
+    if action.is_empty() {
+        return Err("tile subscription event selectors require a non-empty action name".to_string());
+    }
+    Ok((direction, action.to_string()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatterKind {
@@ -160,6 +226,7 @@ pub enum AgentChannelEventKind {
     Channel,
     Network,
     Root,
+    TileEvent,
     System,
     Ping,
 }
@@ -183,6 +250,34 @@ pub struct AgentChannelEvent {
     pub replay: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ping_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_reason: Option<TileEventDeliveryReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_scope: Option<TileSubscriptionScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_direction: Option<TileSubscriptionDirection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_tile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_tile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_tile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_tile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args_json: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<serde_json::Value>,
     pub timestamp_ms: i64,
 }
 
@@ -562,6 +657,7 @@ mod tests {
         collect_channels, collect_mentions, format_channel_display, format_direct_display,
         format_network_display, format_public_display, format_root_display,
         format_sign_off_display, format_sign_on_display, normalize_channel,
+        parse_tile_subscription_selector, TileSubscriptionDirection,
     };
 
     #[test]
@@ -590,5 +686,19 @@ mod tests {
         assert_eq!(format_root_display("Agent 1", "please inspect"), "Agent 1 -> Root: please inspect");
         assert_eq!(format_sign_on_display("Agent 1"), "Agent 1: Signed On");
         assert_eq!(format_sign_off_display("Agent 1"), "Agent 1: Signed Off");
+    }
+
+    #[test]
+    fn parses_tile_subscription_selectors() {
+        assert_eq!(
+            parse_tile_subscription_selector("in:exec").unwrap(),
+            (TileSubscriptionDirection::In, "exec".to_string())
+        );
+        assert_eq!(
+            parse_tile_subscription_selector("*:extension_call").unwrap(),
+            (TileSubscriptionDirection::Both, "extension_call".to_string())
+        );
+        assert!(parse_tile_subscription_selector("nope").is_err());
+        assert!(parse_tile_subscription_selector("in:").is_err());
     }
 }

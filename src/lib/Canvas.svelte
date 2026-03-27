@@ -16,6 +16,7 @@
     activeTabVisibleTerminals,
     activeTabVisibleWorkCards,
     activeNetworkCallPortActivity,
+    anySidebarOpen,
     buildNetworkCallSignals,
     canvasState,
     clearNetworkReleaseAnimation,
@@ -28,7 +29,6 @@
     networkReleaseAnimation,
     openCanvasContextMenu,
     panCanvasBy,
-    sidebarOpen,
     suspendBrowserWebviewsForMotion,
     type NetworkCallSignal,
     updateNetworkPortDrag,
@@ -72,7 +72,7 @@
   let releaseAnimationProgress = $state(1);
   let networkCallSignals = $state<ActiveNetworkCallSignal[]>([]);
   let networkSignalNowMs = $state(0);
-  let effectiveSidebarWidth = $derived($sidebarOpen ? 240 : 0);
+  let effectiveSidebarWidth = $derived($anySidebarOpen ? 240 : 0);
   let effectiveDebugHeight = $derived(
     $debugPaneOpen && Number.isFinite($debugPaneHeight) && $debugPaneHeight > 0 ? $debugPaneHeight : 0,
   );

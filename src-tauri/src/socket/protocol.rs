@@ -63,6 +63,8 @@ pub enum TestDriverRequest {
     },
     SidebarOpen,
     SidebarClose,
+    SettingsSidebarOpen,
+    SettingsSidebarClose,
     SidebarSelectItem {
         index: usize,
     },
@@ -72,6 +74,8 @@ pub enum TestDriverRequest {
     SidebarBeginRename,
     TileSelect {
         tile_id: String,
+        #[serde(default)]
+        shift_key: bool,
     },
     TileClose {
         tile_id: String,
@@ -296,6 +300,33 @@ pub enum SocketCommand {
         #[serde(default)]
         sender_tile_id: Option<String>,
     },
+    #[serde(rename = "network_subscribe")]
+    NetworkSubscribe {
+        tile_id: String,
+        event: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "network_unsubscribe")]
+    NetworkUnsubscribe {
+        tile_id: String,
+        event: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "network_subscription_list")]
+    NetworkSubscriptionList {
+        #[serde(default)]
+        tile_id: Option<String>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
     #[serde(rename = "tile_create")]
     TileCreate {
         tile_type: TileTypeFilter,
@@ -362,6 +393,37 @@ pub enum SocketCommand {
         action: String,
         #[serde(default)]
         args: Option<serde_json::Value>,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_subscribe")]
+    TileSubscribe {
+        tile_id: String,
+        event: String,
+        agent_id: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_unsubscribe")]
+    TileUnsubscribe {
+        tile_id: String,
+        event: String,
+        agent_id: String,
+        #[serde(default)]
+        sender_agent_id: Option<String>,
+        #[serde(default)]
+        sender_tile_id: Option<String>,
+    },
+    #[serde(rename = "tile_subscription_list")]
+    TileSubscriptionList {
+        #[serde(default)]
+        tile_id: Option<String>,
+        #[serde(default)]
+        agent_id: Option<String>,
         #[serde(default)]
         sender_agent_id: Option<String>,
         #[serde(default)]

@@ -251,10 +251,10 @@
     overflow: hidden;
     min-width: 0;
     font-family: var(--font-mono);
-    font-size: 8px;
-    line-height: 1;
+    font-size: 9px;
+    line-height: 1.1;
     letter-spacing: 0.35px;
-    color: var(--silk-dim);
+    color: var(--silk-white);
     white-space: nowrap;
   }
 

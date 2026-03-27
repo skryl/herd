@@ -23,16 +23,19 @@ import {
   sendPublicMessageCommand,
   getWorkItems,
   getAgentDebugState,
+  listSavedSessionConfigurations,
   getClaudeMenuDataForPane,
   getLayoutState,
   getTmuxState,
   killSession,
   killWindow,
+  loadSessionConfiguration,
   newSession,
   newWindow,
   renameSession,
   renameWindow,
   resizeWindow,
+  saveSessionConfiguration,
   saveLayoutState,
   sendRootMessageCommand,
   selectSession,
@@ -51,6 +54,7 @@ import type {
   ArrangementMode,
   AppStateTree,
   CanvasState,
+  CanvasZoomBookmark,
   CanvasZoomMode,
   ChannelInfo,
   ChatterEntry,
@@ -61,6 +65,7 @@ import type {
   ContextMenuItem,
   ContextMenuState,
   DebugTab,
+  GridSnapSize,
   HerdMode,
   LayoutEntry,
   LayoutStateMap,
@@ -72,6 +77,7 @@ import type {
   PaneViewportHint,
   PaneKind,
   PtyOutputEvent,
+  SavedSessionConfigurationSummary,
   SidebarSection,
   SidebarTreeItem,
   Tab,
@@ -93,7 +99,6 @@ import type {
   UiState,
 } from '../types';
 
-const GRID_SNAP = 20;
 const GAP = 30;
 const DEFAULT_TILE_WIDTH = 640;
 const DEFAULT_TILE_HEIGHT = 400;
@@ -103,13 +108,15 @@ const MIN_CANVAS_ZOOM = 0.05;
 const MAX_CANVAS_ZOOM = 3;
 const DEFAULT_DEBUG_PANE_HEIGHT = 200;
 const NETWORK_SNAP_DISTANCE = 44;
-const SIDEBAR_SECTIONS: SidebarSection[] = ['settings', 'work', 'agents', 'tmux'];
+const DEFAULT_GRID_SNAP_SIZE: GridSnapSize = 20;
+const SIDEBAR_SECTIONS: SidebarSection[] = ['work', 'agents', 'tmux'];
 const AUTO_ARRANGE_PATTERNS: ArrangementMode[] = ['circle', 'snowflake', 'stack-down', 'stack-right', 'spiral'];
 const ELK_PORT_SIZE = 8;
 const ELK_LAYOUT = new ELK();
 const BROWSER_WEBVIEW_MOTION_SETTLE_MS = 140;
 
 let browserWebviewMotionSettleTimer: ReturnType<typeof setTimeout> | null = null;
+let suspendedLayoutPersistenceDepth = 0;
 
 type TmuxEffect =
   | { type: 'new-session'; name?: string }
@@ -123,6 +130,8 @@ type TmuxEffect =
   | { type: 'rename-session'; sessionId: string; name: string }
   | { type: 'rename-window'; windowId: string; name: string }
   | { type: 'write-pane'; paneId: string; data: string }
+  | { type: 'delete-work-item'; workId: string; sessionId: string }
+  | { type: 'save-layout-state'; entryId: string; entry: LayoutEntry }
   | { type: 'load-browser-file'; paneId: string; path: string }
   | { type: 'set-network-port-settings'; tileId: string; port: TilePort; accessMode?: PortMode | null; networkingMode?: PortNetworkingMode | null }
   | { type: 'open-work-dialog'; placement: PendingSpawnPlacement | null };
@@ -144,6 +153,7 @@ export type UiIntent =
   | { type: 'rename-active-tab'; name: string }
   | { type: 'rename-selected-pane'; name: string }
   | { type: 'toggle-sidebar' }
+  | { type: 'toggle-settings-sidebar' }
   | { type: 'set-sidebar-section'; section: SidebarSection }
   | { type: 'move-sidebar-section'; delta: number }
   | { type: 'set-sidebar-selection'; index: number }
@@ -182,8 +192,11 @@ const initialUiState: UiState = {
   commandText: '',
   helpOpen: false,
   sidebarOpen: false,
+  settingsSidebarOpen: false,
   sidebarSection: 'tmux',
   sidebarSelectedIdx: 0,
+  gridSnapEnabled: true,
+  gridSnapSize: DEFAULT_GRID_SNAP_SIZE,
   tilePortCount: DEFAULT_TILE_PORT_COUNT,
   networkCallSparksEnabled: true,
   debugPaneOpen: false,
@@ -191,6 +204,7 @@ const initialUiState: UiState = {
   debugTab: 'logs',
   selectedPaneId: null,
   selectedWorkId: null,
+  selectedTileIds: [],
   paneViewportHints: {},
   arrangementCycleBySession: {},
   arrangementModeBySession: {},
@@ -199,7 +213,9 @@ const initialUiState: UiState = {
     panY: 0,
     zoom: 1,
   },
+  canvasBySession: {},
   zoomBookmark: null,
+  zoomBookmarkBySession: {},
   closeTabConfirmation: null,
   closePaneConfirmation: null,
   contextMenu: null,
@@ -244,6 +260,7 @@ export const initialAppState: AppStateTree = {
 };
 
 export const appState = writable<AppStateTree>(initialAppState);
+export const savedSessionConfigurations = writable<SavedSessionConfigurationSummary[]>([]);
 
 let workDialogOpener: ((placement: PendingSpawnPlacement | null) => void) | null = null;
 
@@ -306,8 +323,15 @@ export function registerWorkDialogOpener(
   };
 }
 
-function snapToGrid(value: number): number {
-  return Math.round(value / GRID_SNAP) * GRID_SNAP;
+function snapToGrid(value: number, gridSnapEnabled: boolean, gridSnapSize: number): number {
+  if (!gridSnapEnabled) {
+    return value;
+  }
+  return Math.round(value / gridSnapSize) * gridSnapSize;
+}
+
+function snapToGridForState(state: AppStateTree, value: number): number {
+  return snapToGrid(value, state.ui.gridSnapEnabled, state.ui.gridSnapSize);
 }
 
 function windowTileId(window: TmuxWindow | null | undefined): string | null {
@@ -364,6 +388,69 @@ function sessionIdForTileId(state: AppStateTree, tileId: string): string | null 
   }
   const paneId = paneIdForTileId(state, tileId);
   return paneId ? state.tmux.panes[paneId]?.session_id ?? null : null;
+}
+
+function tileExistsInState(state: AppStateTree, tileId: string): boolean {
+  return Boolean(workItemForTileId(state, tileId) || paneIdForTileId(state, tileId));
+}
+
+function normalizeSelectedTileIds(state: AppStateTree, tileIds: string[]): string[] {
+  const activeSessionId = state.tmux.activeSessionId;
+  if (!activeSessionId) {
+    return [];
+  }
+  const seen = new Set<string>();
+  return tileIds.filter((tileId) => {
+    if (seen.has(tileId)) {
+      return false;
+    }
+    seen.add(tileId);
+    return tileExistsInState(state, tileId) && sessionIdForTileId(state, tileId) === activeSessionId;
+  });
+}
+
+function primarySelectedTileId(state: AppStateTree): string | null {
+  const selectedWork = state.ui.selectedWorkId ? state.work.items[state.ui.selectedWorkId] ?? null : null;
+  if (selectedWork && selectedWork.session_id === state.tmux.activeSessionId) {
+    return selectedWork.tile_id;
+  }
+  const selectedPaneId = state.ui.selectedPaneId;
+  if (!selectedPaneId) {
+    return null;
+  }
+  const pane = state.tmux.panes[selectedPaneId];
+  if (!pane || pane.session_id !== state.tmux.activeSessionId) {
+    return null;
+  }
+  return paneTileId(state, selectedPaneId);
+}
+
+function reconcileSelectedTileIds(state: AppStateTree, preferredTileIds: string[]): string[] {
+  const normalized = normalizeSelectedTileIds(state, preferredTileIds);
+  const primaryTileId = primarySelectedTileId(state);
+  if (!primaryTileId) {
+    return normalized;
+  }
+  return [primaryTileId, ...normalized.filter((tileId) => tileId !== primaryTileId)];
+}
+
+function selectedTileIdsInState(state: AppStateTree): string[] {
+  return reconcileSelectedTileIds(state, state.ui.selectedTileIds);
+}
+
+function nextSelectedTileIds(state: AppStateTree, tileId: string, additive: boolean): string[] {
+  if (!additive) {
+    return [tileId];
+  }
+  return normalizeSelectedTileIds(state, [tileId, ...selectedTileIdsInState(state)]);
+}
+
+function isTileSelectedInState(state: AppStateTree, tileId: string): boolean {
+  return selectedTileIdsInState(state).includes(tileId);
+}
+
+function isTileLockedInState(state: AppStateTree, tileId: string): boolean {
+  return Boolean(state.layout.entries[tileId]?.locked);
 }
 
 function validTileIdsBySession(
@@ -522,9 +609,10 @@ function findOpenPosition(
   height: number,
   paneIds: string[],
   entries: Record<string, LayoutEntry>,
+  snapConfig: Pick<UiState, 'gridSnapEnabled' | 'gridSnapSize'>,
 ): LayoutEntry {
-  let x = snapToGrid(desiredX);
-  let y = snapToGrid(desiredY);
+  let x = snapToGrid(desiredX, snapConfig.gridSnapEnabled, snapConfig.gridSnapSize);
+  let y = snapToGrid(desiredY, snapConfig.gridSnapEnabled, snapConfig.gridSnapSize);
   const overlaps = (cx: number, cy: number) =>
     paneIds.some((paneId) => {
       const entry = entries[paneId];
@@ -549,8 +637,8 @@ function findOpenPosition(
       { x: desiredX - stepX, y: desiredY - stepY },
     ];
     for (const candidate of candidates) {
-      const cx = snapToGrid(candidate.x);
-      const cy = snapToGrid(candidate.y);
+      const cx = snapToGrid(candidate.x, snapConfig.gridSnapEnabled, snapConfig.gridSnapSize);
+      const cy = snapToGrid(candidate.y, snapConfig.gridSnapEnabled, snapConfig.gridSnapSize);
       if (!overlaps(cx, cy)) {
         return { x: cx, y: cy, width, height };
       }
@@ -595,6 +683,11 @@ async function applyElkArrangement(
 ): Promise<{ state: AppStateTree; arrangedEntries: Record<string, LayoutEntry> }> {
   const tileIds = sessionLayoutTileIds(state, sessionId);
   if (tileIds.length === 0) {
+    return { state, arrangedEntries: {} };
+  }
+  const lockedTileIds = tileIds.filter((tileId) => isTileLockedInState(state, tileId));
+  const movableTileIds = tileIds.filter((tileId) => !lockedTileIds.includes(tileId));
+  if (movableTileIds.length === 0) {
     return { state, arrangedEntries: {} };
   }
 
@@ -675,7 +768,7 @@ async function applyElkArrangement(
     ? anchorOffsetY
     : (Number.isFinite(currentMinY) ? currentMinY : 100) - Math.min(...tileIds.map((tileId) => resultChildren[tileId]?.y ?? 0));
 
-  const desiredEntries = Object.fromEntries(tileIds.map((tileId) => {
+  const desiredEntries = Object.fromEntries(movableTileIds.map((tileId) => {
     const entry = nodeEntries[tileId];
     const laidOut = resultChildren[tileId];
     return [tileId, {
@@ -686,7 +779,7 @@ async function applyElkArrangement(
     } satisfies LayoutEntry];
   }));
 
-  const orderedTileIds = [...tileIds].sort((left, right) => {
+  const orderedTileIds = [...movableTileIds].sort((left, right) => {
     if (left === selectedTileId) return -1;
     if (right === selectedTileId) return 1;
     const leftEntry = desiredEntries[left];
@@ -694,7 +787,9 @@ async function applyElkArrangement(
     return leftEntry.y - rightEntry.y || leftEntry.x - rightEntry.x;
   });
 
-  const arrangedEntries: Record<string, LayoutEntry> = {};
+  const arrangedEntries: Record<string, LayoutEntry> = Object.fromEntries(
+    lockedTileIds.map((tileId) => [tileId, { ...nodeEntries[tileId] }]),
+  );
   for (const tileId of orderedTileIds) {
     const entry = desiredEntries[tileId];
     if (tileId === selectedTileId && anchorEntry) {
@@ -708,6 +803,7 @@ async function applyElkArrangement(
       entry.height,
       Object.keys(arrangedEntries),
       arrangedEntries,
+      state.ui,
     );
   }
 
@@ -822,31 +918,28 @@ function toggleSelectedZoom(
   const term = terminalInfoForPane(state, paneId);
   if (!term) return state;
 
-  const bookmark = state.ui.zoomBookmark;
+  const activeSessionId = state.tmux.activeSessionId;
+  const bookmark = activeSessionId
+    ? (state.ui.zoomBookmarkBySession[activeSessionId] ?? null)
+    : state.ui.zoomBookmark;
   if (bookmark && bookmark.paneId === paneId && bookmark.mode === mode) {
-    return {
-      ...state,
-      ui: {
-        ...state.ui,
-        canvas: bookmark.previousCanvas,
-        zoomBookmark: null,
-      },
-    };
+    const restoredState = setActiveSessionCanvasInState(state, bookmark.previousCanvas, {
+      clearZoomBookmark: false,
+    });
+    return setActiveSessionZoomBookmarkInState(restoredState, null);
   }
 
   const previousCanvas = bookmark?.previousCanvas ?? state.ui.canvas;
-  return {
-    ...state,
-    ui: {
-      ...state.ui,
-      canvas: canvasForTerminal(term, viewportWidth, viewportHeight, mode),
-      zoomBookmark: {
-        mode,
-        paneId,
-        previousCanvas,
-      },
-    },
-  };
+  const zoomedState = setActiveSessionCanvasInState(
+    state,
+    canvasForTerminal(term, viewportWidth, viewportHeight, mode),
+    { clearZoomBookmark: false },
+  );
+  return setActiveSessionZoomBookmarkInState(zoomedState, {
+    mode,
+    paneId,
+    previousCanvas,
+  });
 }
 
 export function buildSidebarItems(state: AppStateTree): SidebarTreeItem[] {
@@ -872,6 +965,9 @@ export function buildSidebarItems(state: AppStateTree): SidebarTreeItem[] {
     if (!window) continue;
     const paneId = window.pane_ids[0];
     const windowPane = paneId ? state.tmux.panes[paneId] : null;
+    if (paneId && paneKindForPane(state, paneId) === 'work') {
+      continue;
+    }
     items.push({
       type: 'window',
       label: `${window.index}: ${defaultWindowTitle(window, windowPane)}`,
@@ -1073,30 +1169,37 @@ function selectedSidebarItem(state: AppStateTree): SidebarTreeItem | null {
 
 function focusSidebarSectionState(state: AppStateTree, section: SidebarSection): AppStateTree {
   if (section === 'work') {
+    const workId = selectedWorkIdForSession(state, state.ui.selectedWorkId, true);
+    const tileId = workId ? workLayoutKey(state, workId) : null;
     return {
       ...state,
       ui: {
         ...state.ui,
         sidebarSection: 'work',
         selectedPaneId: null,
-        selectedWorkId: selectedWorkIdForSession(state, state.ui.selectedWorkId, true),
+        selectedWorkId: workId,
+        selectedTileIds: tileId ? [tileId] : [],
       },
     };
   }
 
   if (section === 'agents') {
+    const paneId = selectedAgentPaneIdForSession(state);
+    const tileId = paneId ? paneTileId(state, paneId) : null;
     return {
       ...state,
       ui: {
         ...state.ui,
         sidebarSection: 'agents',
-        selectedPaneId: selectedAgentPaneIdForSession(state),
+        selectedPaneId: paneId,
         selectedWorkId: null,
+        selectedTileIds: tileId ? [tileId] : [],
       },
     };
   }
 
   if (section === 'tmux') {
+    const tileId = state.ui.selectedPaneId ? paneTileId(state, state.ui.selectedPaneId) : null;
     return {
       ...state,
       ui: {
@@ -1104,17 +1207,12 @@ function focusSidebarSectionState(state: AppStateTree, section: SidebarSection):
         sidebarSection: 'tmux',
         sidebarSelectedIdx: clampSidebarIndex(state, state.ui.sidebarSelectedIdx ?? sidebarAnchorIndex(state)),
         selectedWorkId: null,
+        selectedTileIds: tileId ? [tileId] : [],
       },
     };
   }
 
-  return {
-    ...state,
-    ui: {
-      ...state.ui,
-      sidebarSection: 'settings',
-    },
-  };
+  return state;
 }
 
 export function buildSidebarRenameCommand(state: AppStateTree): string | null {
@@ -1153,6 +1251,9 @@ function paneKindForPane(state: AppStateTree, paneId: string): PaneKind {
   }
 
   const tileId = paneTileId(state, paneId);
+  if (tileId && workItemForTileId(state, tileId)) {
+    return 'work';
+  }
   const liveAgent = tileId
     ? Object.values(state.agents)
       .filter((agent) => agent.tile_id === tileId && agent.alive)
@@ -1187,6 +1288,14 @@ function canvasWorldCoordinates(state: AppStateTree, clientX: number, clientY: n
   };
 }
 
+function tileContextMenuSelectionTileIds(state: AppStateTree, tileId: string): string[] {
+  const currentSelection = selectedTileIdsInState(state);
+  if (currentSelection.length > 1 && currentSelection.includes(tileId)) {
+    return currentSelection;
+  }
+  return [tileId];
+}
+
 export function openCanvasContextMenuInState(
   state: AppStateTree,
   clientX: number,
@@ -1198,7 +1307,9 @@ export function openCanvasContextMenuInState(
     target: 'canvas',
     paneId: null,
     tileId: null,
+    workId: null,
     portId: null,
+    selectionTileIds: [],
     clientX,
     clientY,
     worldX,
@@ -1224,12 +1335,19 @@ export function openPaneContextMenuInState(
   clientY: number,
 ): AppStateTree {
   const paneKind = paneKindForPane(state, paneId);
+  const tileId = paneTileId(state, paneId);
+  if (!tileId) {
+    return state;
+  }
+  const selectionTileIds = tileContextMenuSelectionTileIds(state, tileId);
   const contextMenu: ContextMenuState = {
     open: true,
-    target: 'pane',
+    target: 'tile',
     paneId,
-    tileId: paneTileId(state, paneId),
+    tileId,
+    workId: null,
     portId: null,
+    selectionTileIds,
     clientX,
     clientY,
     worldX: null,
@@ -1244,24 +1362,32 @@ export function openPaneContextMenuInState(
     ui: {
       ...state.ui,
       selectedPaneId: paneId,
+      selectedWorkId: null,
+      selectedTileIds: selectionTileIds,
       contextMenu,
     },
   };
 }
 
-export function openPortContextMenuInState(
+export function openWorkContextMenuInState(
   state: AppStateTree,
-  tileId: string,
-  portId: TilePort,
+  workId: string,
   clientX: number,
   clientY: number,
 ): AppStateTree {
+  const tileId = workLayoutKey(state, workId);
+  if (!tileId) {
+    return state;
+  }
+  const selectionTileIds = tileContextMenuSelectionTileIds(state, tileId);
   const contextMenu: ContextMenuState = {
     open: true,
-    target: 'port',
+    target: 'tile',
     paneId: paneIdForTileId(state, tileId),
     tileId,
-    portId,
+    workId,
+    portId: null,
+    selectionTileIds,
     clientX,
     clientY,
     worldX: null,
@@ -1275,7 +1401,47 @@ export function openPortContextMenuInState(
     ...state,
     ui: {
       ...state.ui,
-      selectedPaneId: contextMenu.paneId ?? state.ui.selectedPaneId,
+      selectedPaneId: null,
+      selectedWorkId: workId,
+      selectedTileIds: selectionTileIds,
+      contextMenu,
+    },
+  };
+}
+
+export function openPortContextMenuInState(
+  state: AppStateTree,
+  tileId: string,
+  portId: TilePort,
+  clientX: number,
+  clientY: number,
+): AppStateTree {
+  const workItem = workItemForTileId(state, tileId);
+  const paneId = paneIdForTileId(state, tileId);
+  const contextMenu: ContextMenuState = {
+    open: true,
+    target: 'port',
+    paneId,
+    tileId,
+    workId: workItem?.work_id ?? null,
+    portId,
+    selectionTileIds: [],
+    clientX,
+    clientY,
+    worldX: null,
+    worldY: null,
+    claudeCommands: [],
+    claudeSkills: [],
+    loadingClaudeCommands: false,
+    claudeCommandsError: null,
+  };
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      selectedPaneId: workItem ? null : (paneId ?? state.ui.selectedPaneId),
+      selectedWorkId: workItem ? workItem.work_id : null,
+      selectedTileIds: [tileId],
       contextMenu,
     },
   };
@@ -1289,6 +1455,70 @@ export function dismissContextMenuInState(state: AppStateTree): AppStateTree {
       ...state.ui,
       contextMenu: null,
     },
+  };
+}
+
+function tileLockActionLabel(state: AppStateTree, tileIds: string[]): string {
+  return tileIds.length > 0 && tileIds.every((tileId) => isTileLockedInState(state, tileId))
+    ? 'Unlock'
+    : 'Lock';
+}
+
+function canBatchCloseTileId(state: AppStateTree, tileId: string): boolean {
+  const workItem = workItemForTileId(state, tileId);
+  if (workItem) {
+    return true;
+  }
+  const paneId = paneIdForTileId(state, tileId);
+  if (!paneId) {
+    return false;
+  }
+  if (state.tmux.panes[paneId]?.role === 'root_agent') {
+    return false;
+  }
+  const sessionId = state.tmux.panes[paneId]?.session_id ?? null;
+  const session = sessionId ? state.tmux.sessions[sessionId] : null;
+  return Boolean(session && session.window_ids.length > 1);
+}
+
+function closeEffectForTileId(state: AppStateTree, tileId: string): TmuxEffect | null {
+  const workItem = workItemForTileId(state, tileId);
+  if (workItem) {
+    return { type: 'delete-work-item', workId: workItem.work_id, sessionId: workItem.session_id };
+  }
+  const paneId = paneIdForTileId(state, tileId);
+  const windowId = paneId ? state.tmux.panes[paneId]?.window_id ?? null : null;
+  return windowId ? { type: 'kill-window', windowId } : null;
+}
+
+function lockToggleEffectsForTileIds(
+  state: AppStateTree,
+  tileIds: string[],
+): { state: AppStateTree; effects: TmuxEffect[] } {
+  const affectedTileIds = tileIds.filter((tileId) => Boolean(state.layout.entries[tileId]));
+  if (affectedTileIds.length === 0) {
+    return { state: dismissContextMenuInState(state), effects: [] };
+  }
+  const nextLocked = !affectedTileIds.every((tileId) => isTileLockedInState(state, tileId));
+  const nextEntries = { ...state.layout.entries };
+  const effects: TmuxEffect[] = [];
+  for (const tileId of affectedTileIds) {
+    const entry = nextEntries[tileId];
+    if (!entry || Boolean(entry.locked) === nextLocked) {
+      continue;
+    }
+    const nextEntry = { ...entry, locked: nextLocked };
+    nextEntries[tileId] = nextEntry;
+    effects.push({ type: 'save-layout-state', entryId: tileId, entry: nextEntry });
+  }
+  return {
+    state: {
+      ...dismissContextMenuInState(state),
+      layout: {
+        entries: nextEntries,
+      },
+    },
+    effects,
   };
 }
 
@@ -1332,6 +1562,30 @@ export function buildContextMenuItems(state: AppStateTree): ContextMenuItem[] {
           { id: 'port-networking:gateway', label: 'Gateway', kind: 'action', disabled: false, selected: networkingMode === 'gateway' },
         ],
       },
+    ];
+  }
+
+  if (!contextMenu.tileId) {
+    return [];
+  }
+
+  const selectionTileIds = contextMenu.selectionTileIds.length > 0
+    ? contextMenu.selectionTileIds
+    : [contextMenu.tileId];
+  const multiSelection = selectionTileIds.length > 1;
+  const lockLabel = tileLockActionLabel(state, selectionTileIds);
+  if (multiSelection) {
+    return [
+      { id: 'close-tiles', label: 'Close', kind: 'action', disabled: !selectionTileIds.every((tileId) => canBatchCloseTileId(state, tileId)) },
+      { id: 'toggle-lock-tiles', label: lockLabel, kind: 'action', disabled: false },
+    ];
+  }
+
+  const workItem = workItemForTileId(state, contextMenu.tileId);
+  if (workItem) {
+    return [
+      { id: 'close-work', label: 'Close Work', kind: 'action', disabled: false },
+      { id: 'toggle-lock-tiles', label: lockLabel, kind: 'action', disabled: false },
     ];
   }
 
@@ -1391,6 +1645,12 @@ export function buildContextMenuItems(state: AppStateTree): ContextMenuItem[] {
   items.push({
     id: 'close-shell',
     label: paneKind === 'browser' ? 'Close Browser' : 'Close Shell',
+    kind: 'action',
+    disabled: false,
+  });
+  items.push({
+    id: 'toggle-lock-tiles',
+    label: lockLabel,
     kind: 'action',
     disabled: false,
   });
@@ -1471,33 +1731,49 @@ export function reduceContextMenuSelection(
     };
   }
 
-  if (itemId === 'close-shell' && contextMenu.target === 'pane' && contextMenu.paneId) {
-    const selectedState = {
-      ...state,
-      ui: {
-        ...state.ui,
-        selectedPaneId: contextMenu.paneId,
-      },
+  if (itemId === 'close-tiles' && contextMenu.target === 'tile') {
+    const tileIds = contextMenu.selectionTileIds.length > 0
+      ? contextMenu.selectionTileIds
+      : (contextMenu.tileId ? [contextMenu.tileId] : []);
+    const effects = tileIds
+      .map((tileId) => closeEffectForTileId(state, tileId))
+      .filter((effect): effect is TmuxEffect => Boolean(effect));
+    return {
+      state: dismissContextMenuInState(state),
+      effects,
     };
+  }
+
+  if (itemId === 'toggle-lock-tiles' && contextMenu.target === 'tile') {
+    const tileIds = contextMenu.selectionTileIds.length > 0
+      ? contextMenu.selectionTileIds
+      : (contextMenu.tileId ? [contextMenu.tileId] : []);
+    return lockToggleEffectsForTileIds(state, tileIds);
+  }
+
+  if (itemId === 'close-work' && contextMenu.target === 'tile' && contextMenu.workId) {
+    const workItem = state.work.items[contextMenu.workId] ?? null;
+    return {
+      state: dismissContextMenuInState(state),
+      effects: workItem ? [{ type: 'delete-work-item', workId: contextMenu.workId, sessionId: workItem.session_id }] : [],
+    };
+  }
+
+  if (itemId === 'close-shell' && contextMenu.target === 'tile' && contextMenu.paneId) {
+    const selectedState = selectPaneInState(state, contextMenu.paneId);
     return reduceIntent(dismissContextMenuInState(selectedState), { type: 'close-selected-pane' });
   }
 
-  if (itemId.startsWith('browser-load:') && contextMenu.target === 'pane' && contextMenu.paneId) {
+  if (itemId.startsWith('browser-load:') && contextMenu.target === 'tile' && contextMenu.paneId) {
     const path = itemId.slice('browser-load:'.length);
-    const selectedState = {
-      ...state,
-      ui: {
-        ...state.ui,
-        selectedPaneId: contextMenu.paneId,
-      },
-    };
+    const selectedState = selectPaneInState(state, contextMenu.paneId);
     return {
       state: dismissContextMenuInState(selectedState),
       effects: [{ type: 'load-browser-file', paneId: contextMenu.paneId, path }],
     };
   }
 
-  if (itemId.startsWith('claude-command:') && contextMenu.target === 'pane' && contextMenu.paneId) {
+  if (itemId.startsWith('claude-command:') && contextMenu.target === 'tile' && contextMenu.paneId) {
     const commandName = itemId.slice('claude-command:'.length);
     const command = contextMenu.claudeCommands.find((entry) => entry.name === commandName);
     if (!command) {
@@ -1507,15 +1783,9 @@ export function reduceContextMenuSelection(
     const commandText = command.execution === 'execute'
       ? `/${command.name}\r`
       : `/${command.name} `;
-    const dismissedState = dismissContextMenuInState(state);
+    const dismissedState = selectPaneInState(dismissContextMenuInState(state), contextMenu.paneId);
     return {
-      state: {
-        ...dismissedState,
-        ui: {
-          ...dismissedState.ui,
-          selectedPaneId: contextMenu.paneId,
-        },
-      },
+      state: dismissedState,
       effects: [{ type: 'write-pane', paneId: contextMenu.paneId, data: commandText }],
     };
   }
@@ -1533,14 +1803,19 @@ export function reduceContextMenuSelection(
       ? itemId.slice('port-networking:'.length) as PortNetworkingMode
       : null;
     const dismissedState = dismissContextMenuInState(state);
+    const selectedState = contextMenu.workId
+      ? selectWorkItemInState(dismissedState, contextMenu.workId)
+      : contextMenu.paneId
+        ? selectPaneInState(dismissedState, contextMenu.paneId)
+        : {
+          ...dismissedState,
+          ui: {
+            ...dismissedState.ui,
+            selectedTileIds: [contextMenu.tileId],
+          },
+        };
     return {
-      state: {
-        ...dismissedState,
-        ui: {
-          ...dismissedState.ui,
-          selectedPaneId: contextMenu.paneId ?? dismissedState.ui.selectedPaneId,
-        },
-      },
+      state: selectedState,
       effects: [{
         type: 'set-network-port-settings',
         tileId: contextMenu.tileId,
@@ -1559,6 +1834,7 @@ function reconcileLayoutEntries(
   sessions: Record<string, TmuxSession>,
   windows: Record<string, TmuxWindow>,
   workItems: Record<string, WorkItem>,
+  snapConfig: Pick<UiState, 'gridSnapEnabled' | 'gridSnapSize'>,
 ): Record<string, LayoutEntry> {
   const nextEntries: Record<string, LayoutEntry> = {};
   const windowEntryIds = new Set(
@@ -1596,7 +1872,7 @@ function reconcileLayoutEntries(
       const parentEntry = parentEntryId ? nextEntries[parentEntryId] ?? previousEntries[parentEntryId] : null;
       if (parentEntry) {
         nextEntries[entryId] = findOpenPosition(
-          parentEntry.x + parentEntry.width + GAP + GRID_SNAP,
+          parentEntry.x + parentEntry.width + GAP + (snapConfig.gridSnapEnabled ? snapConfig.gridSnapSize : DEFAULT_GRID_SNAP_SIZE),
           parentEntry.y,
           DEFAULT_TILE_WIDTH,
           DEFAULT_TILE_HEIGHT,
@@ -1605,6 +1881,7 @@ function reconcileLayoutEntries(
             .map((id) => windowTileId(windows[id]))
             .filter((id): id is string => Boolean(id)),
           nextEntries,
+          snapConfig,
         );
         continue;
       }
@@ -1620,6 +1897,7 @@ function reconcileLayoutEntries(
           .map((id) => windowTileId(windows[id]))
           .filter((id): id is string => Boolean(id)),
         nextEntries,
+        snapConfig,
       );
     }
   }
@@ -1703,8 +1981,8 @@ function applyPendingSpawnPlacement(
   const width = existing?.width ?? DEFAULT_TILE_WIDTH;
   const height = existing?.height ?? DEFAULT_TILE_HEIGHT;
   nextEntries[targetEntryId] = {
-    x: snapToGrid(pending.worldX),
-    y: snapToGrid(pending.worldY),
+    x: snapToGridForState(previousState, pending.worldX),
+    y: snapToGridForState(previousState, pending.worldY),
     width,
     height,
   };
@@ -1778,6 +2056,30 @@ function collectChangedLayoutEntries(
   return changed;
 }
 
+function singleSelectionForPane(
+  state: AppStateTree,
+  paneId: string | null,
+): Pick<UiState, 'selectedPaneId' | 'selectedWorkId' | 'selectedTileIds'> {
+  const tileId = paneId ? paneTileId(state, paneId) : null;
+  return {
+    selectedPaneId: paneId,
+    selectedWorkId: null,
+    selectedTileIds: tileId ? [tileId] : [],
+  };
+}
+
+function singleSelectionForWork(
+  state: AppStateTree,
+  workId: string | null,
+): Pick<UiState, 'selectedPaneId' | 'selectedWorkId' | 'selectedTileIds'> {
+  const tileId = workId ? workLayoutKey(state, workId) : null;
+  return {
+    selectedPaneId: null,
+    selectedWorkId: workId,
+    selectedTileIds: tileId ? [tileId] : [],
+  };
+}
+
 function chooseSelectedPaneId(
   previousState: AppStateTree,
   nextTmux: AppStateTree['tmux'],
@@ -1807,14 +2109,158 @@ function arrangementIndex(pattern: ArrangementMode): number {
   return index >= 0 ? index : 0;
 }
 
+function alignValueToGrid(gridSnapSize: number, value: number): number {
+  return snapToGrid(value, true, gridSnapSize);
+}
+
+function cloneCanvasState(canvas: CanvasState): CanvasState {
+  return {
+    panX: canvas.panX,
+    panY: canvas.panY,
+    zoom: canvas.zoom,
+  };
+}
+
+function cloneCanvasZoomBookmark(bookmark: CanvasZoomBookmark): CanvasZoomBookmark {
+  return {
+    ...bookmark,
+    previousCanvas: cloneCanvasState(bookmark.previousCanvas),
+  };
+}
+
+function clearSessionZoomBookmarkMap(
+  bookmarks: Record<string, CanvasZoomBookmark>,
+  sessionId: string | null,
+): Record<string, CanvasZoomBookmark> {
+  if (!sessionId || !bookmarks[sessionId]) {
+    return bookmarks;
+  }
+  const nextBookmarks = { ...bookmarks };
+  delete nextBookmarks[sessionId];
+  return nextBookmarks;
+}
+
+function setActiveSessionCanvasInState(
+  state: AppStateTree,
+  canvas: CanvasState,
+  options?: { clearZoomBookmark?: boolean },
+): AppStateTree {
+  const clearZoomBookmark = options?.clearZoomBookmark ?? true;
+  const activeSessionId = state.tmux.activeSessionId;
+  const nextCanvas = cloneCanvasState(canvas);
+  const canvasBySession = activeSessionId
+    ? { ...state.ui.canvasBySession, [activeSessionId]: nextCanvas }
+    : state.ui.canvasBySession;
+  const zoomBookmarkBySession = clearZoomBookmark
+    ? clearSessionZoomBookmarkMap(state.ui.zoomBookmarkBySession, activeSessionId)
+    : state.ui.zoomBookmarkBySession;
+
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      canvas: nextCanvas,
+      canvasBySession,
+      zoomBookmark: clearZoomBookmark ? null : state.ui.zoomBookmark,
+      zoomBookmarkBySession,
+    },
+  };
+}
+
+function setActiveSessionZoomBookmarkInState(
+  state: AppStateTree,
+  bookmark: CanvasZoomBookmark | null,
+): AppStateTree {
+  const activeSessionId = state.tmux.activeSessionId;
+  let zoomBookmarkBySession = state.ui.zoomBookmarkBySession;
+
+  if (activeSessionId) {
+    if (bookmark) {
+      zoomBookmarkBySession = {
+        ...zoomBookmarkBySession,
+        [activeSessionId]: cloneCanvasZoomBookmark(bookmark),
+      };
+    } else {
+      zoomBookmarkBySession = clearSessionZoomBookmarkMap(zoomBookmarkBySession, activeSessionId);
+    }
+  }
+
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      zoomBookmark: bookmark ? cloneCanvasZoomBookmark(bookmark) : null,
+      zoomBookmarkBySession,
+    },
+  };
+}
+
+function reconcileCanvasBySession(
+  previousCanvasBySession: Record<string, CanvasState>,
+  previousActiveSessionId: string | null,
+  previousCanvas: CanvasState,
+  sessions: Record<string, TmuxSession>,
+  nextActiveSessionId: string | null,
+): Record<string, CanvasState> {
+  const nextCanvasBySession: Record<string, CanvasState> = {};
+
+  for (const sessionId of Object.keys(sessions)) {
+    if (sessionId === previousActiveSessionId) {
+      nextCanvasBySession[sessionId] = cloneCanvasState(previousCanvas);
+      continue;
+    }
+    const savedCanvas = previousCanvasBySession[sessionId];
+    if (savedCanvas) {
+      nextCanvasBySession[sessionId] = cloneCanvasState(savedCanvas);
+    }
+  }
+
+  if (nextActiveSessionId && !nextCanvasBySession[nextActiveSessionId]) {
+    nextCanvasBySession[nextActiveSessionId] = cloneCanvasState(previousCanvas);
+  }
+
+  return nextCanvasBySession;
+}
+
+function reconcileZoomBookmarksBySession(
+  previousZoomBookmarksBySession: Record<string, CanvasZoomBookmark>,
+  previousActiveSessionId: string | null,
+  previousZoomBookmark: CanvasZoomBookmark | null,
+  sessions: Record<string, TmuxSession>,
+): Record<string, CanvasZoomBookmark> {
+  const nextZoomBookmarksBySession: Record<string, CanvasZoomBookmark> = {};
+
+  for (const sessionId of Object.keys(sessions)) {
+    if (sessionId === previousActiveSessionId) {
+      if (previousZoomBookmark) {
+        nextZoomBookmarksBySession[sessionId] = cloneCanvasZoomBookmark(previousZoomBookmark);
+      }
+      continue;
+    }
+    const savedBookmark = previousZoomBookmarksBySession[sessionId];
+    if (savedBookmark) {
+      nextZoomBookmarksBySession[sessionId] = cloneCanvasZoomBookmark(savedBookmark);
+    }
+  }
+
+  return nextZoomBookmarksBySession;
+}
+
 export function applyTmuxSnapshotToState(
   previousState: AppStateTree,
   snapshot: TmuxSnapshot,
+  workItemsOverride?: Record<string, WorkItem>,
 ): AppStateTree {
   const { record: sessions, order: sessionOrder } = buildSessionsRecord(snapshot.sessions);
   const { record: windows, order: windowOrder } = buildWindowsRecord(snapshot.windows);
   const { panesRecord, paneOrderByWindow } = buildPanesRecord(snapshot.panes, previousState.tmux.panes);
-  const layoutEntries = reconcileLayoutEntries(previousState.layout.entries, sessions, windows, previousState.work.items);
+  const layoutEntries = reconcileLayoutEntries(
+    previousState.layout.entries,
+    sessions,
+    windows,
+    workItemsOverride ?? previousState.work.items,
+    previousState.ui,
+  );
 
   const activeSessionId = snapshot.active_session_id ?? sessionOrder[0] ?? null;
   const activeWindowId = snapshot.active_window_id
@@ -1845,6 +2291,27 @@ export function applyTmuxSnapshotToState(
     previousState.ui.arrangementModeBySession,
     sessions,
   );
+  const canvasBySession = reconcileCanvasBySession(
+    previousState.ui.canvasBySession,
+    previousState.tmux.activeSessionId,
+    previousState.ui.canvas,
+    sessions,
+    activeSessionId,
+  );
+  const zoomBookmarkBySession = reconcileZoomBookmarksBySession(
+    previousState.ui.zoomBookmarkBySession,
+    previousState.tmux.activeSessionId,
+    previousState.ui.zoomBookmark,
+    sessions,
+  );
+  const canvas = activeSessionId
+    ? cloneCanvasState(canvasBySession[activeSessionId] ?? previousState.ui.canvas)
+    : cloneCanvasState(previousState.ui.canvas);
+  const zoomBookmark = activeSessionId
+    ? (zoomBookmarkBySession[activeSessionId]
+      ? cloneCanvasZoomBookmark(zoomBookmarkBySession[activeSessionId])
+      : null)
+    : null;
   const minimizedTileIdsBySession = reconcileMinimizedTileIds(
     previousState.ui.minimizedTileIdsBySession,
     sessions,
@@ -1882,11 +2349,22 @@ export function applyTmuxSnapshotToState(
       paneViewportHints,
       arrangementCycleBySession,
       arrangementModeBySession,
+      canvas,
+      canvasBySession,
+      zoomBookmark,
+      zoomBookmarkBySession,
       minimizedTileIdsBySession,
       closeTabConfirmation,
       closePaneConfirmation,
       pendingSpawnPlacement: pendingPlacement.pendingSpawnPlacement,
       sidebarSelectedIdx: previousState.ui.sidebarSelectedIdx,
+    },
+  };
+  nextState = {
+    ...nextState,
+    ui: {
+      ...nextState.ui,
+      selectedTileIds: reconcileSelectedTileIds(nextState, previousState.ui.selectedTileIds),
     },
   };
   for (const sessionId of nextTmux.sessionOrder) {
@@ -2128,8 +2606,22 @@ export function reduceIntent(
           ui: {
             ...state.ui,
             sidebarOpen: !state.ui.sidebarOpen,
+            settingsSidebarOpen: false,
             sidebarSection: state.ui.sidebarOpen ? state.ui.sidebarSection : sidebarSectionForState(state),
             sidebarSelectedIdx: state.ui.sidebarOpen ? state.ui.sidebarSelectedIdx : sidebarAnchorIndex(state),
+          },
+        },
+        effects: [],
+      };
+
+    case 'toggle-settings-sidebar':
+      return {
+        state: {
+          ...state,
+          ui: {
+            ...state.ui,
+            sidebarOpen: false,
+            settingsSidebarOpen: !state.ui.settingsSidebarOpen,
           },
         },
         effects: [],
@@ -2169,7 +2661,12 @@ export function reduceIntent(
         return {
           state: {
             ...state,
-            ui: { ...state.ui, sidebarSection: 'tmux', sidebarSelectedIdx, selectedWorkId: null },
+            ui: {
+              ...state.ui,
+              sidebarSection: 'tmux',
+              sidebarSelectedIdx,
+              ...singleSelectionForPane(state, state.ui.selectedPaneId),
+            },
           },
           effects: [],
         };
@@ -2183,15 +2680,14 @@ export function reduceIntent(
         if (state.tmux.activeWindowId !== item.windowId) {
           effects.push({ type: 'select-window', windowId: item.windowId });
         }
+        const selectedState = selectPaneInState(state, item.paneId);
         return {
           state: {
-            ...state,
+            ...selectedState,
             ui: {
-              ...state.ui,
+              ...selectedState.ui,
               sidebarSection: 'tmux',
               sidebarSelectedIdx,
-              selectedPaneId: item.paneId,
-              selectedWorkId: null,
             },
           },
           effects,
@@ -2212,10 +2708,9 @@ export function reduceIntent(
             ...state,
             ui: {
               ...state.ui,
+              ...singleSelectionForPane(state, selectedPaneId),
               sidebarSection: 'tmux',
               sidebarSelectedIdx,
-              selectedPaneId,
-              selectedWorkId: null,
             },
           },
           effects,
@@ -2228,10 +2723,12 @@ export function reduceIntent(
             ...state,
             ui: {
               ...state.ui,
+              ...singleSelectionForPane(
+                state,
+                preferredPaneIdForSession(state, item.sessionId) ?? state.ui.selectedPaneId,
+              ),
               sidebarSection: 'tmux',
               sidebarSelectedIdx,
-              selectedPaneId: preferredPaneIdForSession(state, item.sessionId) ?? state.ui.selectedPaneId,
-              selectedWorkId: null,
             },
           },
           effects: state.tmux.activeSessionId === item.sessionId
@@ -2266,8 +2763,7 @@ export function reduceIntent(
             ui: {
               ...state.ui,
               sidebarSection: 'work',
-              selectedPaneId: null,
-              selectedWorkId: items[nextIndex]?.work_id ?? null,
+              ...singleSelectionForWork(state, items[nextIndex]?.work_id ?? null),
             },
           },
           effects: [],
@@ -2290,16 +2786,14 @@ export function reduceIntent(
             ui: {
               ...state.ui,
               sidebarSection: 'agents',
-              selectedPaneId: agents[nextIndex] ? paneIdForTileId(state, agents[nextIndex].tile_id) : null,
-              selectedWorkId: null,
+              ...singleSelectionForPane(
+                state,
+                agents[nextIndex] ? paneIdForTileId(state, agents[nextIndex].tile_id) : null,
+              ),
             },
           },
           effects: [],
         };
-      }
-
-      if (state.ui.sidebarSection === 'settings') {
-        return { state, effects: [] };
       }
 
       return reduceIntent(state, {
@@ -2310,14 +2804,7 @@ export function reduceIntent(
 
     case 'select-work-item':
       return {
-        state: {
-          ...state,
-          ui: {
-            ...state.ui,
-            sidebarSection: 'work',
-            selectedWorkId: selectedWorkIdForSession(state, intent.workId),
-          },
-        },
+        state: selectWorkItemInState(state, intent.workId),
         effects: [],
       };
 
@@ -2330,14 +2817,13 @@ export function reduceIntent(
       if (!paneId) {
         return { state, effects: [] };
       }
+      const selectedState = selectPaneInState(state, paneId);
       return {
         state: {
-          ...state,
+          ...selectedState,
           ui: {
-            ...state.ui,
+            ...selectedState.ui,
             sidebarSection: 'agents',
-            selectedPaneId: paneId,
-            selectedWorkId: null,
           },
         },
         effects: [],
@@ -2400,7 +2886,9 @@ export function reduceIntent(
       const paneId = state.ui.selectedPaneId;
       const tileId = paneId ? paneTileId(state, paneId) : null;
       const entry = tileId ? state.layout.entries[tileId] : null;
-      if (!paneId || !tileId || !entry) return { state, effects: [] };
+      if (!paneId || !tileId || !entry || entry.locked) return { state, effects: [] };
+      const nextX = snapToGridForState(state, entry.x + intent.dx);
+      const nextY = snapToGridForState(state, entry.y + intent.dy);
       return {
         state: {
           ...state,
@@ -2409,8 +2897,8 @@ export function reduceIntent(
               ...state.layout.entries,
               [tileId]: {
                 ...entry,
-                x: entry.x + intent.dx,
-                y: entry.y + intent.dy,
+                x: nextX,
+                y: nextY,
               },
             },
           },
@@ -2421,14 +2909,7 @@ export function reduceIntent(
 
     case 'reset-canvas':
       return {
-        state: {
-          ...state,
-          ui: {
-            ...state.ui,
-            canvas: { panX: 0, panY: 0, zoom: 1 },
-            zoomBookmark: null,
-          },
-        },
+        state: setActiveSessionCanvasInState(state, { panX: 0, panY: 0, zoom: 1 }),
         effects: [],
       };
   }
@@ -2469,6 +2950,19 @@ async function runEffect(effect: TmuxEffect) {
     case 'write-pane':
       await writePane(effect.paneId, effect.data);
       break;
+    case 'delete-work-item':
+      await deleteWorkCard(effect.workId, effect.sessionId);
+      break;
+    case 'save-layout-state':
+      await saveLayoutState(
+        effect.entryId,
+        effect.entry.x,
+        effect.entry.y,
+        effect.entry.width,
+        effect.entry.height,
+        Boolean(effect.entry.locked),
+      );
+      break;
     case 'load-browser-file':
       await loadBrowserWebview(effect.paneId, effect.path);
       break;
@@ -2504,7 +2998,7 @@ export async function selectContextMenuItem(itemId: string) {
 }
 
 export async function bootstrapAppState() {
-  const [layout, snapshot, debugState, workItems, browserExtensionPages] = await Promise.all([
+  const [layout, snapshot, debugState, workItems, browserExtensionPages, savedConfigurations] = await Promise.all([
     getLayoutState(),
     getTmuxState(),
     getAgentDebugState().catch(() => ({
@@ -2520,7 +3014,10 @@ export async function bootstrapAppState() {
     } satisfies AgentDebugState)),
     getWorkItems().catch(() => [] as WorkItem[]),
     getBrowserExtensionPages().catch(() => [] as BrowserExtensionPage[]),
+    listSavedSessionConfigurations().catch(() => [] as SavedSessionConfigurationSummary[]),
   ]);
+  savedSessionConfigurations.set(savedConfigurations);
+  const workRecord = buildWorkRecord(workItems);
   const nextState = {
     ...applyWorkItemsToState(
     applyAgentDebugStateToState(
@@ -2530,6 +3027,7 @@ export async function bootstrapAppState() {
           layout: { entries: layout },
         },
         snapshot,
+        workRecord.items,
       ),
       debugState,
     ),
@@ -2542,6 +3040,14 @@ export async function bootstrapAppState() {
   const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const viewportHeight = typeof window !== 'undefined' ? window.innerHeight - 54 : 720;
   fitCanvasToActiveTab(viewportWidth, viewportHeight);
+}
+
+export async function refreshSavedSessionConfigurations() {
+  const configurations = await listSavedSessionConfigurations().catch(
+    () => [] as SavedSessionConfigurationSummary[],
+  );
+  savedSessionConfigurations.set(configurations);
+  return configurations;
 }
 
 export async function refreshWorkItems(sessionId?: string | null) {
@@ -2574,10 +3080,71 @@ export function applyTmuxSnapshot(snapshot: TmuxSnapshot) {
   const nextState = applyTmuxSnapshotToState(previousState, snapshot);
   appState.set(nextState);
 
+  if (suspendedLayoutPersistenceDepth > 0) {
+    return;
+  }
+
   const changedEntries = collectChangedLayoutEntries(previousState.layout.entries, nextState.layout.entries);
   for (const [entryId, entry] of changedEntries) {
-    void saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height);
+    void saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked));
   }
+}
+
+async function withSuspendedLayoutPersistence<T>(work: () => Promise<T>): Promise<T> {
+  suspendedLayoutPersistenceDepth += 1;
+  try {
+    return await work();
+  } finally {
+    suspendedLayoutPersistenceDepth = Math.max(0, suspendedLayoutPersistenceDepth - 1);
+  }
+}
+
+async function applyLoadedSessionLayoutEntries(layoutEntriesByTile: LayoutStateMap) {
+  const entries = Object.entries(layoutEntriesByTile);
+  if (entries.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    entries.map(([entryId, entry]) =>
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
+    ),
+  );
+
+  appState.update((state) => ({
+    ...state,
+    layout: {
+      entries: {
+        ...state.layout.entries,
+        ...layoutEntriesByTile,
+      },
+    },
+  }));
+}
+
+function refitCanvasToWindowViewport() {
+  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const viewportHeight = typeof window !== 'undefined' ? window.innerHeight - 54 : 720;
+  fitCanvasToActiveTab(viewportWidth, viewportHeight);
+}
+
+export function replaceSessionMinimizedTileIds(sessionId: string, tileIds: string[]) {
+  appState.update((state) => {
+    const deduped = tileIds.filter((tileId, index) => tileIds.indexOf(tileId) === index);
+    const nextBySession = { ...state.ui.minimizedTileIdsBySession };
+    if (deduped.length > 0) {
+      nextBySession[sessionId] = deduped;
+    } else {
+      delete nextBySession[sessionId];
+    }
+    return {
+      ...state,
+      ui: {
+        ...state.ui,
+        minimizedTileIdsBySession: nextBySession,
+      },
+    };
+  });
 }
 
 export function applyPaneReadOnly(paneId: string, readOnly: boolean) {
@@ -2654,6 +3221,13 @@ export const sidebarOpen = createWritableSlice<boolean>(
   (state, value) => ({ ...state, ui: { ...state.ui, sidebarOpen: value } }),
 );
 
+export const settingsSidebarOpen = createWritableSlice<boolean>(
+  (state) => state.ui.settingsSidebarOpen,
+  (state, value) => ({ ...state, ui: { ...state.ui, settingsSidebarOpen: value } }),
+);
+
+export const anySidebarOpen = derived(appState, ($state) => $state.ui.sidebarOpen || $state.ui.settingsSidebarOpen);
+
 export const sidebarSelectedIdx = createWritableSlice<number>(
   (state) => state.ui.sidebarSelectedIdx,
   (state, value) => ({ ...state, ui: { ...state.ui, sidebarSelectedIdx: value } }),
@@ -2688,22 +3262,56 @@ export const contextMenuState = derived(appState, ($state) => $state.ui.contextM
 
 export const canvasState = createWritableSlice<CanvasState>(
   (state) => state.ui.canvas,
-  (state, value) => ({ ...state, ui: { ...state.ui, canvas: value, zoomBookmark: null } }),
+  (state, value) => setActiveSessionCanvasInState(state, value),
 );
 
 export const selectedTerminalId = createWritableSlice<string | null>(
   (state) => state.ui.selectedPaneId,
-  (state, value) => ({ ...state, ui: { ...state.ui, selectedPaneId: value, selectedWorkId: null } }),
+  (state, value) => {
+    const tileId = value ? paneTileId(state, value) : null;
+    return {
+      ...state,
+      ui: {
+        ...state.ui,
+        selectedPaneId: value,
+        selectedWorkId: null,
+        selectedTileIds: tileId ? [tileId] : [],
+      },
+    };
+  },
 );
 
 export const selectedWorkId = createWritableSlice<string | null>(
   (state) => state.ui.selectedWorkId,
-  (state, value) => ({ ...state, ui: { ...state.ui, selectedWorkId: value } }),
+  (state, value) => {
+    const tileId = value ? workLayoutKey(state, value) : null;
+    return {
+      ...state,
+      ui: {
+        ...state.ui,
+        selectedPaneId: null,
+        selectedWorkId: value,
+        selectedTileIds: tileId ? [tileId] : [],
+      },
+    };
+  },
 );
+
+export const selectedTileIds = derived(appState, ($state) => selectedTileIdsInState($state));
 
 export const sidebarSection = createWritableSlice<SidebarSection>(
   (state) => state.ui.sidebarSection,
   (state, value) => ({ ...state, ui: { ...state.ui, sidebarSection: value } }),
+);
+
+export const gridSnapEnabled = createWritableSlice<boolean>(
+  (state) => state.ui.gridSnapEnabled,
+  (state, value) => ({ ...state, ui: { ...state.ui, gridSnapEnabled: value } }),
+);
+
+export const gridSnapSize = createWritableSlice<GridSnapSize>(
+  (state) => state.ui.gridSnapSize,
+  (state, value) => ({ ...state, ui: { ...state.ui, gridSnapSize: value } }),
 );
 
 export const tilePortCount = createWritableSlice<TilePortCount>(
@@ -2812,7 +3420,7 @@ function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo 
   const agent = tileId && (kind === 'claude' || kind === 'root_agent')
     ? activeSessionAgentsInState(state).find((item) => item.tile_id === tileId) ?? null
     : null;
-  if (!pane || !window || !tileId || !entry) return null;
+  if (!pane || !window || !tileId || !entry || kind === 'work') return null;
   const minimized = isTileMinimizedInState(state, tileId);
   return {
     id: pane.id,
@@ -2832,6 +3440,7 @@ function terminalInfoForPane(state: AppStateTree, paneId: string): TerminalInfo 
     readOnly: pane.readOnly,
     kind,
     agentId: agent?.agent_id ?? null,
+    locked: entry.locked,
     ...(minimized ? { minimized: true } : {}),
   };
 }
@@ -2911,7 +3520,7 @@ function buildDefaultWorkLayoutEntry(
       .filter((entryId) => entryId !== currentWorkItem?.tile_id),
   ];
 
-  return findOpenPosition(baseX, desiredY, WORK_CARD_WIDTH, WORK_CARD_HEIGHT, occupiedIds, entries);
+  return findOpenPosition(baseX, desiredY, WORK_CARD_WIDTH, WORK_CARD_HEIGHT, occupiedIds, entries, state.ui);
 }
 
 function ensureWorkLayoutEntries(state: AppStateTree, workItems: WorkItem[]): Record<string, LayoutEntry> {
@@ -2959,6 +3568,10 @@ async function persistChangedWorkLayoutEntries(
   nextEntries: Record<string, LayoutEntry>,
   workItems: WorkItem[],
 ) {
+  if (suspendedLayoutPersistenceDepth > 0) {
+    return;
+  }
+
   const workTileIds = workTileIdSet(workItems);
   const changedEntries = collectChangedLayoutEntries(previousEntries, nextEntries)
     .filter(([entryId]) => workTileIds.has(entryId));
@@ -2968,7 +3581,7 @@ async function persistChangedWorkLayoutEntries(
 
   await Promise.all(
     changedEntries.map(([entryId, entry]) =>
-      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height),
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
     ),
   );
 }
@@ -3052,6 +3665,7 @@ export function applyWorkItemsToState(state: AppStateTree, workItems: WorkItem[]
     ui: {
       ...nextState.ui,
       selectedWorkId: selectedWorkIdForSession(nextState),
+      selectedTileIds: reconcileSelectedTileIds(nextState, nextState.ui.selectedTileIds),
       sidebarSection: sidebarSectionForState(nextState),
       minimizedTileIdsBySession: reconcileMinimizedTileIds(
         nextState.ui.minimizedTileIdsBySession,
@@ -3190,6 +3804,7 @@ export function buildCanvasWorkCards(state: AppStateTree): WorkCanvasCard[] {
       y: entry.y,
       width: entry.width,
       height: entry.height,
+      locked: entry.locked,
       ...(minimized ? { minimized: true } : {}),
     }];
   });
@@ -4383,16 +4998,22 @@ export function zoomCanvasToTile(paneId: string, viewportWidth?: number, viewpor
   canvasState.set({ zoom, panX, panY });
 }
 
-function selectPaneInState(state: AppStateTree, paneId: string): AppStateTree {
+function selectPaneInState(state: AppStateTree, paneId: string, additive = false): AppStateTree {
+  const tileId = paneTileId(state, paneId);
+  if (!tileId) {
+    return state;
+  }
+  const selectedTileIds = nextSelectedTileIds(state, tileId, additive);
   return {
     ...state,
     ui: {
       ...state.ui,
       selectedPaneId: paneId,
       selectedWorkId: null,
+      selectedTileIds,
       sidebarSection: isAgentPaneSelected({
         ...state,
-        ui: { ...state.ui, selectedPaneId: paneId, selectedWorkId: null },
+        ui: { ...state.ui, selectedPaneId: paneId, selectedWorkId: null, selectedTileIds },
       })
         ? 'agents'
         : 'tmux',
@@ -4400,24 +5021,29 @@ function selectPaneInState(state: AppStateTree, paneId: string): AppStateTree {
   };
 }
 
-function selectWorkItemInState(state: AppStateTree, workId: string): AppStateTree {
+function selectWorkItemInState(state: AppStateTree, workId: string, additive = false): AppStateTree {
+  const tileId = workLayoutKey(state, workId);
+  if (!tileId) {
+    return state;
+  }
   return {
     ...state,
     ui: {
       ...state.ui,
       selectedPaneId: null,
       selectedWorkId: selectedWorkIdForSession(state, workId, true),
+      selectedTileIds: nextSelectedTileIds(state, tileId, additive),
       sidebarSection: 'work',
     },
   };
 }
 
-export function selectTile(paneId: string) {
-  appState.update((state) => selectPaneInState(state, paneId));
+export function selectTile(paneId: string, additive = false) {
+  appState.update((state) => selectPaneInState(state, paneId, additive));
 }
 
-export function selectWorkItem(workId: string) {
-  appState.update((state) => selectWorkItemInState(state, workId));
+export function selectWorkItem(workId: string, additive = false) {
+  appState.update((state) => selectWorkItemInState(state, workId, additive));
 }
 
 export function togglePaneMinimized(paneId: string) {
@@ -4461,12 +5087,11 @@ export function selectAgentItem(agentId: string) {
     if (!agent) return state;
     const paneId = paneIdForTileId(state, agent.tile_id);
     if (!paneId) return state;
+    const selected = selectPaneInState(state, paneId);
     return {
-      ...state,
+      ...selected,
       ui: {
-        ...state.ui,
-        selectedPaneId: paneId,
-        selectedWorkId: null,
+        ...selected.ui,
         sidebarSection: 'agents',
       },
     };
@@ -4479,9 +5104,13 @@ export async function moveSelectedTerminalBy(dx: number, dy: number) {
 
 export async function dragTileBy(paneId: string, dx: number, dy: number, persist = true) {
   const term = get(terminals).find((item) => item.id === paneId);
-  if (!term) return;
+  if (!term || term.locked) return;
   selectedTerminalId.set(paneId);
-  updateTerminal(paneId, { x: term.x + dx, y: term.y + dy });
+  const state = get(appState);
+  updateTerminal(paneId, {
+    x: snapToGridForState(state, term.x + dx),
+    y: snapToGridForState(state, term.y + dy),
+  });
   if (persist) {
     await persistPaneLayout(paneId);
   }
@@ -4546,12 +5175,7 @@ function projectContextMenu(state: AppStateTree): TestDriverProjection['context_
     return null;
   }
   return {
-    target:
-      state.ui.contextMenu.target === 'pane'
-        ? 'tile'
-        : state.ui.contextMenu.target === 'port'
-          ? 'port'
-          : 'canvas',
+    target: state.ui.contextMenu.target === 'port' ? 'port' : state.ui.contextMenu.target,
     tile_id: state.ui.contextMenu.tileId ?? (state.ui.contextMenu.paneId ? paneTileId(state, state.ui.contextMenu.paneId) : null),
     port_id: state.ui.contextMenu.portId,
     client_x: state.ui.contextMenu.clientX,
@@ -4583,6 +5207,7 @@ function projectTerminalInfo(terminal: TerminalInfo): TestDriverProjection['acti
     readOnly: terminal.readOnly,
     kind: terminal.kind,
     agentId: terminal.agentId,
+    locked: terminal.locked,
     minimized: terminal.minimized,
   };
 }
@@ -4598,6 +5223,7 @@ export function buildTestDriverProjection(
       text: state.ui.commandText,
     },
     help_open: state.ui.helpOpen,
+    settings_sidebar_open: state.ui.settingsSidebarOpen,
     sidebar: {
       open: state.ui.sidebarOpen,
       section: state.ui.sidebarSection,
@@ -4607,7 +5233,8 @@ export function buildTestDriverProjection(
     close_tab_confirmation: state.ui.closeTabConfirmation,
     close_pane_confirmation: projectClosePaneConfirmation(state),
     context_menu: projectContextMenu(state),
-    selected_tile_id: state.ui.selectedPaneId ? paneTileId(state, state.ui.selectedPaneId) : null,
+    selected_tile_id: primarySelectedTileId(state),
+    selected_tile_ids: selectedTileIdsInState(state),
     selected_work_id: state.ui.selectedWorkId,
     debug_tab: state.ui.debugTab,
     agents: Object.values(state.agents),
@@ -4694,7 +5321,7 @@ export function openPaneContextMenu(paneId: string, clientX: number, clientY: nu
     .then((menu) => {
       appState.update((current) => {
         const contextMenu = current.ui.contextMenu;
-        if (!contextMenu || contextMenu.target !== 'pane' || contextMenu.paneId !== paneId) {
+        if (!contextMenu || contextMenu.target !== 'tile' || contextMenu.paneId !== paneId) {
           return current;
         }
         return {
@@ -4716,7 +5343,7 @@ export function openPaneContextMenu(paneId: string, clientX: number, clientY: nu
       const message = error instanceof Error ? error.message : String(error);
       appState.update((current) => {
         const contextMenu = current.ui.contextMenu;
-        if (!contextMenu || contextMenu.target !== 'pane' || contextMenu.paneId !== paneId) {
+        if (!contextMenu || contextMenu.target !== 'tile' || contextMenu.paneId !== paneId) {
           return current;
         }
         return {
@@ -4734,6 +5361,10 @@ export function openPaneContextMenu(paneId: string, clientX: number, clientY: nu
         };
       });
     });
+}
+
+export function openWorkContextMenu(workId: string, clientX: number, clientY: number) {
+  appState.update((state) => openWorkContextMenuInState(state, workId, clientX, clientY));
 }
 
 export function openPortContextMenu(tileId: string, portId: TilePort, clientX: number, clientY: number) {
@@ -4775,12 +5406,19 @@ export function updateWorkCardLayout(workId: string, updates: Partial<LayoutEntr
     const entryId = workLayoutKey(state, workId);
     const entry = entryId ? state.layout.entries[entryId] : null;
     if (!entryId || !entry) return state;
+    const snappedUpdates: Partial<LayoutEntry> = { ...updates };
+    if (typeof snappedUpdates.x === 'number') {
+      snappedUpdates.x = snapToGridForState(state, snappedUpdates.x);
+    }
+    if (typeof snappedUpdates.y === 'number') {
+      snappedUpdates.y = snapToGridForState(state, snappedUpdates.y);
+    }
     return {
       ...state,
       layout: {
         entries: {
           ...state.layout.entries,
-          [entryId]: { ...entry, ...updates },
+          [entryId]: { ...entry, ...snappedUpdates },
         },
       },
     };
@@ -4819,7 +5457,7 @@ export async function persistPaneLayout(paneId: string) {
   const tileId = paneTileId(state, paneId);
   const entry = tileId ? state.layout.entries[tileId] : null;
   if (!tileId || !entry) return;
-  await saveLayoutState(tileId, entry.x, entry.y, entry.width, entry.height);
+  await saveLayoutState(tileId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked));
 }
 
 export async function persistWorkCardLayout(workId: string) {
@@ -4827,15 +5465,18 @@ export async function persistWorkCardLayout(workId: string) {
   const entryId = workLayoutKey(state, workId);
   const entry = entryId ? state.layout.entries[entryId] : null;
   if (!entryId || !entry) return;
-  await saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height);
+  await saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked));
 }
 
 export async function dragWorkCardBy(workId: string, dx: number, dy: number, persist = true) {
   const state = get(appState);
   const entryId = workLayoutKey(state, workId);
   const entry = entryId ? state.layout.entries[entryId] : null;
-  if (!entry) return;
-  updateWorkCardLayout(workId, { x: entry.x + dx, y: entry.y + dy });
+  if (!entry || entry.locked) return;
+  updateWorkCardLayout(workId, {
+    x: snapToGridForState(state, entry.x + dx),
+    y: snapToGridForState(state, entry.y + dy),
+  });
   if (persist) {
     await persistWorkCardLayout(workId);
   }
@@ -4859,6 +5500,89 @@ export async function deleteWorkCard(workId: string, sessionId: string) {
 export async function addTab(name?: string): Promise<Tab | null> {
   const sessionId = await newSession(name);
   return { id: sessionId, name: name || 'New Tab' };
+}
+
+async function persistSessionLayoutForSave(sessionId: string) {
+  const layoutEntries = sessionLayoutEntriesForSave(sessionId);
+  if (Object.keys(layoutEntries).length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    Object.entries(layoutEntries).map(([entryId, entry]) =>
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
+    ),
+  );
+}
+
+function sessionLayoutEntriesForSave(sessionId: string): LayoutStateMap {
+  const state = get(appState);
+  const entries: LayoutStateMap = {};
+
+  for (const windowId of state.tmux.windowOrder) {
+    const window = state.tmux.windows[windowId];
+    if (!window || window.session_id !== sessionId) {
+      continue;
+    }
+    const tileId = windowTileId(window);
+    if (tileId && state.layout.entries[tileId]) {
+      entries[tileId] = { ...state.layout.entries[tileId] };
+    }
+  }
+
+  for (const workId of state.work.order) {
+    const item = state.work.items[workId];
+    if (!item || item.session_id !== sessionId) {
+      continue;
+    }
+    const entryId = item.tile_id;
+    if (entryId && state.layout.entries[entryId]) {
+      entries[entryId] = { ...state.layout.entries[entryId] };
+    }
+  }
+
+  return entries;
+}
+
+export async function saveSessionConfigurationForSession(sessionId: string) {
+  await persistSessionLayoutForSave(sessionId);
+  const minimizedTileIds = get(appState).ui.minimizedTileIdsBySession[sessionId] ?? [];
+  const summary = await saveSessionConfiguration(
+    sessionId,
+    minimizedTileIds,
+    sessionLayoutEntriesForSave(sessionId),
+  );
+  await refreshSavedSessionConfigurations();
+  return summary;
+}
+
+export async function loadSavedSessionConfigurationIntoSession(sessionId: string, configName: string) {
+  return withSuspendedLayoutPersistence(async () => {
+    const loaded = await loadSessionConfiguration(sessionId, configName);
+    replaceSessionMinimizedTileIds(sessionId, loaded.minimized_tile_ids);
+    await bootstrapAppState();
+    await refreshWorkItems(sessionId);
+    await applyLoadedSessionLayoutEntries(loaded.layout_entries_by_tile);
+    refitCanvasToWindowViewport();
+    return loaded;
+  });
+}
+
+export async function openSavedSessionConfigurationInNewTab(summary: SavedSessionConfigurationSummary) {
+  return withSuspendedLayoutPersistence(async () => {
+    const sessionId = await newSession();
+    const loaded = await loadSessionConfiguration(sessionId, summary.config_name);
+    if (loaded.session_name.trim().length > 0) {
+      await renameSession(sessionId, loaded.session_name);
+    }
+    await selectSession(sessionId);
+    replaceSessionMinimizedTileIds(sessionId, loaded.minimized_tile_ids);
+    await bootstrapAppState();
+    await refreshWorkItems(sessionId);
+    await applyLoadedSessionLayoutEntries(loaded.layout_entries_by_tile);
+    refitCanvasToWindowViewport();
+    return loaded;
+  });
 }
 
 export function removeTab(id: string) {
@@ -4890,11 +5614,35 @@ export function moveSidebarSection(delta: number) {
 }
 
 export function openSidebar() {
-  sidebarOpen.set(true);
+  appState.update((state) => ({
+    ...state,
+    ui: {
+      ...state.ui,
+      sidebarOpen: true,
+      settingsSidebarOpen: false,
+      sidebarSection: sidebarSectionForState(state),
+      sidebarSelectedIdx: sidebarAnchorIndex(state),
+    },
+  }));
 }
 
 export function closeSidebar() {
   sidebarOpen.set(false);
+}
+
+export function openSettingsSidebar() {
+  appState.update((state) => ({
+    ...state,
+    ui: {
+      ...state.ui,
+      sidebarOpen: false,
+      settingsSidebarOpen: true,
+    },
+  }));
+}
+
+export function closeSettingsSidebar() {
+  settingsSidebarOpen.set(false);
 }
 
 export function beginSidebarRename() {
@@ -4963,9 +5711,10 @@ export function removeTerminal(id: string) {
 }
 
 export function updateTerminal(id: string, updates: Partial<TerminalInfo>) {
+  const state = get(appState);
   const layoutUpdates: Partial<LayoutEntry> = {};
-  if (typeof updates.x === 'number') layoutUpdates.x = updates.x;
-  if (typeof updates.y === 'number') layoutUpdates.y = updates.y;
+  if (typeof updates.x === 'number') layoutUpdates.x = snapToGridForState(state, updates.x);
+  if (typeof updates.y === 'number') layoutUpdates.y = snapToGridForState(state, updates.y);
   if (typeof updates.width === 'number') layoutUpdates.width = updates.width;
   if (typeof updates.height === 'number') layoutUpdates.height = updates.height;
   if (Object.keys(layoutUpdates).length > 0) {
@@ -5197,6 +5946,11 @@ function applyArrangementPattern(
   if (orderedEntryIds.length === 0) {
     return { state, arrangedEntries: {} };
   }
+  const lockedEntryIds = orderedEntryIds.filter((entryId) => isTileLockedInState(state, entryId));
+  const movableEntryIds = orderedEntryIds.filter((entryId) => !lockedEntryIds.includes(entryId));
+  if (movableEntryIds.length === 0) {
+    return { state, arrangedEntries: {} };
+  }
   const anchorEntry = state.layout.entries[anchorEntryId] ?? {
     x: 100,
     y: 100,
@@ -5204,22 +5958,32 @@ function applyArrangementPattern(
     height: DEFAULT_TILE_HEIGHT,
   };
 
-  const arrangedEntries: Record<string, LayoutEntry> = {};
   const entries = { ...state.layout.entries };
-  arrangedEntries[anchorEntryId] = {
-    ...anchorEntry,
-    width: entries[anchorEntryId]?.width ?? anchorEntry.width,
-    height: entries[anchorEntryId]?.height ?? anchorEntry.height,
-  };
-  entries[anchorEntryId] = arrangedEntries[anchorEntryId];
+  const arrangedEntries: Record<string, LayoutEntry> = Object.fromEntries(
+    lockedEntryIds.map((entryId) => {
+      const entry = entries[entryId] ?? layoutEntryForTileId(state, entryId);
+      entries[entryId] = entry;
+      return [entryId, { ...entry }];
+    }),
+  );
+  const anchorIsLocked = lockedEntryIds.includes(anchorEntryId);
+  if (!anchorIsLocked) {
+    arrangedEntries[anchorEntryId] = {
+      ...anchorEntry,
+      width: entries[anchorEntryId]?.width ?? anchorEntry.width,
+      height: entries[anchorEntryId]?.height ?? anchorEntry.height,
+    };
+    entries[anchorEntryId] = arrangedEntries[anchorEntryId];
+  }
 
-  const siblingCount = orderedEntryIds.length - 1;
-  orderedEntryIds.slice(1).forEach((entryId, index) => {
+  const movableSiblingIds = movableEntryIds.filter((entryId) => entryId !== anchorEntryId);
+  const siblingCount = movableSiblingIds.length;
+  movableSiblingIds.forEach((entryId, index) => {
     const width = entries[entryId]?.width ?? DEFAULT_TILE_WIDTH;
     const height = entries[entryId]?.height ?? DEFAULT_TILE_HEIGHT;
     const position = arrangedPositionForIndex(
       pattern,
-      arrangedEntries[anchorEntryId],
+      arrangedEntries[anchorEntryId] ?? anchorEntry,
       width,
       height,
       index,
@@ -5232,6 +5996,7 @@ function applyArrangementPattern(
       height,
       Object.keys(arrangedEntries),
       arrangedEntries,
+      state.ui,
     );
     entries[entryId] = arrangedEntries[entryId];
   });
@@ -5267,7 +6032,46 @@ export async function autoArrange(sessionId: string | null) {
 
   await Promise.all(
     Object.entries(next.arrangedEntries).map(([entryId, entry]) =>
-      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height),
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
+    ),
+  );
+}
+
+export async function alignSessionToGrid(sessionId: string | null) {
+  if (!sessionId) return;
+  const state = get(appState);
+  const tileIds = sessionLayoutTileIds(state, sessionId);
+  if (tileIds.length === 0) return;
+
+  const nextEntries = { ...state.layout.entries };
+  const alignedEntries: Record<string, LayoutEntry> = {};
+  for (const tileId of tileIds) {
+    const entry = layoutEntryForTileId(state, tileId);
+    if (entry.locked) {
+      continue;
+    }
+    const x = alignValueToGrid(state.ui.gridSnapSize, entry.x);
+    const y = alignValueToGrid(state.ui.gridSnapSize, entry.y);
+    if (entry.x === x && entry.y === y && state.layout.entries[tileId]) {
+      continue;
+    }
+    const nextEntry = { ...entry, x, y };
+    nextEntries[tileId] = nextEntry;
+    alignedEntries[tileId] = nextEntry;
+  }
+
+  if (Object.keys(alignedEntries).length === 0) return;
+  appState.set({
+    ...state,
+    layout: {
+      ...state.layout,
+      entries: nextEntries,
+    },
+  });
+
+  await Promise.all(
+    Object.entries(alignedEntries).map(([entryId, entry]) =>
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
     ),
   );
 }
@@ -5281,7 +6085,7 @@ export async function autoArrangeWithElk(sessionId: string | null) {
 
   await Promise.all(
     Object.entries(next.arrangedEntries).map(([entryId, entry]) =>
-      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height),
+      saveLayoutState(entryId, entry.x, entry.y, entry.width, entry.height, Boolean(entry.locked)),
     ),
   );
 }

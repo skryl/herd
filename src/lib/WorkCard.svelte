@@ -1,15 +1,20 @@
 <script lang="ts">
-  import { approveWorkItem, improveWorkItem, readWorkStagePreview } from './tauri';
+  import { onDestroy } from 'svelte';
+  import TerminalDisplayDrawer from './TerminalDisplayDrawer.svelte';
+  import { approveWorkItem, improveWorkItem, readPaneOutput, readWorkStagePreview } from './tauri';
   import TileActivityDrawer from './TileActivityDrawer.svelte';
   import TilePorts from './TilePorts.svelte';
   import {
     agentInfos,
+    appState,
     canvasState,
     clientDeltaToWorldDelta,
     deleteWorkCard,
+    openWorkContextMenu,
+    paneIdForTileId,
     persistWorkCardLayout,
     refreshWorkItems,
-    selectedWorkId,
+    selectedTileIds,
     selectWorkItem,
     tileActivityById,
     toggleWorkCardMinimized,
@@ -32,12 +37,21 @@
   let originX = 0;
   let originY = 0;
   let activityOpen = $state(false);
+  let terminalOpen = $state(false);
+  let terminalBusy = $state(false);
+  let terminalText = $state('');
+  let terminalError = $state<string | null>(null);
+  let terminalRefreshToken = 0;
+  let terminalRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   const currentStage = $derived(item.stages.find((stage) => stage.stage === item.current_stage) ?? null);
   const needsReview = $derived(currentStage?.status === 'completed');
-  const isSelected = $derived($selectedWorkId === item.work_id);
+  const isSelected = $derived($selectedTileIds.includes(item.tile_id));
+  const isLocked = $derived(Boolean(layout.locked));
   const ownerName = $derived(labelForAgent(item.owner_agent_id));
   const activityEntries = $derived($tileActivityById[item.tile_id] ?? []);
+  const terminalPaneId = $derived(paneIdForTileId($appState, item.tile_id));
+  const terminalPane = $derived(terminalPaneId ? $appState.tmux.panes[terminalPaneId] ?? null : null);
   const previewText = $derived.by(() => {
     const lines = preview.trimEnd().split('\n');
     if (lines.length <= 16) {
@@ -126,7 +140,8 @@
 
   function handleTitlebarMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
-    selectWorkItem(item.work_id);
+    if (isLocked) return;
+    selectWorkItem(item.work_id, event.shiftKey);
     isDragging = true;
     dragStartX = event.clientX;
     dragStartY = event.clientY;
@@ -152,9 +167,66 @@
     void persistWorkCardLayout(item.work_id);
   }
 
+  function clearTerminalRefreshTimer() {
+    if (terminalRefreshTimer !== null) {
+      clearTimeout(terminalRefreshTimer);
+      terminalRefreshTimer = null;
+    }
+  }
+
+  async function refreshTerminal() {
+    if (!terminalOpen || !terminalPaneId) {
+      return;
+    }
+    const version = ++terminalRefreshToken;
+    terminalBusy = !terminalText;
+    terminalError = null;
+    try {
+      const nextOutput = await readPaneOutput(terminalPaneId);
+      if (version === terminalRefreshToken) {
+        terminalText = nextOutput;
+      }
+    } catch (error) {
+      if (version === terminalRefreshToken) {
+        terminalError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (version === terminalRefreshToken) {
+        terminalBusy = false;
+      }
+    }
+  }
+
   $effect(() => {
     item.work_id;
     void loadPreview();
+  });
+
+  $effect(() => {
+    terminalOpen;
+    terminalPaneId;
+    clearTerminalRefreshTimer();
+    if (!terminalOpen || !terminalPaneId) {
+      return;
+    }
+
+    let cancelled = false;
+    const refreshLoop = async () => {
+      await refreshTerminal();
+      if (!cancelled) {
+        terminalRefreshTimer = setTimeout(refreshLoop, 1000);
+      }
+    };
+    void refreshLoop();
+
+    return () => {
+      cancelled = true;
+      clearTerminalRefreshTimer();
+    };
+  });
+
+  onDestroy(() => {
+    clearTerminalRefreshTimer();
   });
 </script>
 
@@ -169,7 +241,16 @@
   style={`left: ${layout.x}px; top: ${layout.y}px; width: ${layout.width}px; height: ${layout.height}px; z-index: ${isSelected ? 10 : 1};`}
   onmousedown={(event) => {
     event.stopPropagation();
-    selectWorkItem(item.work_id);
+    selectWorkItem(item.work_id, event.shiftKey);
+  }}
+  oncontextmenu={(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const viewport = (event.currentTarget as HTMLElement).closest('.canvas-viewport') as HTMLElement | null;
+    const rect = viewport?.getBoundingClientRect();
+    const clientX = rect ? event.clientX - rect.left : event.clientX;
+    const clientY = rect ? event.clientY - rect.top : event.clientY;
+    openWorkContextMenu(item.work_id, clientX, clientY);
   }}
   onwheel={(event) => event.stopPropagation()}
 >
@@ -178,6 +259,14 @@
   <div class="work-card-titlebar" onmousedown={handleTitlebarMouseDown}>
     <div class="work-card-header">
       <div class="work-card-title-group">
+        {#if isLocked}
+          <span class="tile-lock-indicator" title="Locked" aria-label="Locked">
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3.5 5V3.75a2.5 2.5 0 1 1 5 0V5" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              <rect x="2.2" y="5" width="7.6" height="5.2" rx="1" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </span>
+        {/if}
         <div class="work-card-id">{item.work_id}</div>
         <div class="work-card-title">{item.title}</div>
       </div>
@@ -275,9 +364,33 @@
     <TileActivityDrawer entries={activityEntries} emptyText="No activity yet" />
   {/if}
 
+  {#if terminalOpen}
+    <TerminalDisplayDrawer
+      text={terminalText}
+      columns={terminalPane?.cols ?? 0}
+      rows={terminalPane?.rows ?? 0}
+      fillAvailableSpace={false}
+      emptyText={terminalError ?? (terminalPaneId ? (terminalBusy ? 'Loading terminal…' : 'No terminal output yet') : 'TTY unavailable')}
+    />
+  {/if}
+
   <div class="work-card-footer">
     <span class="footer-label">TILE:{item.tile_id}</span>
     <div class="footer-actions">
+      <button
+        class="activity-toggle-btn"
+        class:active={terminalOpen}
+        type="button"
+        title={terminalOpen ? 'Hide terminal drawer' : 'Show terminal drawer'}
+        aria-label={terminalOpen ? 'Hide terminal drawer' : 'Show terminal drawer'}
+        onmousedown={(event) => event.stopPropagation()}
+        onclick={(event) => {
+          event.stopPropagation();
+          terminalOpen = !terminalOpen;
+        }}
+      >
+        TTY
+      </button>
       <button
         class="activity-toggle-btn"
         class:active={activityOpen}
@@ -362,6 +475,19 @@
   .work-card-title-group {
     min-width: 0;
     flex: 1;
+  }
+
+  .tile-lock-indicator {
+    display: inline-flex;
+    width: 12px;
+    height: 12px;
+    color: var(--copper);
+    margin-bottom: 4px;
+  }
+
+  .tile-lock-indicator svg {
+    width: 100%;
+    height: 100%;
   }
 
   .work-card-id {
@@ -604,5 +730,11 @@
     color: var(--silk-dim);
     letter-spacing: 0.8px;
     text-transform: uppercase;
+  }
+
+  :global(.work-card .terminal-display) {
+    margin: 0;
+    border-left: 0;
+    border-right: 0;
   }
 </style>

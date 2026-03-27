@@ -15,6 +15,8 @@ pub struct TileState {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// Maps tmux pane ID -> tile state.
@@ -31,7 +33,7 @@ pub fn load() -> HerdState {
 pub fn load_from_path(path: &Path) -> Result<HerdState, String> {
     let conn = db::open_at(path)?;
     let mut stmt = conn
-        .prepare("SELECT pane_id, x, y, width, height FROM tile_state")
+        .prepare("SELECT pane_id, x, y, width, height, locked FROM tile_state")
         .map_err(|error| format!("failed to prepare tile_state query: {error}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -42,6 +44,7 @@ pub fn load_from_path(path: &Path) -> Result<HerdState, String> {
                     y: row.get(2)?,
                     width: row.get(3)?,
                     height: row.get(4)?,
+                    locked: row.get::<_, i64>(5)? != 0,
                 },
             ))
         })
@@ -70,8 +73,8 @@ pub fn save_to_path(path: &Path, state: &HerdState) -> Result<(), String> {
         .map_err(|error| format!("failed to clear tile_state rows: {error}"))?;
     for (pane_id, tile) in state {
         tx.execute(
-            "INSERT INTO tile_state (pane_id, x, y, width, height) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![pane_id, tile.x, tile.y, tile.width, tile.height],
+            "INSERT INTO tile_state (pane_id, x, y, width, height, locked) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![pane_id, tile.x, tile.y, tile.width, tile.height, if tile.locked { 1 } else { 0 }],
         )
         .map_err(|error| format!("failed to insert tile_state row {pane_id}: {error}"))?;
     }
@@ -271,6 +274,7 @@ mod tests {
                 y: 24.0,
                 width: 640.0,
                 height: 400.0,
+                locked: true,
             },
         );
 

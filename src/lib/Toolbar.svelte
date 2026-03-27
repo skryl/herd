@@ -3,7 +3,12 @@
   import { invoke } from '@tauri-apps/api/core';
   import { canvasState } from './stores/canvas';
   import { tabs, activeTabId, addTab, activeTabTerminals } from './stores/tabs';
-  import { agentInfos } from './stores/appState';
+  import {
+    agentInfos,
+    openSavedSessionConfigurationInNewTab,
+    refreshSavedSessionConfigurations,
+    savedSessionConfigurations,
+  } from './stores/appState';
 
   interface Props {
     onSpawnShell: () => void;
@@ -19,10 +24,13 @@
 
   let tmuxAlive = $state(false);
   let ccAlive = $state(false);
+  let savedConfigSelection = $state('');
+  let openingSavedConfig = $state(false);
   let pollInterval: ReturnType<typeof setInterval>;
 
   onMount(() => {
     checkTmux();
+    void refreshSavedSessionConfigurations();
     pollInterval = setInterval(checkTmux, 3000);
   });
 
@@ -61,6 +69,28 @@
       cmd: 'bash -c \'tail -f /Users/skryl/Dev/herd/tmp/herd-socket.log 2>/dev/null || tail -f /tmp/herd-socket.log 2>/dev/null || echo "No socket log found"\''
     }).catch((e: any) => console.error('spawn_log_shell failed:', e));
   }
+
+  async function handleSavedConfigChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const configName = select.value.trim();
+    if (!configName || openingSavedConfig) {
+      return;
+    }
+    const summary = $savedSessionConfigurations.find((entry) => entry.config_name === configName);
+    savedConfigSelection = '';
+    if (!summary) {
+      return;
+    }
+    openingSavedConfig = true;
+    try {
+      await openSavedSessionConfigurationInNewTab(summary);
+      await refreshSavedSessionConfigurations();
+    } catch (error) {
+      console.error('open saved session configuration failed:', error);
+    } finally {
+      openingSavedConfig = false;
+    }
+  }
 </script>
 
 <div class="toolbar">
@@ -83,6 +113,17 @@
         </button>
       {/each}
       <button class="tab-add-btn" onclick={() => addTab()}>+</button>
+      <select
+        class="tab-load-select"
+        bind:value={savedConfigSelection}
+        disabled={openingSavedConfig || $savedSessionConfigurations.length === 0}
+        onchange={handleSavedConfigChange}
+      >
+        <option value="">{openingSavedConfig ? 'OPENING...' : ($savedSessionConfigurations.length > 0 ? 'OPEN SESSION' : 'NO SAVES')}</option>
+        {#each $savedSessionConfigurations as savedConfig (savedConfig.config_name)}
+          <option value={savedConfig.config_name}>{savedConfig.session_name}</option>
+        {/each}
+      </select>
     </div>
 
     <div class="separator"></div>
@@ -195,7 +236,7 @@
   .tab-bar {
     display: flex;
     align-items: center;
-    gap: 1px;
+    gap: 4px;
   }
 
   .tab-btn {
@@ -235,6 +276,30 @@
   .tab-add-btn:hover {
     color: var(--phosphor-green);
     border-color: var(--component-border);
+  }
+
+  .tab-load-select {
+    min-width: 116px;
+    height: 22px;
+    background: rgba(11, 20, 18, 0.98);
+    border: 1px solid var(--component-border);
+    color: var(--silk-white);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    padding: 0 8px;
+    outline: none;
+    text-transform: uppercase;
+  }
+
+  .tab-load-select:disabled {
+    color: var(--silk-dim);
+    opacity: 1;
+  }
+
+  .tab-load-select:hover:not(:disabled),
+  .tab-load-select:focus-visible {
+    border-color: var(--phosphor-green-dim);
   }
 
   .tool-btn {

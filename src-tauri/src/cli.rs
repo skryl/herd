@@ -90,6 +90,9 @@ Usage:
   herd [--socket <path>] [--agent-pid <pid>] network list [shell|agent|browser|work]
   herd [--socket <path>] [--agent-pid <pid>] network get <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] network call <tile_id> <action> [json_args]
+  herd [--socket <path>] [--agent-pid <pid>] network subscribe <tile_id> <event>
+  herd [--socket <path>] [--agent-pid <pid>] network unsubscribe <tile_id> <event>
+  herd [--socket <path>] [--agent-pid <pid>] network subscriptions [<tile_id>]
   herd [--socket <path>] [--agent-pid <pid>] network connect <from_tile> <from_port> <to_tile> <to_port>
   herd [--socket <path>] [--agent-pid <pid>] network disconnect <tile> <port>
   herd [--socket <path>] [--agent-pid <pid>] tile create <shell|agent|browser|work> [--title <text>] [--x <n>] [--y <n>] [--width <n>] [--height <n>] [--parent-session-id <id>] [--parent-tile-id <id>] [--browser-incognito <true|false>] [--browser-path <path>]
@@ -97,6 +100,9 @@ Usage:
   herd [--socket <path>] [--agent-pid <pid>] tile destroy <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] tile get <tile_id>
   herd [--socket <path>] [--agent-pid <pid>] tile call <tile_id> <action> [json_args]
+  herd [--socket <path>] [--agent-pid <pid>] tile subscribe <tile_id> <event> <agent_id>
+  herd [--socket <path>] [--agent-pid <pid>] tile unsubscribe <tile_id> <event> <agent_id>
+  herd [--socket <path>] [--agent-pid <pid>] tile subscriptions [<tile_id>] [<agent_id>]
   herd [--socket <path>] [--agent-pid <pid>] tile move <tile_id> <x> <y>
   herd [--socket <path>] [--agent-pid <pid>] tile resize <tile_id> <width> <height>
   herd [--socket <path>] [--agent-pid <pid>] tile rename <tile_id> <title>
@@ -336,6 +342,26 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                         "sender_tile_id": env_tile_id(),
                     }))
                 }
+                "subscribe" => Ok(json!({
+                    "command": "network_subscribe",
+                    "tile_id": args.get(2).ok_or("network subscribe requires <tile_id> <event>")?,
+                    "event": args.get(3).ok_or("network subscribe requires <tile_id> <event>")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "unsubscribe" => Ok(json!({
+                    "command": "network_unsubscribe",
+                    "tile_id": args.get(2).ok_or("network unsubscribe requires <tile_id> <event>")?,
+                    "event": args.get(3).ok_or("network unsubscribe requires <tile_id> <event>")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "subscriptions" => Ok(json!({
+                    "command": "network_subscription_list",
+                    "tile_id": args.get(2).cloned(),
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
                 "connect" => Ok(json!({
                     "command": "network_connect",
                     "from_tile_id": args.get(2).ok_or("network connect requires <from_tile> <from_port> <to_tile> <to_port>")?,
@@ -398,6 +424,29 @@ fn build_command_payload(ctx: &CliContext, args: &[String]) -> Result<Value, Str
                         "sender_tile_id": env_tile_id(),
                     }))
                 }
+                "subscribe" => Ok(json!({
+                    "command": "tile_subscribe",
+                    "tile_id": args.get(2).ok_or("tile subscribe requires <tile_id> <event> <agent_id>")?,
+                    "event": args.get(3).ok_or("tile subscribe requires <tile_id> <event> <agent_id>")?,
+                    "agent_id": args.get(4).ok_or("tile subscribe requires <tile_id> <event> <agent_id>")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "unsubscribe" => Ok(json!({
+                    "command": "tile_unsubscribe",
+                    "tile_id": args.get(2).ok_or("tile unsubscribe requires <tile_id> <event> <agent_id>")?,
+                    "event": args.get(3).ok_or("tile unsubscribe requires <tile_id> <event> <agent_id>")?,
+                    "agent_id": args.get(4).ok_or("tile unsubscribe requires <tile_id> <event> <agent_id>")?,
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
+                "subscriptions" => Ok(json!({
+                    "command": "tile_subscription_list",
+                    "tile_id": args.get(2).cloned(),
+                    "agent_id": args.get(3).cloned(),
+                    "sender_agent_id": env_agent_id(),
+                    "sender_tile_id": env_tile_id(),
+                })),
                 "move" => Ok(json!({
                     "command": "tile_move",
                     "tile_id": args.get(2).ok_or("tile move requires <tile_id> <x> <y>")?,
@@ -925,6 +974,58 @@ mod tests {
     }
 
     #[test]
+    fn serializes_network_subscription_payloads_with_sender_context() {
+        with_agent_and_tile_env("agent-7", "tile7", || {
+            let subscribe = build_command_payload(
+                &ctx(),
+                &["network".into(), "subscribe".into(), "tile9".into(), "in:exec".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                subscribe,
+                json!({
+                    "command": "network_subscribe",
+                    "tile_id": "tile9",
+                    "event": "in:exec",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+
+            let unsubscribe = build_command_payload(
+                &ctx(),
+                &["network".into(), "unsubscribe".into(), "tile9".into(), "out:get".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                unsubscribe,
+                json!({
+                    "command": "network_unsubscribe",
+                    "tile_id": "tile9",
+                    "event": "out:get",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+
+            let list = build_command_payload(
+                &ctx(),
+                &["network".into(), "subscriptions".into(), "tile9".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                list,
+                json!({
+                    "command": "network_subscription_list",
+                    "tile_id": "tile9",
+                    "sender_agent_id": "agent-7",
+                    "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
     fn serializes_filtered_list_payloads_with_sender_context() {
         with_agent_and_tile_env("agent-7", "tile7", || {
             let network_payload = build_command_payload(
@@ -1036,6 +1137,73 @@ mod tests {
                     },
                     "sender_agent_id": "agent-7",
                     "sender_tile_id": "tile7",
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn serializes_tile_subscription_payloads_with_sender_context() {
+        with_agent_and_tile_env("root:$1", "tile-root", || {
+            let subscribe = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "subscribe".into(),
+                    "tile9".into(),
+                    "both:drive".into(),
+                    "agent-9".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                subscribe,
+                json!({
+                    "command": "tile_subscribe",
+                    "tile_id": "tile9",
+                    "event": "both:drive",
+                    "agent_id": "agent-9",
+                    "sender_agent_id": "root:$1",
+                    "sender_tile_id": "tile-root",
+                })
+            );
+
+            let unsubscribe = build_command_payload(
+                &ctx(),
+                &[
+                    "tile".into(),
+                    "unsubscribe".into(),
+                    "tile9".into(),
+                    "in:exec".into(),
+                    "agent-9".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                unsubscribe,
+                json!({
+                    "command": "tile_unsubscribe",
+                    "tile_id": "tile9",
+                    "event": "in:exec",
+                    "agent_id": "agent-9",
+                    "sender_agent_id": "root:$1",
+                    "sender_tile_id": "tile-root",
+                })
+            );
+
+            let list = build_command_payload(
+                &ctx(),
+                &["tile".into(), "subscriptions".into(), "tile9".into(), "agent-9".into()],
+            )
+            .unwrap();
+            assert_eq!(
+                list,
+                json!({
+                    "command": "tile_subscription_list",
+                    "tile_id": "tile9",
+                    "agent_id": "agent-9",
+                    "sender_agent_id": "root:$1",
+                    "sender_tile_id": "tile-root",
                 })
             );
         });

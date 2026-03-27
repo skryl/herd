@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -25,12 +25,17 @@ use crate::agent::{
     format_sign_on_display,
     normalize_led_control_commands,
     now_ms,
+    parse_tile_subscription_selector,
     AgentChannelEvent,
     AgentChannelEventKind,
     AgentRole,
     ChatterEntry,
     ChatterKind,
     LedControlCommand,
+    TileEventDeliveryReason,
+    TileSubscriptionDirection,
+    TileSubscriptionRecord,
+    TileSubscriptionScope,
     TileSignalState,
 };
 use crate::persist::TileState;
@@ -275,6 +280,26 @@ struct SenderContext {
     sender_window_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct TileSubscriptionView {
+    session_id: String,
+    scope: TileSubscriptionScope,
+    subscriber_tile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscriber_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscriber_display_name: Option<String>,
+    subject_tile_id: String,
+    direction: TileSubscriptionDirection,
+    action: String,
+}
+
+#[derive(Debug, Clone)]
+struct TileEventMatch {
+    subscription: TileSubscriptionRecord,
+    matched_direction: TileSubscriptionDirection,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchErrorKind {
     NotFound,
@@ -313,6 +338,73 @@ impl From<String> for DispatchError {
 
 fn is_tile_target_kind(target_kind: &str) -> bool {
     matches!(target_kind, "shell" | "browser" | "agent" | "root_agent" | "work" | "network")
+}
+
+fn dispatch_outcome_string(result: &DispatchResult) -> String {
+    match result {
+        Ok(_) => "ok".to_string(),
+        Err(error) => match error.kind {
+            DispatchErrorKind::NotFound => "not_found".to_string(),
+            DispatchErrorKind::Error => "error".to_string(),
+        },
+    }
+}
+
+fn compact_tile_event_value(value: &serde_json::Value) -> serde_json::Value {
+    match serde_json::to_string(value) {
+        Ok(serialized) if serialized.len() <= 4096 => value.clone(),
+        Ok(_) => serde_json::json!({ "summary": "omitted_too_large" }),
+        Err(_) => serde_json::json!({ "summary": "unserializable" }),
+    }
+}
+
+fn compact_tile_event_result(result: &DispatchResult) -> Option<serde_json::Value> {
+    match result {
+        Ok(Some(value)) => Some(compact_tile_event_value(value)),
+        Ok(None) => Some(serde_json::Value::Null),
+        Err(error) => Some(serde_json::json!({ "error": error.message })),
+    }
+}
+
+fn tile_label(tile: &network::SessionTileInfo) -> String {
+    match &tile.details {
+        network::TileDetails::Agent(details) => details.display_name.clone(),
+        _ => {
+            let trimmed = tile.title.trim();
+            if trimmed.is_empty() {
+                format!("{:?} {}", tile.kind, tile.tile_id)
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
+fn resolve_tile_label_by_id(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    tile_id: &str,
+) -> String {
+    session_network_tiles(app, state, session_id)
+        .ok()
+        .and_then(|tiles| tiles.into_iter().find(|tile| tile.tile_id == tile_id))
+        .map(|tile| tile_label(&tile))
+        .unwrap_or_else(|| tile_id.to_string())
+}
+
+fn tile_subscription_view(state: &AppState, record: &TileSubscriptionRecord) -> TileSubscriptionView {
+    let subscriber = state.agent_info_by_tile(&record.subscriber_tile_id).ok().flatten();
+    TileSubscriptionView {
+        session_id: record.session_id.clone(),
+        scope: record.scope,
+        subscriber_tile_id: record.subscriber_tile_id.clone(),
+        subscriber_agent_id: subscriber.as_ref().map(|agent| agent.agent_id.clone()),
+        subscriber_display_name: subscriber.map(|agent| agent.display_name),
+        subject_tile_id: record.subject_tile_id.clone(),
+        direction: record.direction,
+        action: record.action.clone(),
+    }
 }
 
 fn collect_related_tile_ids_from_value(value: &serde_json::Value, related_tile_ids: &mut BTreeSet<String>) {
@@ -564,6 +656,20 @@ fn send_direct_message_from_sender(
         mentions: Vec::new(),
         replay: false,
         ping_id: None,
+        delivery_reason: None,
+        subscription_scope: None,
+        subscription_direction: None,
+        action: None,
+        subject_tile_id: None,
+        peer_tile_id: None,
+        caller_tile_id: None,
+        caller_agent_id: None,
+        target_tile_id: None,
+        target_agent_id: None,
+        rpc_channel: None,
+        outcome: None,
+        args_json: None,
+        result_json: None,
         timestamp_ms: now_ms(),
     };
     if let Err(error) = state.send_event_to_agent(&to_agent_id, event) {
@@ -648,6 +754,20 @@ fn send_root_message_from_sender(
         mentions: Vec::new(),
         replay: false,
         ping_id: None,
+        delivery_reason: None,
+        subscription_scope: None,
+        subscription_direction: None,
+        action: None,
+        subject_tile_id: None,
+        peer_tile_id: None,
+        caller_tile_id: None,
+        caller_agent_id: None,
+        target_tile_id: None,
+        target_agent_id: None,
+        rpc_channel: None,
+        outcome: None,
+        args_json: None,
+        result_json: None,
         timestamp_ms: now_ms(),
     };
     if let Err(error) = state.send_event_to_agent(&root_agent.agent_id, event) {
@@ -859,6 +979,20 @@ fn channel_event_from_entry(entry: &ChatterEntry, replay: bool) -> AgentChannelE
         mentions: entry.mentions.clone(),
         replay,
         ping_id: None,
+        delivery_reason: None,
+        subscription_scope: None,
+        subscription_direction: None,
+        action: None,
+        subject_tile_id: None,
+        peer_tile_id: None,
+        caller_tile_id: None,
+        caller_agent_id: None,
+        target_tile_id: None,
+        target_agent_id: None,
+        rpc_channel: None,
+        outcome: None,
+        args_json: None,
+        result_json: None,
         timestamp_ms: entry.timestamp_ms,
     }
 }
@@ -878,6 +1012,20 @@ fn broadcast_channel_event(state: &AppState, app: &AppHandle, entry: &ChatterEnt
         .unwrap_or_default();
     for agent_id in failed {
         let _ = mark_agent_dead(state, app, &agent_id);
+    }
+}
+
+fn notify_root_about_system_entry(state: &AppState, app: &AppHandle, entry: &ChatterEntry) {
+    let Ok(root_agent) = session_root_agent(state, &entry.session_id) else {
+        return;
+    };
+    if let Err(error) = state.send_event_to_agent(&root_agent.agent_id, channel_event_from_entry(entry, false)) {
+        log::warn!(
+            "Failed to deliver system event to root agent {} in session {}: {error}",
+            root_agent.agent_id,
+            entry.session_id
+        );
+        let _ = mark_agent_dead(state, app, &root_agent.agent_id);
     }
 }
 
@@ -919,7 +1067,7 @@ fn process_dead_agent(state: &AppState, app: &AppHandle, info: crate::agent::Age
     }
     let entry = build_sign_off_entry(&info.session_id, &info.display_name);
     append_chatter_entry(state, app, entry.clone())?;
-    broadcast_public_event(state, app, &entry);
+    notify_root_about_system_entry(state, app, &entry);
     emit_agent_state(app, state);
     if info.agent_role == AgentRole::Root {
         if let Err(error) = crate::commands::repair_root_agent(app.clone(), &info) {
@@ -986,6 +1134,20 @@ fn notify_agents_about_connection_change(
             mentions: Vec::new(),
             replay: false,
             ping_id: None,
+            delivery_reason: None,
+            subscription_scope: None,
+            subscription_direction: None,
+            action: None,
+            subject_tile_id: None,
+            peer_tile_id: None,
+            caller_tile_id: None,
+            caller_agent_id: None,
+            target_tile_id: None,
+            target_agent_id: None,
+            rpc_channel: None,
+            outcome: None,
+            args_json: None,
+            result_json: None,
             timestamp_ms: now_ms(),
         };
         if let Err(error) = state.send_event_to_agent(&agent.agent_id, event) {
@@ -1013,6 +1175,20 @@ fn ensure_root_for_sender(
     let sender = resolve_sender_context(state, sender_agent_id, sender_tile_id)?;
     ensure_root_sender(&sender, action)?;
     Ok(sender)
+}
+
+fn ensure_worker_for_sender(
+    state: &AppState,
+    sender_agent_id: Option<String>,
+    sender_tile_id: Option<String>,
+    action: &str,
+) -> Result<SenderContext, String> {
+    let sender = resolve_sender_context(state, sender_agent_id, sender_tile_id)?;
+    match sender.sender_agent_role {
+        Some(AgentRole::Worker) => Ok(sender),
+        Some(AgentRole::Root) => Err(format!("root agents may not call {action}; use the root tile_* subscription tools instead")),
+        None => Err(format!("{action} requires a live worker agent sender")),
+    }
 }
 
 fn maybe_respawn_root_agent(
@@ -1268,6 +1444,7 @@ fn find_open_position(
         y: snap_to_grid(desired_y),
         width,
         height,
+        locked: false,
     };
     if !overlaps(&candidate) {
         return candidate;
@@ -1292,6 +1469,7 @@ fn find_open_position(
                 y: snap_to_grid(y),
                 width,
                 height,
+                locked: false,
             };
             if !overlaps(&candidate) {
                 return candidate;
@@ -1304,6 +1482,7 @@ fn find_open_position(
         y: snap_to_grid(desired_y + occupied_ids.len() as f64 * (height + GAP)),
         width,
         height,
+        locked: false,
     }
 }
 
@@ -1430,6 +1609,7 @@ fn tile_state_from_info(tile: &network::SessionTileInfo) -> TileState {
         y: tile.y,
         width: tile.width,
         height: tile.height,
+        locked: false,
     }
 }
 
@@ -1512,6 +1692,10 @@ fn apply_create_layout(
             y: y.unwrap_or(tile.y),
             width: width.unwrap_or(tile.width),
             height: height.unwrap_or(tile.height),
+            locked: state
+                .get_tile_state(&tile.tile_id)
+                .map(|entry| entry.locked)
+                .unwrap_or(false),
         },
         tile.pane_id.is_some() && (width.is_some() || height.is_some()),
     )
@@ -1605,6 +1789,10 @@ fn session_network_tiles(
         Path::new(runtime::database_path()),
         work::WorkListScope::CurrentSession(session_id.to_string()),
     )?;
+    let work_item_by_tile_id = work_items
+        .iter()
+        .map(|item| (item.tile_id.clone(), item.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
     let layout_entries = session_layout_entries(state, &snapshot, session_id, &work_items);
     let mut tiles = Vec::new();
     for record in state.list_tile_records_in_session(session_id)? {
@@ -1625,7 +1813,12 @@ fn session_network_tiles(
         let agent_role = preferred_agent_role_for_record(state, &record)?;
         let kind = network_tile_kind_for_parts(record.kind, agent_role, &window.name, &pane.title);
         let agent = preferred_agent_for_record(state, &record, kind)?;
-        let title = match agent.as_ref() {
+        let title = match kind {
+            network::NetworkTileKind::Work => work_item_by_tile_id
+                .get(&record.tile_id)
+                .map(|item| item.title.clone())
+                .unwrap_or_else(|| record.tile_id.clone()),
+            _ => match agent.as_ref() {
             Some(agent)
                 if matches!(
                     kind,
@@ -1637,6 +1830,7 @@ fn session_network_tiles(
             _ if !window.name.trim().is_empty() => window.name.clone(),
             _ if !pane.title.trim().is_empty() => pane.title.clone(),
             _ => pane.id.clone(),
+            },
         };
         let browser_extension = if kind == network::NetworkTileKind::Browser {
             crate::browser::browser_extension_info_for_pane(app, &record.pane_id)
@@ -1685,16 +1879,40 @@ fn session_network_tiles(
             network::NetworkTileKind::Shell => {
                 network::TileDetails::Shell(pane_tile_details(pane, window))
             }
-            network::NetworkTileKind::Work => unreachable!("work tiles are built from the work registry"),
+            network::NetworkTileKind::Work => {
+                let item = work_item_by_tile_id
+                    .get(&record.tile_id)
+                    .ok_or_else(|| format!("missing work item for tile {}", record.tile_id))?;
+                network::TileDetails::Work(network::WorkTileDetails {
+                    work_id: item.work_id.clone(),
+                    topic: item.topic.clone(),
+                    owner_agent_id: item.owner_agent_id.clone(),
+                    current_stage: item.current_stage,
+                    stages: item.stages.clone(),
+                    reviews: item.reviews.clone(),
+                    created_at: item.created_at,
+                    updated_at: item.updated_at,
+                })
+            }
         };
         let layout = layout_entries
-            .get(&window.id)
+            .get(&record.tile_id)
             .cloned()
-            .unwrap_or(TileState {
-                x: 0.0,
-                y: 0.0,
-                width: DEFAULT_TILE_WIDTH,
-                height: DEFAULT_TILE_HEIGHT,
+            .unwrap_or_else(|| match kind {
+                network::NetworkTileKind::Work => TileState {
+                    x: 0.0,
+                    y: 0.0,
+                    width: WORK_CARD_WIDTH,
+                    height: WORK_CARD_HEIGHT,
+                    locked: false,
+                },
+                _ => TileState {
+                    x: 0.0,
+                    y: 0.0,
+                    width: DEFAULT_TILE_WIDTH,
+                    height: DEFAULT_TILE_HEIGHT,
+                    locked: false,
+                },
             });
         let mut tile = network::SessionTileInfo {
             tile_id: record.tile_id.clone(),
@@ -1722,45 +1940,6 @@ fn session_network_tiles(
             );
         }
         tiles.push(tile);
-    }
-
-    for item in work_items {
-        let entry_id = item.tile_id.clone();
-        let layout = layout_entries
-            .get(&entry_id)
-            .cloned()
-            .unwrap_or(TileState {
-                x: 0.0,
-                y: 0.0,
-                width: WORK_CARD_WIDTH,
-                height: WORK_CARD_HEIGHT,
-            });
-        tiles.push(network::SessionTileInfo {
-            tile_id: entry_id,
-            session_id: session_id.to_string(),
-            kind: network::NetworkTileKind::Work,
-            title: item.title.clone(),
-            x: layout.x,
-            y: layout.y,
-            width: layout.width,
-            height: layout.height,
-            pane_id: None,
-            window_id: None,
-            parent_window_id: None,
-            command: None,
-            responds_to: network::responds_to(network::NetworkTileKind::Work),
-            message_api: network::message_api(network::NetworkTileKind::Work),
-            details: network::TileDetails::Work(network::WorkTileDetails {
-                work_id: item.work_id.clone(),
-                topic: item.topic.clone(),
-                owner_agent_id: item.owner_agent_id.clone(),
-                current_stage: item.current_stage,
-                stages: item.stages.clone(),
-                reviews: item.reviews.clone(),
-                created_at: item.created_at,
-                updated_at: item.updated_at,
-            }),
-        });
     }
 
     tiles.sort_by(|left, right| left.tile_id.cmp(&right.tile_id));
@@ -2227,6 +2406,107 @@ fn ensure_network_message_allowed(
     Err(message_not_supported(receiver.target_kind(), receiver.target_id(), message_name))
 }
 
+fn subscribable_actions_for_tile(
+    tile: &network::SessionTileInfo,
+    access: network::TileRpcAccess,
+) -> Vec<String> {
+    let mut actions = std::iter::once("get".to_string())
+        .chain(
+            network::dispatchable_messages_for_access(tile.kind, access)
+                .into_iter()
+                .map(|message_name| (*message_name).to_string()),
+        )
+        .collect::<Vec<_>>();
+    if access == network::TileRpcAccess::ReadWrite
+        && matches!(
+            &tile.details,
+            network::TileDetails::Browser(details) if details.extension.is_some()
+        )
+    {
+        actions.push("extension_call".to_string());
+    }
+    actions.sort();
+    actions.dedup();
+    actions
+}
+
+fn parse_validated_subscription_event(
+    tile: &network::SessionTileInfo,
+    access: network::TileRpcAccess,
+    selector: &str,
+) -> Result<(TileSubscriptionDirection, String), String> {
+    let (direction, action) = parse_tile_subscription_selector(selector)?;
+    let allowed = subscribable_actions_for_tile(tile, access);
+    if allowed.iter().any(|candidate| candidate == &action) {
+        return Ok((direction, action));
+    }
+    Err(format!(
+        "event action {} is not callable on tile {} right now; allowed actions: {}",
+        action,
+        tile.tile_id,
+        allowed.join(", "),
+    ))
+}
+
+fn resolve_root_tile_subscription(
+    app: &AppHandle,
+    state: &AppState,
+    sender: &SenderContext,
+    tile_id: &str,
+    selector: &str,
+    agent_id: &str,
+    scope: TileSubscriptionScope,
+) -> Result<TileSubscriptionRecord, String> {
+    let subject_tile = session_tile_by_id(app, state, &sender.session_id, tile_id)?;
+    let subscriber = state
+        .agent_info(agent_id)?
+        .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
+    if subscriber.session_id != sender.session_id {
+        return Err(format!(
+            "agent {} belongs to session {}, not {}",
+            agent_id, subscriber.session_id, sender.session_id
+        ));
+    }
+    let (direction, action) = parse_validated_subscription_event(
+        &subject_tile,
+        network::TileRpcAccess::ReadWrite,
+        selector,
+    )?;
+    Ok(TileSubscriptionRecord {
+        session_id: sender.session_id.clone(),
+        scope,
+        subscriber_tile_id: subscriber.tile_id,
+        subject_tile_id: subject_tile.tile_id,
+        direction,
+        action,
+    })
+}
+
+fn resolve_worker_network_subscription(
+    app: &AppHandle,
+    state: &AppState,
+    sender: &SenderContext,
+    tile_id: &str,
+    selector: &str,
+) -> Result<TileSubscriptionRecord, String> {
+    let component = component_for_sender(app, state, sender)?;
+    let receiver = component_tile_receiver(&component, tile_id).map_err(|error| error.message)?;
+    let access = network_access_for_tile(sender, &component, &receiver.tile);
+    let (direction, action) = parse_validated_subscription_event(&receiver.tile, access, selector)?;
+    let subscriber_tile_id = sender
+        .sender_tile_id
+        .clone()
+        .ok_or_else(|| "network subscriptions require a sender tile".to_string())?;
+    Ok(TileSubscriptionRecord {
+        session_id: sender.session_id.clone(),
+        scope: TileSubscriptionScope::Network,
+        subscriber_tile_id,
+        subject_tile_id: receiver.target_id().to_string(),
+        direction,
+        action,
+    })
+}
+
 struct TileMessageReceiver {
     tile: network::SessionTileInfo,
 }
@@ -2642,9 +2922,8 @@ impl SessionMessageReceiver {
                 let args: NetworkCallMessageArgs = deserialize_message_args(args, message_name)?;
                 let component = component_for_sender(app, state, &sender).map_err(DispatchError::error)?;
                 let receiver = component_tile_receiver(&component, &args.tile_id)?;
-                ensure_network_message_allowed(&sender, &component, &receiver, &args.action)?;
                 let call_args = args.args.unwrap_or_else(|| serde_json::json!({}));
-                let result = dispatch_network_interface_message(
+                let dispatch_result = dispatch_network_interface_message(
                     state,
                     app,
                     channel,
@@ -2659,6 +2938,7 @@ impl SessionMessageReceiver {
                         "args": call_args.clone(),
                     }),
                     || {
+                        ensure_network_message_allowed(&sender, &component, &receiver, &args.action)?;
                         dispatch_result_with_log(
                             state,
                             app,
@@ -2674,7 +2954,18 @@ impl SessionMessageReceiver {
                             || receiver.send(app, state, &args.action, Some(&sender), Some(&call_args)),
                         )
                     },
-                )?;
+                );
+                emit_tile_call_events(
+                    state,
+                    app,
+                    channel,
+                    &sender,
+                    &receiver,
+                    &args.action,
+                    &call_args,
+                    &dispatch_result,
+                );
+                let result = dispatch_result?;
                 Ok(Some(serde_json::json!({
                     "tile_id": receiver.target_id(),
                     "action": args.action,
@@ -2701,6 +2992,7 @@ impl SessionMessageReceiver {
                         y: args.y,
                         width: current.width,
                         height: current.height,
+                        locked: current.locked,
                     },
                     false,
                 )
@@ -2726,6 +3018,7 @@ impl SessionMessageReceiver {
                         y: current.y,
                         width: args.width,
                         height: args.height,
+                        locked: current.locked,
                     },
                     tile.pane_id.is_some(),
                 )
@@ -2848,6 +3141,20 @@ impl SessionMessageReceiver {
                         mentions: Vec::new(),
                         replay: false,
                         ping_id: None,
+                        delivery_reason: None,
+                        subscription_scope: None,
+                        subscription_direction: None,
+                        action: None,
+                        subject_tile_id: None,
+                        peer_tile_id: None,
+                        caller_tile_id: None,
+                        caller_agent_id: None,
+                        target_tile_id: None,
+                        target_agent_id: None,
+                        rpc_channel: None,
+                        outcome: None,
+                        args_json: None,
+                        result_json: None,
                         timestamp_ms: now_ms(),
                     };
                     if let Err(error) = state.send_event_to_agent(&recipient.agent_id, event) {
@@ -2942,6 +3249,8 @@ impl HerdMessageReceiver {
             "toolbar_spawn_work",
             "sidebar_open",
             "sidebar_close",
+            "settings_sidebar_open",
+            "settings_sidebar_close",
             "sidebar_select_item",
             "sidebar_move_selection",
             "sidebar_begin_rename",
@@ -3232,6 +3541,272 @@ fn session_component(
     })
 }
 
+fn rpc_channel_name(channel: TileMessageChannel) -> &'static str {
+    match channel {
+        TileMessageChannel::Cli => "cli",
+        TileMessageChannel::Socket => "socket",
+        TileMessageChannel::Mcp => "mcp",
+        TileMessageChannel::Internal => "internal",
+    }
+}
+
+fn tile_event_message(
+    reason: TileEventDeliveryReason,
+    direction: Option<TileSubscriptionDirection>,
+    action: &str,
+    subject_label: &str,
+    peer_label: &str,
+    outcome: &str,
+) -> String {
+    match reason {
+        TileEventDeliveryReason::ImplicitSelfTarget => {
+            format!("External call on your tile: {action} from {peer_label} ({outcome})")
+        }
+        TileEventDeliveryReason::Subscription => {
+            let direction_label = match direction.unwrap_or(TileSubscriptionDirection::In) {
+                TileSubscriptionDirection::In => "incoming",
+                TileSubscriptionDirection::Out => "outgoing",
+                TileSubscriptionDirection::Both => "bidirectional",
+            };
+            format!("Observed {direction_label} {action} on {subject_label} ({outcome})")
+        }
+    }
+}
+
+fn deliver_tile_event_to_agent(
+    state: &AppState,
+    app: &AppHandle,
+    agent_id: &str,
+    event: AgentChannelEvent,
+) {
+    if let Err(error) = state.send_event_to_agent(agent_id, event) {
+        log::warn!("Failed to deliver tile event to {agent_id}: {error}");
+        let _ = mark_agent_dead(state, app, agent_id);
+    }
+}
+
+fn subscriber_can_receive_network_tile_event(
+    app: &AppHandle,
+    state: &AppState,
+    subscription: &TileSubscriptionRecord,
+) -> Result<bool, String> {
+    if subscription.scope == TileSubscriptionScope::Tile {
+        return Ok(true);
+    }
+    let subscriber = SenderContext {
+        session_id: subscription.session_id.clone(),
+        sender_agent_id: state
+            .agent_info_by_tile(&subscription.subscriber_tile_id)?
+            .map(|agent| agent.agent_id),
+        display_name: "HERD".to_string(),
+        sender_agent_role: state
+            .agent_info_by_tile(&subscription.subscriber_tile_id)?
+            .map(|agent| agent.agent_role),
+        sender_tile_id: Some(subscription.subscriber_tile_id.clone()),
+        sender_window_id: state
+            .tile_record(&subscription.subscriber_tile_id)?
+            .map(|record| record.window_id),
+    };
+    let component = component_for_sender(app, state, &subscriber)?;
+    let Ok(receiver) = component_tile_receiver(&component, &subscription.subject_tile_id) else {
+        return Ok(false);
+    };
+    let access = network_access_for_tile(&subscriber, &component, &receiver.tile);
+    Ok(subscribable_actions_for_tile(&receiver.tile, access)
+        .iter()
+        .any(|action| action == &subscription.action))
+}
+
+fn matching_tile_event_subscriptions(
+    app: &AppHandle,
+    state: &AppState,
+    sender: &SenderContext,
+    receiver: &TileMessageReceiver,
+    action: &str,
+) -> Result<Vec<TileEventMatch>, String> {
+    let sender_tile_id = sender.sender_tile_id.as_deref();
+    let mut seen = BTreeSet::new();
+    let mut matches = Vec::new();
+    for subscription in state.list_tile_subscriptions_in_session(&sender.session_id)? {
+        if subscription.action != action {
+            continue;
+        }
+        let matched_direction = if subscription.subject_tile_id == receiver.target_id()
+            && subscription.direction.matches_incoming()
+        {
+            Some(TileSubscriptionDirection::In)
+        } else if sender_tile_id == Some(subscription.subject_tile_id.as_str())
+            && subscription.direction.matches_outgoing()
+        {
+            Some(TileSubscriptionDirection::Out)
+        } else {
+            None
+        };
+        let Some(matched_direction) = matched_direction else {
+            continue;
+        };
+        if !subscriber_can_receive_network_tile_event(app, state, &subscription)? {
+            continue;
+        }
+        let key = format!(
+            "{:?}::{}::{}::{}::{:?}",
+            subscription.scope,
+            subscription.subscriber_tile_id,
+            subscription.subject_tile_id,
+            subscription.action,
+            matched_direction,
+        );
+        if seen.insert(key) {
+            matches.push(TileEventMatch {
+                subscription,
+                matched_direction,
+            });
+        }
+    }
+    Ok(matches)
+}
+
+fn emit_tile_call_events(
+    state: &AppState,
+    app: &AppHandle,
+    channel: TileMessageChannel,
+    sender: &SenderContext,
+    receiver: &TileMessageReceiver,
+    action: &str,
+    args: &serde_json::Value,
+    result: &DispatchResult,
+) {
+    let outcome = dispatch_outcome_string(result);
+    let subject_label = tile_label(&receiver.tile);
+    let target_agent = state.agent_info_by_tile(receiver.target_id()).ok().flatten();
+    let target_agent_id = target_agent.as_ref().map(|agent| agent.agent_id.clone());
+    let target_tile_id = receiver.target_id().to_string();
+    let peer_tile_id = sender.sender_tile_id.clone();
+    let compact_args = compact_tile_event_value(args);
+    let compact_result = compact_tile_event_result(result);
+
+    if sender.sender_tile_id.as_deref() != Some(receiver.target_id())
+        && matches!(
+            receiver.tile.kind,
+            network::NetworkTileKind::Agent | network::NetworkTileKind::RootAgent
+        )
+    {
+        if let Some(target_agent) = target_agent.as_ref() {
+            if target_agent.alive {
+                let event = AgentChannelEvent {
+                    kind: AgentChannelEventKind::TileEvent,
+                    from_agent_id: sender.sender_agent_id.clone(),
+                    from_display_name: sender.display_name.clone(),
+                    to_agent_id: Some(target_agent.agent_id.clone()),
+                    to_display_name: Some(target_agent.display_name.clone()),
+                    message: tile_event_message(
+                        TileEventDeliveryReason::ImplicitSelfTarget,
+                        None,
+                        action,
+                        &subject_label,
+                        &sender.display_name,
+                        &outcome,
+                    ),
+                    channels: Vec::new(),
+                    mentions: Vec::new(),
+                    replay: false,
+                    ping_id: None,
+                    delivery_reason: Some(TileEventDeliveryReason::ImplicitSelfTarget),
+                    subscription_scope: None,
+                    subscription_direction: None,
+                    action: Some(action.to_string()),
+                    subject_tile_id: Some(target_tile_id.clone()),
+                    peer_tile_id: peer_tile_id.clone(),
+                    caller_tile_id: peer_tile_id.clone(),
+                    caller_agent_id: sender.sender_agent_id.clone(),
+                    target_tile_id: Some(target_tile_id.clone()),
+                    target_agent_id: Some(target_agent.agent_id.clone()),
+                    rpc_channel: Some(rpc_channel_name(channel).to_string()),
+                    outcome: Some(outcome.clone()),
+                    args_json: Some(compact_args.clone()),
+                    result_json: compact_result.clone(),
+                    timestamp_ms: now_ms(),
+                };
+                deliver_tile_event_to_agent(state, app, &target_agent.agent_id, event);
+            }
+        }
+    }
+
+    let matches = match matching_tile_event_subscriptions(app, state, sender, receiver, action) {
+        Ok(matches) => matches,
+        Err(error) => {
+            log::warn!("Failed to resolve matching tile subscriptions for {action}: {error}");
+            return;
+        }
+    };
+
+    for matched in matches {
+        let Some(subscriber_agent) = state
+            .agent_info_by_tile(&matched.subscription.subscriber_tile_id)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        if !subscriber_agent.alive {
+            continue;
+        }
+        if target_agent_id.as_deref() == Some(subscriber_agent.agent_id.as_str())
+            && matched.subscription.subject_tile_id == target_tile_id
+            && matched.matched_direction == TileSubscriptionDirection::In
+            && sender.sender_tile_id.as_deref() != Some(receiver.target_id())
+        {
+            continue;
+        }
+        let subject_label = resolve_tile_label_by_id(
+            app,
+            state,
+            &matched.subscription.session_id,
+            &matched.subscription.subject_tile_id,
+        );
+        let matched_peer_tile_id = match matched.matched_direction {
+            TileSubscriptionDirection::In => sender.sender_tile_id.clone(),
+            TileSubscriptionDirection::Out => Some(target_tile_id.clone()),
+            TileSubscriptionDirection::Both => None,
+        };
+        let event = AgentChannelEvent {
+            kind: AgentChannelEventKind::TileEvent,
+            from_agent_id: sender.sender_agent_id.clone(),
+            from_display_name: sender.display_name.clone(),
+            to_agent_id: Some(subscriber_agent.agent_id.clone()),
+            to_display_name: Some(subscriber_agent.display_name.clone()),
+            message: tile_event_message(
+                TileEventDeliveryReason::Subscription,
+                Some(matched.matched_direction),
+                action,
+                &subject_label,
+                &sender.display_name,
+                &outcome,
+            ),
+            channels: Vec::new(),
+            mentions: Vec::new(),
+            replay: false,
+            ping_id: None,
+            delivery_reason: Some(TileEventDeliveryReason::Subscription),
+            subscription_scope: Some(matched.subscription.scope),
+            subscription_direction: Some(matched.matched_direction),
+            action: Some(action.to_string()),
+            subject_tile_id: Some(matched.subscription.subject_tile_id.clone()),
+            peer_tile_id: matched_peer_tile_id,
+            caller_tile_id: peer_tile_id.clone(),
+            caller_agent_id: sender.sender_agent_id.clone(),
+            target_tile_id: Some(target_tile_id.clone()),
+            target_agent_id: target_agent_id.clone(),
+            rpc_channel: Some(rpc_channel_name(channel).to_string()),
+            outcome: Some(outcome.clone()),
+            args_json: Some(compact_args.clone()),
+            result_json: compact_result.clone(),
+            timestamp_ms: now_ms(),
+        };
+        deliver_tile_event_to_agent(state, app, &subscriber_agent.agent_id, event);
+    }
+}
+
 fn update_tile_layout(
     app: &AppHandle,
     state: &AppState,
@@ -3468,6 +4043,8 @@ fn test_driver_message_name(request: &TestDriverRequest) -> &'static str {
         TestDriverRequest::ToolbarSpawnWork { .. } => "toolbar_spawn_work",
         TestDriverRequest::SidebarOpen => "sidebar_open",
         TestDriverRequest::SidebarClose => "sidebar_close",
+        TestDriverRequest::SettingsSidebarOpen => "settings_sidebar_open",
+        TestDriverRequest::SettingsSidebarClose => "settings_sidebar_close",
         TestDriverRequest::SidebarSelectItem { .. } => "sidebar_select_item",
         TestDriverRequest::SidebarMoveSelection { .. } => "sidebar_move_selection",
         TestDriverRequest::SidebarBeginRename => "sidebar_begin_rename",
@@ -3553,6 +4130,20 @@ async fn agent_ping_loop(state: AppState, app: AppHandle) {
                 mentions: Vec::new(),
                 replay: false,
                 ping_id: Some(ping_id),
+                delivery_reason: None,
+                subscription_scope: None,
+                subscription_direction: None,
+                action: None,
+                subject_tile_id: None,
+                peer_tile_id: None,
+                caller_tile_id: None,
+                caller_agent_id: None,
+                target_tile_id: None,
+                target_agent_id: None,
+                rpc_channel: None,
+                outcome: None,
+                args_json: None,
+                result_json: None,
                 timestamp_ms: now_ms(),
             };
             if state.send_event_to_agent(&agent_id, event).is_err() {
@@ -3650,7 +4241,7 @@ async fn handle_agent_event_subscription(
     if subscription.signed_on {
         let entry = build_sign_on_entry(&subscription.info.session_id, &subscription.info.display_name);
         let _ = append_chatter_entry(&state, &app, entry.clone());
-        broadcast_public_event(&state, &app, &entry);
+        notify_root_about_system_entry(&state, &app, &entry);
         emit_agent_state(&app, &state);
     }
 
@@ -3670,6 +4261,20 @@ async fn handle_agent_event_subscription(
             mentions: Vec::new(),
             replay: false,
             ping_id: None,
+            delivery_reason: None,
+            subscription_scope: None,
+            subscription_direction: None,
+            action: None,
+            subject_tile_id: None,
+            peer_tile_id: None,
+            caller_tile_id: None,
+            caller_agent_id: None,
+            target_tile_id: None,
+            target_agent_id: None,
+            rpc_channel: None,
+            outcome: None,
+            args_json: None,
+            result_json: None,
             timestamp_ms: now_ms(),
         };
         let _ = state.send_event_to_agent(&agent_id, welcome);
@@ -4400,6 +5005,69 @@ fn handle_command(
             )
         }
 
+        SocketCommand::NetworkSubscribe { tile_id, event, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_worker_for_sender(state, sender_agent_id, sender_tile_id, "network_subscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            match resolve_worker_network_subscription(app, state, &sender, &tile_id, &event)
+                .and_then(|record| state.add_tile_subscription(record.clone()).map(|_| record))
+            {
+                Ok(record) => SocketResponse::success(Some(serde_json::json!(tile_subscription_view(state, &record)))),
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::NetworkUnsubscribe { tile_id, event, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_worker_for_sender(state, sender_agent_id, sender_tile_id, "network_unsubscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let record = match resolve_worker_network_subscription(app, state, &sender, &tile_id, &event) {
+                Ok(record) => record,
+                Err(error) => return SocketResponse::error(error),
+            };
+            match state.remove_tile_subscription(
+                &record.session_id,
+                record.scope,
+                &record.subscriber_tile_id,
+                &record.subject_tile_id,
+                record.direction,
+                &record.action,
+            ) {
+                Ok(removed) => SocketResponse::success(Some(serde_json::json!({ "removed": removed }))),
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::NetworkSubscriptionList { tile_id, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_worker_for_sender(state, sender_agent_id, sender_tile_id, "network_subscription_list") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let Some(subscriber_tile_id) = sender.sender_tile_id.clone() else {
+                return SocketResponse::error("network_subscription_list requires a sender tile".to_string());
+            };
+            match state.list_tile_subscriptions_in_session(&sender.session_id) {
+                Ok(records) => {
+                    let list = records
+                        .into_iter()
+                        .filter(|record| {
+                            record.scope == TileSubscriptionScope::Network
+                                && record.subscriber_tile_id == subscriber_tile_id
+                                && tile_id
+                                    .as_deref()
+                                    .map(|value| record.subject_tile_id == value)
+                                    .unwrap_or(true)
+                        })
+                        .map(|record| tile_subscription_view(state, &record))
+                        .collect::<Vec<_>>();
+                    SocketResponse::success(Some(serde_json::json!(list)))
+                }
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
         SocketCommand::TileList { sender_agent_id, sender_tile_id, tile_type } => {
             let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "tile_list") {
                 Ok(sender) => sender,
@@ -4480,42 +5148,137 @@ fn handle_command(
                 }
             };
             let call_args = args.clone().unwrap_or_else(|| serde_json::json!({}));
-            dispatch_with_log(
+            let dispatch_result = (|| {
+                if let Some(component) = component.as_ref() {
+                    ensure_network_message_allowed(&sender, component, &receiver, &action)?;
+                }
+                let result = dispatch_result_with_log(
+                    state,
+                    app,
+                    TileMessageLogLayer::Message,
+                    channel,
+                    receiver.session_id().to_string(),
+                    receiver.target_id().to_string(),
+                    receiver.target_kind().to_string(),
+                    "tile_call",
+                    &action,
+                    Some(&sender),
+                    call_args.clone(),
+                    || receiver.send(app, state, &action, Some(&sender), Some(&call_args)),
+                )?;
+                Ok(Some(serde_json::json!({
+                    "tile_id": receiver.target_id(),
+                    "action": action,
+                    "result": result,
+                })))
+            })();
+            emit_tile_call_events(
                 state,
                 app,
                 channel,
-                receiver.session_id().to_string(),
-                receiver.target_id().to_string(),
-                receiver.target_kind().to_string(),
-                "tile_call",
+                &sender,
+                &receiver,
                 &action,
-                Some(&sender),
-                call_args.clone(),
-                || {
-                    if let Some(component) = component.as_ref() {
-                        ensure_network_message_allowed(&sender, component, &receiver, &action)?;
-                    }
-                    let result = dispatch_result_with_log(
-                        state,
-                        app,
-                        TileMessageLogLayer::Message,
-                        channel,
-                        receiver.session_id().to_string(),
-                        receiver.target_id().to_string(),
-                        receiver.target_kind().to_string(),
-                        "tile_call",
-                        &action,
-                        Some(&sender),
-                        call_args.clone(),
-                        || receiver.send(app, state, &action, Some(&sender), Some(&call_args)),
-                    )?;
-                    Ok(Some(serde_json::json!({
-                        "tile_id": receiver.target_id(),
-                        "action": action,
-                        "result": result,
-                    })))
-                },
+                &call_args,
+                &dispatch_result,
+            );
+            match dispatch_result {
+                Ok(data) => SocketResponse::success(data),
+                Err(error) => SocketResponse::error(error.message),
+            }
+        }
+
+        SocketCommand::TileSubscribe { tile_id, event, agent_id, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "tile_subscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            match resolve_root_tile_subscription(
+                app,
+                state,
+                &sender,
+                &tile_id,
+                &event,
+                &agent_id,
+                TileSubscriptionScope::Tile,
             )
+            .and_then(|record| state.add_tile_subscription(record.clone()).map(|_| record))
+            {
+                Ok(record) => SocketResponse::success(Some(serde_json::json!(tile_subscription_view(state, &record)))),
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::TileUnsubscribe { tile_id, event, agent_id, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "tile_unsubscribe") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let record = match resolve_root_tile_subscription(
+                app,
+                state,
+                &sender,
+                &tile_id,
+                &event,
+                &agent_id,
+                TileSubscriptionScope::Tile,
+            ) {
+                Ok(record) => record,
+                Err(error) => return SocketResponse::error(error),
+            };
+            match state.remove_tile_subscription(
+                &record.session_id,
+                record.scope,
+                &record.subscriber_tile_id,
+                &record.subject_tile_id,
+                record.direction,
+                &record.action,
+            ) {
+                Ok(removed) => SocketResponse::success(Some(serde_json::json!({ "removed": removed }))),
+                Err(error) => SocketResponse::error(error),
+            }
+        }
+
+        SocketCommand::TileSubscriptionList { tile_id, agent_id, sender_agent_id, sender_tile_id } => {
+            let sender = match ensure_root_for_sender(state, sender_agent_id, sender_tile_id, "tile_subscription_list") {
+                Ok(sender) => sender,
+                Err(error) => return SocketResponse::error(error),
+            };
+            let subscriber_tile_id = match agent_id {
+                Some(agent_id) => match state.agent_info(&agent_id) {
+                    Ok(Some(agent)) if agent.session_id == sender.session_id => Some(agent.tile_id),
+                    Ok(Some(agent)) => {
+                        return SocketResponse::error(format!(
+                            "agent {} belongs to session {}, not {}",
+                            agent_id, agent.session_id, sender.session_id
+                        ))
+                    }
+                    Ok(None) => return SocketResponse::error(format!("unknown agent: {agent_id}")),
+                    Err(error) => return SocketResponse::error(error),
+                },
+                None => None,
+            };
+            match state.list_tile_subscriptions_in_session(&sender.session_id) {
+                Ok(records) => {
+                    let list = records
+                        .into_iter()
+                        .filter(|record| {
+                            record.scope == TileSubscriptionScope::Tile
+                                && tile_id
+                                    .as_deref()
+                                    .map(|value| record.subject_tile_id == value)
+                                    .unwrap_or(true)
+                                && subscriber_tile_id
+                                    .as_deref()
+                                    .map(|value| record.subscriber_tile_id == value)
+                                    .unwrap_or(true)
+                        })
+                        .map(|record| tile_subscription_view(state, &record))
+                        .collect::<Vec<_>>();
+                    SocketResponse::success(Some(serde_json::json!(list)))
+                }
+                Err(error) => SocketResponse::error(error),
+            }
         }
 
         SocketCommand::TileMove {
